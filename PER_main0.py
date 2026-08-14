@@ -223,30 +223,38 @@ def train(num_iterations_H,
                     consecutive_satisfied_L = 0
                     prGreen('L: cost_limit halved to {}'.format(agent_L.cost_limit))
 
-            # Test
-            if episode_steps % 50 == 0:
-                r1_test, c1_test, r2_test, c2_test, r_test, c_test, action_test, cvm_test = S_test(agent_H, agent_L, env_test, rbb_system)
+            # Test: 9-case segmented evaluation every 480 episode steps
+            if episode_steps % 480 == 0:
+                case_metrics, overall = nine_case_test(
+                    agent_H, agent_L, env_test, rbb_system)
                 if use_csv:
                     df_test = pd.concat([df_test, pd.DataFrame([{
-                        'r1': r1_test,
-                        'c1': c1_test,
-                        'r2': r2_test,
-                        'c2': c2_test,
-                        'reward': r_test,
-                        'cost': c_test,
-                        'action': action_test,
-                    }])], ignore_index=True)
-                    if step % 50 == 0:
-                        df_test.to_csv('{}/df_test.csv'.format(output))
+                        'step': step,
+                        'wind_level': m['wind_level'],
+                        'price_level': m['price_level'],
+                        'r1': m['r1'], 'c1': m['c1'],
+                        'r2': m['r2'], 'c2': m['c2'],
+                        'reward': m['r'], 'cost': m['c'],
+                        'cvm': m['cvm'],
+                    } for m in case_metrics])], ignore_index=True)
+                    df_test.to_csv('{}/df_test9.csv'.format(output))
                 if upload:
-                    writer.add_scalar('test/r1', r1_test, step)
-                    writer.add_scalar('test/r2', r2_test, step)
-                    writer.add_scalar('test/c1', c1_test, step)
-                    writer.add_scalar('test/c2', c2_test, step)
-                    writer.add_scalar('test/r', r_test, step)
-                    writer.add_scalar('test/c', c_test, step)
-                    writer.add_scalar('test/r1+lam1*c1', r1_test - agent_H.lam * c1_test, step)
-                    writer.add_scalar('test/r2+lam2*c2', r2_test - agent_L.lam * c2_test, step)
+                    writer.add_scalar('test9/overall/r1', overall['r1'], step)
+                    writer.add_scalar('test9/overall/c1', overall['c1'], step)
+                    writer.add_scalar('test9/overall/r2', overall['r2'], step)
+                    writer.add_scalar('test9/overall/c2', overall['c2'], step)
+                    writer.add_scalar('test9/overall/r', overall['r'], step)
+                    writer.add_scalar('test9/overall/c', overall['c'], step)
+                    writer.add_scalar('test9/overall/cvm', overall['cvm'], step)
+                    for m in case_metrics:
+                        tag = 'test9/{}_{}'.format(m['wind_level'], m['price_level'])
+                        writer.add_scalar(tag + '/r1', m['r1'], step)
+                        writer.add_scalar(tag + '/c1', m['c1'], step)
+                        writer.add_scalar(tag + '/r2', m['r2'], step)
+                        writer.add_scalar(tag + '/c2', m['c2'], step)
+                        writer.add_scalar(tag + '/r', m['r'], step)
+                        writer.add_scalar(tag + '/c', m['c'], step)
+                        writer.add_scalar(tag + '/cvm', m['cvm'], step)
 
         
 
@@ -394,7 +402,7 @@ def train(num_iterations_H,
     if use_csv:
         df.to_csv('{}/df.csv'.format(output))
         df_episode.to_csv('{}/df_episode.csv'.format(output))
-        df_test.to_csv('{}/df_test.csv'.format(output))
+        df_test.to_csv('{}/df_test9.csv'.format(output))
 
 
 if __name__ == "__main__":

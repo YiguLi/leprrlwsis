@@ -46,6 +46,11 @@ class WindBattery:
         self.is_noise = False
         self.gauss_noise = 0.5
 
+        # 九例分段场景测试接口（45 步训练中测试）
+        self.scenario_wind = None
+        self.scenario_price = None
+        self.scenario_idx = 0
+
         # 上一步电网功率，用于计算波动
         self.P_G_prev = 0.0
 
@@ -215,6 +220,50 @@ class WindBattery:
         # 1. 真实t风机的总出力
         pw_tru2 = self.PowerOutput(self.u, applied_action_H[:self.num_turbine]) #TODO
         # 4. 更新下层电池
+        applied_action_L, penalty_L, P_G = self.GetBatteryActions(pw_tru, act_bat)
+
+        # 下一个时刻的obs
+        observation2_H = np.array([self.pr, self.u, self.E, P_G])
+
+        # 电网功率波动 |P_G(t) - P_G(t-1)|
+        P_F = abs(P_G - self.P_G_prev)
+        self.P_G_prev = P_G
+
+        done = done_L = False
+        info = {'P_F': P_F, 'P_G': P_G}
+        return pw_tru2, observation2_H, applied_action_L, penalty_L, done, done_L, info
+    
+
+    # ================================================================
+    # 九例分段场景测试（训练中每 480 episode step 一次，45 步）
+    # wind/price 完全由外部脚本序列给定，不走 CalPrice/CalWindSpeed。
+    # ================================================================
+    def ScenarioReset(self, wind_seq, price_seq):
+        self.scenario_wind = wind_seq
+        self.scenario_price = price_seq
+        self.scenario_idx = 0
+        self.E = 5.
+
+        self.pr = price_seq[0]
+        self.u = wind_seq[0]
+
+        a_temp = np.ones(self.num_turbine) * 0.3333
+        temp = self.PowerOutput(self.u, a_temp)
+        self.P_G_prev = temp  # 初始 P_G 作为波动计算的基准
+        obs = np.array([self.pr, self.u, self.E, temp])
+        return obs
+
+    def ScenarioStep(self, applied_action_H, act_bat, pw_tru):
+        # 前进到脚本序列的下一时刻
+        self.scenario_idx += 1
+        if self.scenario_idx >= len(self.scenario_wind):
+            self.scenario_idx = len(self.scenario_wind) - 1  # 末尾保持
+        self.pr = self.scenario_price[self.scenario_idx]
+        self.u = self.scenario_wind[self.scenario_idx]
+
+        # t+1 风机的总出力
+        pw_tru2 = self.PowerOutput(self.u, applied_action_H[:self.num_turbine])
+        # 更新下层电池
         applied_action_L, penalty_L, P_G = self.GetBatteryActions(pw_tru, act_bat)
 
         # 下一个时刻的obs

@@ -38,7 +38,7 @@ from PER_ddpg import SP_DDPG
 from util import *
 from prrbb_myfunc import (
     CheckAction, Normalize, Original,
-    Cal_Rew_PRRBB, prrbb_S_test,
+    Cal_Rew_PRRBB, nine_case_test,
     get_price_level,
 )
 from prrbb_rule_bess import RuleBasedBESS
@@ -279,30 +279,40 @@ def train_prrbb(num_iterations_H,
                 lamo_H = deepcopy(agent_H.lam)
                 lamo_L = deepcopy(agent_L.lam)
 
-            # Test evaluation
-            if episode_steps % 50 == 0:
-                r1_test, c1_test, r2_test, c2_test, r_test, c_test, action_test, cvm_test = \
-                    prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
-                                 num_iterations=5, test_csv=False, output=output, day=0)
+            # Test evaluation: 9-case segmented test every 480 episode steps
+            if episode_steps % 480 == 0:
+                case_metrics, overall = nine_case_test(
+                    agent_H, agent_L, env_test, rbb_system)
 
                 if use_csv:
                     df_test = pd.concat([df_test, pd.DataFrame([{
-                        'r1': r1_test, 'c1': c1_test,
-                        'r2': r2_test, 'c2': c2_test,
-                        'reward': r_test, 'cost': c_test,
-                        'action': action_test,
-                    }])], ignore_index=True)
-                    if step % 50 == 0:
-                        df_test.to_csv('{}/df_test_prrbb.csv'.format(output))
+                        'step': step,
+                        'wind_level': m['wind_level'],
+                        'price_level': m['price_level'],
+                        'r1': m['r1'], 'c1': m['c1'],
+                        'r2': m['r2'], 'c2': m['c2'],
+                        'reward': m['r'], 'cost': m['c'],
+                        'cvm': m['cvm'],
+                    } for m in case_metrics])], ignore_index=True)
+                    df_test.to_csv('{}/df_test9.csv'.format(output))
 
                 if upload:
-                    writer.add_scalar('test/r1', r1_test, step)
-                    writer.add_scalar('test/c1', c1_test, step)
-                    writer.add_scalar('test/r2', r2_test, step)
-                    writer.add_scalar('test/c2', c2_test, step)
-                    writer.add_scalar('test/r', r_test, step)
-                    writer.add_scalar('test/c', c_test, step)
-                    writer.add_scalar('test/cvm', cvm_test, step)
+                    writer.add_scalar('test9/overall/r1', overall['r1'], step)
+                    writer.add_scalar('test9/overall/c1', overall['c1'], step)
+                    writer.add_scalar('test9/overall/r2', overall['r2'], step)
+                    writer.add_scalar('test9/overall/c2', overall['c2'], step)
+                    writer.add_scalar('test9/overall/r', overall['r'], step)
+                    writer.add_scalar('test9/overall/c', overall['c'], step)
+                    writer.add_scalar('test9/overall/cvm', overall['cvm'], step)
+                    for m in case_metrics:
+                        tag = 'test9/{}_{}'.format(m['wind_level'], m['price_level'])
+                        writer.add_scalar(tag + '/r1', m['r1'], step)
+                        writer.add_scalar(tag + '/c1', m['c1'], step)
+                        writer.add_scalar(tag + '/r2', m['r2'], step)
+                        writer.add_scalar(tag + '/c2', m['c2'], step)
+                        writer.add_scalar(tag + '/r', m['r'], step)
+                        writer.add_scalar(tag + '/c', m['c'], step)
+                        writer.add_scalar(tag + '/cvm', m['cvm'], step)
 
         # ================================================================
         # Logging
@@ -496,7 +506,7 @@ def train_prrbb(num_iterations_H,
     if use_csv:
         df.to_csv('{}/df_prrbb.csv'.format(output))
         df_episode.to_csv('{}/df_episode_prrbb.csv'.format(output))
-        df_test.to_csv('{}/df_test_prrbb.csv'.format(output))
+        df_test.to_csv('{}/df_test9.csv'.format(output))
 
 
 # =============================================================================

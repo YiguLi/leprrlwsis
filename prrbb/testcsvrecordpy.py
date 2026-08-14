@@ -16,8 +16,8 @@ STEP_START = 20000
 STEP_END   = 25000
 
 # 风速分档（与 prrbb_myfunc 一致）
-WIND_LOW_MAX  = 7.5   # < 7.5 = 低风
-WIND_HIGH_MIN = 13.0  # >= 13 = 高风, 中间 = 中风
+WIND_LOW_MAX  = 7.0   # < 7.0 = 低风
+WIND_HIGH_MIN = 11.0  # >= 11.0 = 高风, 中间 = 中风
 
 
 def get_wind_level(u):

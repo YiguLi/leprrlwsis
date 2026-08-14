@@ -19,7 +19,7 @@ Upper (H) r1:
   │  HIGH    │  WT:0.75 B:0.8│  WT:0.85 B:1.0│  WT:0.95 B:1.2│
   └──────────┴───────────────┴───────────────┴───────────────┘
 
-  Wind boundaries: LOW < 7.5 m/s, MEDIUM [7.5, 13.0), HIGH >= 13.0 m/s
+  Wind boundaries: LOW < 7.0 m/s, MEDIUM [7.0, 11.0), HIGH >= 11.0 m/s
 
 Lower (L) r2 — PER baseline (no segmentation):
   r2 = 10.0 * shadow_profit - 700.0 * soc_deviation
@@ -55,8 +55,8 @@ def get_price_level(pr):
 # 2. Wind Speed Classification
 # =============================================================================
 
-WIND_LOW_MAX  = 7.5   # u < 7.5   → LOW wind
-WIND_HIGH_MIN = 13.0  # u >= 13.0 → HIGH wind, else MEDIUM
+WIND_LOW_MAX  = 7.0   # u < 7.0   → LOW wind
+WIND_HIGH_MIN = 11.0  # u >= 11.0 → HIGH wind, else MEDIUM
 
 
 def get_wind_level(u):
@@ -484,3 +484,153 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
 
     return (episode_r1, episode_c1, episode_r2, episode_c2,
             episode_reward, episode_cost, action_rbb, cvm)
+
+
+# =============================================================================
+# 10. Nine-Case Segmented Test (45 steps, every 480 training steps)
+# =============================================================================
+
+try:
+    from test_scenario import build_9case_scenario
+except ImportError:
+    import sys as _sys, os as _os
+    _HSRL_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    if _HSRL_ROOT not in _sys.path:
+        _sys.path.insert(0, _HSRL_ROOT)
+    from test_scenario import build_9case_scenario
+
+
+def nine_case_test(agent_H, agent_L, env_test, rbb_system,
+                   scenario=None, test_csv=False, output=None, seed=None):
+    """
+    PRRBB 45-step 9-case in-training test.
+
+    Wind bands: LOW < 7.0, MEDIUM [7.0, 11.0), HIGH >= 11.0 m/s.
+    Layout: wind LOW->MEDIUM->HIGH; within each wind segment price
+    LOW->MEDIUM->HIGH; each case = 5 steps = one upper-level period.
+
+    Returns
+    -------
+    case_metrics : list of dict (length 9)
+        Per-case 5-step mean r1/c1/r2/c2/r/c plus violation count cvm.
+    overall : dict
+        Mean over the 9 case means (cvm = total count).
+    """
+    if scenario is None:
+        wind_seq, price_seq, case_ids, blocks = build_9case_scenario(seed=seed)
+    else:
+        wind_seq, price_seq, case_ids, blocks = scenario
+
+    obs = env_test.ScenarioReset(wind_seq, price_seq)
+    norm_obs = Normalize(obs)
+    time = 1.0 / 60
+    agent_H.is_training = False
+    agent_L.is_training = False
+    step = 0
+    num_iterations = len(wind_seq)
+    n_per_case = num_iterations // len(blocks)
+
+    per_case = {i: {'r1': 0.0, 'c1': 0.0, 'r2': 0.0, 'c2': 0.0,
+                    'r': 0.0, 'c': 0.0, 'cvm': 0}
+                for i in range(len(blocks))}
+    df = pd.DataFrame()
+
+    while step < num_iterations:
+        if step % 5 == 0:
+            action_H = agent_H.select_action(norm_obs)
+            action_H, penalty_NN_H = CheckAction(action_H)
+            pw_tru = env_test.PowerOutput(obs[1], action_H)
+
+        norm_obs_L = np.append(norm_obs, action_H[-1])
+        action_L = agent_L.select_action(norm_obs_L)
+        action_L, penalty_NN_L = CheckAction(action_L)
+
+        action = np.concatenate((action_H, action_L))
+
+        pb_original = float(action[-1])
+        ptur = float(pw_tru)
+        pg_prev = float(obs[-1])
+        E_current = float(obs[2])
+
+        pbrule, rbb_info = rbb_system.compute_pbrule(
+            pb_original=pb_original, ptur=ptur,
+            pg_prev=pg_prev, E=E_current,
+        )
+
+        action_rbb = action.copy()
+        action_rbb[-1] = pbrule
+
+        pw_tru2, obs2, action_L_env, penalty_L, done, done_L, info = \
+            env_test.ScenarioStep(action_rbb[:6], action_rbb[6:], pw_tru)
+
+        action_rbb[6:] = action_L_env
+        norm_obs2 = Normalize(obs2)
+
+        r1, c1, r2, c2, details = Cal_Rew_PRRBB(
+            obs, obs2, action_rbb, rbb_info,
+            penalty_NN_H=penalty_NN_H, time=time,
+            ptur=ptur,
+        )
+
+        bi = step // 5
+        pc = per_case[bi]
+        pc['r1'] += r1
+        pc['c1'] += c1
+        pc['r2'] += r2
+        pc['c2'] += c2
+        pc['r'] += (r1 + r2)
+        pc['c'] += c1
+        if c1 > 0:
+            pc['cvm'] += 1
+
+        if test_csv:
+            df = pd.concat([df, pd.DataFrame([{
+                'step': step,
+                'case_wind': case_ids[step][0],
+                'case_price': case_ids[step][1],
+                'wind_level': details['wind_level'],
+                'price_level': details['price_level'],
+                'u': details['u'],
+                'pr': details['pr'],
+                'r1': r1, 'c1': c1, 'r2': r2, 'c2': c2,
+                'r': r1 + r2, 'c': c1,
+                'pbrule': rbb_info['pbrule'],
+                'clip_amount': rbb_info['clip_amount'],
+                'action': action_rbb,
+            }])], ignore_index=True)
+
+        norm_obs = norm_obs2
+        obs = obs2
+        pw_tru = pw_tru2
+        step += 1
+
+    agent_H.is_training = True
+    agent_L.is_training = True
+    if test_csv and output:
+        df.to_csv(f'{output}/test_s_prrbb_9case.csv', index=False)
+
+    case_metrics = []
+    for i, b in enumerate(blocks):
+        pc = per_case[i]
+        case_metrics.append({
+            'wind_level': b['wind_level'],
+            'price_level': b['price_level'],
+            'r1': pc['r1'] / n_per_case,
+            'c1': pc['c1'] / n_per_case,
+            'r2': pc['r2'] / n_per_case,
+            'c2': pc['c2'] / n_per_case,
+            'r': pc['r'] / n_per_case,
+            'c': pc['c'] / n_per_case,
+            'cvm': pc['cvm'],
+        })
+
+    overall = {
+        'r1': float(np.mean([m['r1'] for m in case_metrics])),
+        'c1': float(np.mean([m['c1'] for m in case_metrics])),
+        'r2': float(np.mean([m['r2'] for m in case_metrics])),
+        'c2': float(np.mean([m['c2'] for m in case_metrics])),
+        'r': float(np.mean([m['r'] for m in case_metrics])),
+        'c': float(np.mean([m['c'] for m in case_metrics])),
+        'cvm': int(sum(m['cvm'] for m in case_metrics)),
+    }
+    return case_metrics, overall

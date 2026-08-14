@@ -9,9 +9,9 @@
 #      - penalty_NN_H
 #
 #   Segmentation matrix (wind_level, price_level) → (w_wind, w_bess):
-#     LOW wind  (<7.5):   (1.2,0.8) (1.2,1.0) (1.2,1.2)
-#     MED wind ([7.5,13.0)): (1.0,0.8) (1.0,1.0) (1.2,1.2)
-#     HIGH wind (>=13.0):  (0.7,0.8) (0.8,1.0) (0.9,1.2)
+#     LOW wind  (<7.0):   (1.2,0.8) (1.2,1.0) (1.2,1.2)
+#     MED wind ([7.0,11.0)): (1.0,0.8) (1.0,1.0) (1.2,1.2)
+#     HIGH wind (>=11.0):  (0.7,0.8) (0.8,1.0) (0.9,1.2)
 #
 # Lower layer (L): PER baseline — NO segmentation.
 #   r2 = 10.0 * shadow_profit - 300.0 * soc_deviation

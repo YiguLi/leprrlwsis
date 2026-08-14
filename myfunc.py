@@ -243,6 +243,153 @@ def S_test(agent_H, agent_L, env_test, rbb_system, num_iterations = 5, test_csv 
     return episode_r1, episode_c1, episode_r2, episode_c2, episode_reward, episode_cost, action, cvm
 
 
+# =============================================================================
+# 九例分段测试（训练中每 480 episode step 一次，45 步）— PER 版
+# =============================================================================
+
+try:
+    from test_scenario import build_9case_scenario
+except ImportError:
+    import sys as _sys, os as _os
+    _HSRL_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    if _HSRL_ROOT not in _sys.path:
+        _sys.path.insert(0, _HSRL_ROOT)
+    from test_scenario import build_9case_scenario
+
+
+def nine_case_test(agent_H, agent_L, env_test, rbb_system,
+                   scenario=None, test_csv=False, output=None, seed=None):
+    """
+    PER 45-step 9-case in-training test (奖励与 S_test 一致，场景化执行)。
+
+    Wind bands: LOW < 7.0, MEDIUM [7.0, 11.0), HIGH >= 11.0 m/s.
+    Layout: wind LOW->MEDIUM->HIGH; within each wind segment price
+    LOW->MEDIUM->HIGH; each case = 5 steps = one upper-level period.
+
+    Returns
+    -------
+    case_metrics : list of dict (length 9)
+        Per-case 5-step mean r1/c1/r2/c2/r/c plus violation count cvm.
+    overall : dict
+        Mean over the 9 case means (cvm = total count).
+    """
+    if scenario is None:
+        wind_seq, price_seq, case_ids, blocks = build_9case_scenario(seed=seed)
+    else:
+        wind_seq, price_seq, case_ids, blocks = scenario
+
+    obs = env_test.ScenarioReset(wind_seq, price_seq)
+    norm_obs = Normalize(obs)
+    time = 1 / 60
+    agent_H.is_training = agent_L.is_training = False
+    step = 0
+    num_iterations = len(wind_seq)
+    n_per_case = num_iterations // len(blocks)
+
+    per_case = {i: {'r1': 0.0, 'c1': 0.0, 'r2': 0.0, 'c2': 0.0,
+                    'r': 0.0, 'c': 0.0, 'cvm': 0}
+                for i in range(len(blocks))}
+    df = pd.DataFrame()
+
+    while step < num_iterations:
+        if step % 5 == 0:
+            action_H = agent_H.select_action(norm_obs)
+            action_H, penalty_NN_H = CheckAction(action_H)
+            pw_tru = env_test.PowerOutput(obs[1], action_H)
+            pb_l = list()
+
+        norm_obs_L = np.append(norm_obs, action_H[-1])
+        action_L = agent_L.select_action(norm_obs_L)
+        action_L, penalty_NN_L = CheckAction(action_L)
+
+        action = np.concatenate((action_H, action_L))
+
+        pw_tru2, obs2, action_L, penalty_L, done, done_L, info = \
+            env_test.ScenarioStep(action[:6], action[6:], pw_tru)
+
+        action[6:] = action_L
+
+        norm_obs2 = Normalize(obs2)
+
+        r, c = Eval_Rew(obs, obs2, action)
+        r1 = obs[0] * obs2[-1] * time - penalty_NN_H
+        c1 = c
+        pb_l.append(action[-1])
+
+        # Compute pbrule for soft penalty (no hard clipping in PER)
+        pb_test = float(action[-1])
+        pbrule_test, rbb_info_test = rbb_system.compute_pbrule(
+            pb_original=pb_test,
+            ptur=float(pw_tru),
+            pg_prev=float(obs[-1]),
+            E=float(obs[2]),
+        )
+        clip_amount_test = rbb_info_test['clip_amount']
+        r2 = - 4.9 * max(-action[-1], 0) - 100. * clip_amount_test
+        c2 = 0.1 * abs(sum(pb_l) - action[env_test.num_turbine]) + c
+
+        bi = step // 5
+        pc = per_case[bi]
+        pc['r1'] += r1
+        pc['c1'] += c1
+        pc['r2'] += r2
+        pc['c2'] += c2
+        pc['r'] += r
+        pc['c'] += c
+        if c > 0:
+            pc['cvm'] += 1
+
+        if test_csv:
+            df = pd.concat([df, pd.DataFrame([{
+                'step': step,
+                'case_wind': case_ids[step][0],
+                'case_price': case_ids[step][1],
+                'u': obs2[1],
+                'pr': obs2[0],
+                'r1': r1, 'c1': c1, 'r2': r2, 'c2': c2,
+                'r': r, 'c': c,
+                'pbrule': pbrule_test,
+                'clip_amount': clip_amount_test,
+                'action': action,
+            }])], ignore_index=True)
+
+        norm_obs = norm_obs2
+        obs = obs2
+        pw_tru = pw_tru2
+        step += 1
+
+    agent_H.is_training = True
+    agent_L.is_training = True
+    if test_csv and output:
+        df.to_csv(f'{output}/test_s_9case.csv', index=False)
+
+    case_metrics = []
+    for i, b in enumerate(blocks):
+        pc = per_case[i]
+        case_metrics.append({
+            'wind_level': b['wind_level'],
+            'price_level': b['price_level'],
+            'r1': pc['r1'] / n_per_case,
+            'c1': pc['c1'] / n_per_case,
+            'r2': pc['r2'] / n_per_case,
+            'c2': pc['c2'] / n_per_case,
+            'r': pc['r'] / n_per_case,
+            'c': pc['c'] / n_per_case,
+            'cvm': pc['cvm'],
+        })
+
+    overall = {
+        'r1': float(np.mean([m['r1'] for m in case_metrics])),
+        'c1': float(np.mean([m['c1'] for m in case_metrics])),
+        'r2': float(np.mean([m['r2'] for m in case_metrics])),
+        'c2': float(np.mean([m['c2'] for m in case_metrics])),
+        'r': float(np.mean([m['r'] for m in case_metrics])),
+        'c': float(np.mean([m['c'] for m in case_metrics])),
+        'cvm': int(sum(m['cvm'] for m in case_metrics)),
+    }
+    return case_metrics, overall
+
+
 def H_test(agent_H, agent_L, env_test, num_iterations = 5, test_csv = False, output = None, day = 0):
     obs = env_test.TestReset(day)
     norm_obs = Normalize(obs)
