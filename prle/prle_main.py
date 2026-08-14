@@ -1,0 +1,777 @@
+#!/usr/bin/env python3
+"""
+PRLE (PRRBB + LLM Enhancement) — Main Training Loop
+=====================================================
+Modified from prrbb_main.py. Key changes:
+
+  1. Uses PRLE_DDPG agent (with PRLEBuffer for reward relabeling)
+  2. Dynamic wind thresholds via prle_myfunc (set_wind_thresholds / get_wind_thresholds)
+  3. Accumulates sub-step context for H-agent transitions
+  4. WindowStats tracking per 1440 steps
+  5. LLM-based threshold adjustment at 1440-step boundaries
+  6. Batch reward relabeling when thresholds change
+
+Preserved from PRRBB:
+  - 5-step block structure for upper/lower level interaction
+  - RBB hard clipping before env.step
+  - Curriculum learning with cost_limit halving
+  - Lambda adjustment
+  - Checkpointing and CSV logging
+"""
+
+import os
+import numpy as np
+import argparse
+from copy import deepcopy
+import torch
+
+import sys
+# Ensure both prle/ and parent (HSRL) directories are on path
+_PRLE_DIR = os.path.dirname(os.path.abspath(__file__))
+_HSRL_DIR = os.path.dirname(_PRLE_DIR)
+sys.path.insert(0, _PRLE_DIR)
+sys.path.insert(0, _HSRL_DIR)
+
+from env import WindBattery
+from prle.prle_ddpg import PRLE_DDPG
+from util import *
+from prle.prle_myfunc import (
+    CheckAction, Normalize, Original,
+    Cal_Rew_PRRBB, prrbb_S_test,
+    get_price_level,
+    get_wind_thresholds, set_wind_thresholds,
+    relabel_r1_substep, relabel_c1_substep,
+)
+from prle.prle_llm import WindowStats, llm_analyze_thresholds, create_llm_call_fn
+from prrbb.prrbb_rule_bess import RuleBasedBESS
+
+import pandas as pd
+from memory import RingBuffer
+
+from torch.utils.tensorboard import SummaryWriter
+
+import warnings
+warnings.filterwarnings("ignore")
+
+import matlab
+import matlab.engine
+
+
+def train_prle(num_iterations_H,
+               agent_H,
+               agent_L,
+               env,
+               env_test,
+               rbb_system,
+               output,
+               max_episode_length=None,
+               debug=False,
+               upload=False,
+               use_csv=False,
+               engine=None):
+    """
+    PRLE training loop with dynamic wind thresholds and LLM meta-controller.
+
+    Reward structure (same as PRRBB):
+      Upper (H): r1 = R_revenue_aug - R_degradation_soc_scaled - penalty_NN_H
+                 c1 = unfeasible_gap + SOC_danger_penalty
+      Lower (L): r2 = w_soc * R_soc_safety + w_shadow * R_shadow_follow
+                 c2 = W_FLUCT * R_fluctuation + W_FEAS * R_feasibility
+
+    PRLE additions:
+      - Sub-step context accumulation for reward relabeling
+      - WindowStats tracking per 1440 steps
+      - LLM threshold adjustment at window boundaries
+      - Buffer relabeling when thresholds change
+    """
+    agent_H.is_training = True
+    agent_L.is_training = True
+    step = episode = episode_steps = 0
+    episode_reward = episode_cost = episode_cost2 = episode_profit = 0.0
+    episode_bess_profit = 0.0
+    observation = None
+    time = 1.0 / 60
+    lamo_H = deepcopy(agent_H.lam)
+    lamo_L = deepcopy(agent_L.lam)
+
+    # Curriculum learning trackers
+    consecutive_satisfied_H = 0
+    consecutive_satisfied_L = 0
+
+    # ---- PRLE: Window statistics for LLM analysis ----
+    window_stats = WindowStats()
+    threshold_history = []         # records of past adjustments
+    min_episodes_before_llm = 3    # cold-start protection: wait for initial convergence
+    block_ctx_H = []               # accumulates sub-step context for current 5-step block
+
+    # ---- PRLE: Create LLM call function (reads from config file by default) ----
+    llm_call_fn = create_llm_call_fn(provider=args.llm_provider, config_path=args.llm_config)
+    prCyan('PRLE: LLM ready (provider={})'.format(
+        args.llm_provider or 'from config'))
+
+    # ---- PRLE: Startup API connectivity test ----
+    prCyan('PRLE: Testing LLM API connectivity...')
+    test_prompt = '请回复"OK"，不要包含任何其他内容。'
+    try:
+        test_response = llm_call_fn(test_prompt)
+        prGreen('PRLE: LLM API test passed. Response: "{}"'.format(
+            test_response.strip()[:120]))
+    except Exception as e:
+        prRed('PRLE: LLM API test FAILED — {}'.format(e))
+        prRed('PRLE: Training will continue but threshold adjustments will be skipped.')
+        llm_call_fn = None  # fall back to placeholder mode
+
+    if use_csv:
+        df = pd.DataFrame()
+        df_episode = pd.DataFrame()
+        df_test = pd.DataFrame()
+
+    # ---- 1440-step window counters for env metrics ----
+    window_violation_count = 0
+    window_power_sum = 0.0
+
+    while step < num_iterations_H:
+        # ---- Start of episode ----
+        prYellow('########### step:{} ###########'.format(step))
+        if observation is None:
+            observation = deepcopy(env.reset())  # [Pr, U, E, P_last]
+            norm_observation = Normalize(observation)
+            agent_H.reset(norm_observation)
+
+        # ================================================================
+        # Upper Level (H): WT agent + shadow price signal
+        # ================================================================
+        if episode_steps % 5 == 0:
+            sum_r1 = 0.0
+            sum_c1 = 0.0
+            block_ctx_H = []  # reset sub-step context for new 5-step block
+            if step <= args.warmup:
+                applied_action_H = original_action_H = agent_H.random_action()
+                penalty_NN_H = 0
+            else:
+                original_action_H = agent_H.select_action(norm_observation)
+                applied_action_H, penalty_NN_H = CheckAction(original_action_H)
+            norm_observation_H = norm_observation
+            pw_tru = env.PowerOutput(observation[1], applied_action_H)
+
+        prGreen('--H-- ori a_t = {}'.format(round_list(original_action_H, 3)))
+
+        # ================================================================
+        # Lower Level (L): BESS agent
+        # ================================================================
+        norm_observation_L = np.append(norm_observation, applied_action_H[-1])
+        prPurple('--L-- obs = {}.'.format(round_list(norm_observation_L, 3)))
+
+        if episode_steps % 5 == 0:
+            agent_L.reset(norm_observation_L)
+            pb_l = list()
+
+        if step <= args.warmup:
+            applied_action_L = original_action_L = agent_L.random_action()
+            penalty_NN_L = 0
+        else:
+            original_action_L = agent_L.select_action(norm_observation_L)
+            applied_action_L, penalty_NN_L = CheckAction(original_action_L)
+        prGreen('--L-- ori a_t = {}'.format(round_list(original_action_L, 3)))
+
+        # Assemble full action
+        action = np.concatenate((applied_action_H, applied_action_L))
+        original_action = action.copy()
+
+        # ================================================================
+        # RBB: Rule-Based BESS Clipping (hard clipping before env.step)
+        # ================================================================
+        pb_original = float(action[-1])
+        ptur = float(pw_tru)
+        pg_prev = float(observation[-1])
+        E_current = float(observation[2])
+
+        pbrule, rbb_info = rbb_system.compute_pbrule(
+            pb_original=pb_original,
+            ptur=ptur,
+            pg_prev=pg_prev,
+            E=E_current,
+        )
+
+        # Clip pb to pbrule before passing to environment
+        action_rbb = action.copy()
+        action_rbb[-1] = pbrule
+
+        # ---- Environment Step ----
+        pw_tru2, observation2, action_L_env, penalty_L, done, done_L, info = \
+            env.step(action_rbb[:6], action_rbb[6:], pw_tru)
+
+        action_rbb[6:] = action_L_env
+        prGreen('Applied action = {}.'.format(round_list(action_rbb, 3)))
+
+        norm_observation2 = Normalize(observation2)
+        norm_observation2_L = np.append(norm_observation2, applied_action_H[-1])
+
+        # ================================================================
+        # PRRBB Segmented Reward Computation (forward, with current thresholds)
+        # ================================================================
+        r1, c1, r2, c2, reward_details = Cal_Rew_PRRBB(
+            observation, observation2, action_rbb, rbb_info,
+            penalty_NN_H=penalty_NN_H, time=time,
+            ptur=ptur,
+        )
+
+        # Total reward and cost
+        r = r1 + r2
+        c = c1
+
+        sum_r1 += r1
+        sum_c1 += c1
+
+        # Track shadow price for logging
+        shadow_price = reward_details['shadow_price']
+
+        # ---- Track BESS original intent vs actual ----
+        pb_l.append(pb_original)
+
+        prGreen('r1 = {} (turb={}, bess={}, deg={})'.format(
+            round(r1, 3), round(reward_details['turbine_profit'], 3),
+            round(reward_details['bess_profit'], 3),
+            round(reward_details['degradation'], 3)))
+        prGreen('c1 = {} (fluct={})'.format(
+            round(c1, 3), round(reward_details['c1_fluct'], 3)))
+        prGreen('r2 = {} (shadow_profit={}, soc_dev={})'.format(
+            round(r2, 3), round(reward_details['shadow_profit'], 3),
+            round(reward_details['soc_deviation'], 3)))
+        prGreen('c2 = {} (clip_amount={})'.format(
+            round(c2, 3), round(reward_details['clip_amount'], 3)))
+        prGreen('price={} p_level={} wind={:.1f} w_level={} (wT={}, wB={})'.format(
+            reward_details['pr'], reward_details['price_level'],
+            reward_details['u'], reward_details['wind_level'],
+            reward_details['w_wind'], reward_details['w_bess']))
+
+        # ---- PRLE: Accumulate sub-step context for H-agent reward relabeling ----
+        sub_step_ctx = {
+            'u': float(observation[1]),
+            'pr': float(observation[0]),
+            'turbine_raw': float(reward_details['pr'] * ptur * time),
+            'bess_raw': float(-reward_details['pr'] * pbrule * time),
+            'degradation': float(490.0 * max(-pbrule, 0.0) * time),
+            'penalty_NN_H': float(penalty_NN_H),
+            'P_F': float(reward_details['P_F']),
+        }
+        block_ctx_H.append(sub_step_ctx)
+
+        # ---- PRLE: Window statistics tracking ----
+        window_stats.add(r1, reward_details['wind_level'],
+                         reward_details['P_F'], rbb_info['is_infeasible'])
+
+        # ---- 1440-step window: track actual grid fluctuation ----
+        if reward_details['P_F'] > 3.0 + 1e-4:
+            window_violation_count += 1
+        window_power_sum += observation2[-1]
+
+        # ================================================================
+        # Episode termination
+        # ================================================================
+        if max_episode_length and episode_steps >= max_episode_length - 1:
+            done = True
+
+        if episode_steps % 5 == 4:
+            # Upper agent observes cumulative r1, c1 over the 5-step block
+            # PRLE: pass accumulated sub-step context for reward relabeling
+            agent_H.observe_jump(
+                norm_observation_H, original_action_H,
+                sum_r1, sum_c1, norm_observation2, done,
+                context=list(block_ctx_H)  # pass a copy
+            )
+            done_L = True
+
+        # Lower agent observes per-step r2, c2 (no context needed — r2 has no wind dependency)
+        agent_L.observe_jump(
+            norm_observation_L, original_action_L,
+            r2, c2, norm_observation2_L, done_L,
+            context=None
+        )
+
+        # ================================================================
+        # Update Policies
+        # ================================================================
+        if step > args.warmup:
+            if episode_steps % 5 == 4:
+                update_num = 0
+                while update_num < 10:
+                    agent_H.update_policy()
+                    agent_L.update_policy()
+                    update_num += 1
+
+                    # Track consecutive satisfaction for curriculum learning
+                    if agent_H.lam_loss < 0:
+                        consecutive_satisfied_H += 1
+                    else:
+                        consecutive_satisfied_H = 0
+                    if agent_L.lam_loss < 0:
+                        consecutive_satisfied_L += 1
+                    else:
+                        consecutive_satisfied_L = 0
+
+                # Curriculum convergence: halve cost_limit when constraints
+                # are satisfied for 100 consecutive policy updates
+                if consecutive_satisfied_H >= 100:
+                    agent_H.cost_limit = max(agent_H.cost_limit / 2, 60.0)
+                    consecutive_satisfied_H = 0
+                    prGreen('H: cost_limit halved to {}'.format(agent_H.cost_limit))
+                if consecutive_satisfied_L >= 100:
+                    agent_L.cost_limit = max(agent_L.cost_limit / 2, 0.0)
+                    consecutive_satisfied_L = 0
+                    prGreen('L: cost_limit halved to {}'.format(agent_L.cost_limit))
+
+                # Lambda adjustment (backup mechanism)
+                if abs(lamo_H - agent_H.lam) <= 0.1:
+                    agent_H.cost_limit = max(agent_H.cost_limit / 2, 60.0)
+                if abs(lamo_L - agent_L.lam) <= 0.1:
+                    agent_L.cost_limit = agent_L.cost_limit / 2
+
+                lamo_H = deepcopy(agent_H.lam)
+                lamo_L = deepcopy(agent_L.lam)
+
+            # Test evaluation
+            if episode_steps % 50 == 0:
+                r1_test, c1_test, r2_test, c2_test, r_test, c_test, action_test, cvm_test = \
+                    prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
+                                 num_iterations=5, test_csv=False, output=output, day=0)
+
+                if use_csv:
+                    df_test = pd.concat([df_test, pd.DataFrame([{
+                        'r1': r1_test, 'c1': c1_test,
+                        'r2': r2_test, 'c2': c2_test,
+                        'reward': r_test, 'cost': c_test,
+                        'action': action_test,
+                    }])], ignore_index=True)
+                    if step % 50 == 0:
+                        df_test.to_csv('{}/df_test_prle.csv'.format(output))
+
+                if upload:
+                    writer.add_scalar('test/r1', r1_test, step)
+                    writer.add_scalar('test/c1', c1_test, step)
+                    writer.add_scalar('test/r2', r2_test, step)
+                    writer.add_scalar('test/c2', c2_test, step)
+                    writer.add_scalar('test/r', r_test, step)
+                    writer.add_scalar('test/c', c_test, step)
+                    writer.add_scalar('test/cvm', cvm_test, step)
+
+        # ================================================================
+        # Logging
+        # ================================================================
+        if use_csv:
+            df = pd.concat([df, pd.DataFrame([{
+                'step': step,
+                'observation': observation,
+                'observation2': observation2,
+                'norm_observation_L': norm_observation_L,
+                'original_action_H': original_action_H,
+                'original_action_L': original_action_L,
+                'action_original': original_action,
+                'action_rbb': action_rbb,
+                'r1': r1, 'c1': c1, 'r2': r2, 'c2': c2,
+                'reward': r, 'cost': c,
+                'lam1': agent_H.lam, 'lam2': agent_L.lam,
+                # RBB metrics
+                'pb_original': rbb_info['pb_original'],
+                'pbrule': rbb_info['pbrule'],
+                'pbfluctmin': rbb_info['pbfluctmin'],
+                'pbfluctmax': rbb_info['pbfluctmax'],
+                'pbphysicsmin': rbb_info['pbphysicsmin'],
+                'pbphysicsmax': rbb_info['pbphysicsmax'],
+                'pbrulemin': rbb_info['pbrulemin'],
+                'pbrulemax': rbb_info['pbrulemax'],
+                'clip_amount': rbb_info['clip_amount'],
+                'unfeasible_gap': rbb_info['unfeasible_gap'],
+                'soc': rbb_info['soc'],
+                'is_infeasible': float(rbb_info['is_infeasible']),
+                'inevitable_violation': rbb_info['inevitable_violation'],
+                # PRRBB price segmentation info
+                'wind_level': reward_details['wind_level'],
+                'price_level': reward_details['price_level'],
+                'w_wind': reward_details['w_wind'],
+                'w_bess': reward_details['w_bess'],
+                'pr': reward_details['pr'],
+                'u': reward_details['u'],
+                # PRRBB reward sub-components
+                'turbine_profit': reward_details['turbine_profit'],
+                'bess_profit': reward_details['bess_profit'],
+                'revenue': reward_details['revenue'],
+                'degradation': reward_details['degradation'],
+                'soc_deviation': reward_details['soc_deviation'],
+                'shadow_profit': reward_details['shadow_profit'],
+                'shadow_price': reward_details['shadow_price'],
+                'c1_fluct': reward_details['c1_fluct'],
+                'clip_amount': reward_details['clip_amount'],
+                'unfeasible_gap': reward_details['unfeasible_gap'],
+                'penalty_NN_H': penalty_NN_H,
+                'SOC': reward_details['SOC'],
+                'P_F': reward_details['P_F'],
+                'penalty_L': penalty_L,
+                'penalty_NN_L': penalty_NN_L,
+                # Convenience
+                'bess_profit': reward_details['shadow_profit'] - reward_details['degradation'],
+                # PRLE: current wind thresholds
+                'wind_low_max': get_wind_thresholds()[0],
+                'wind_high_min': get_wind_thresholds()[1],
+            }])], ignore_index=True)
+            if step % 50 == 0:
+                df.to_csv('{}/df_prle.csv'.format(output))
+
+        # ---- Periodic checkpoint (every 2000 steps) ----
+        if step > 0 and step % 2000 == 0:
+            agent_H.save_checkpoint(output, step)
+            agent_L.save_checkpoint(output, step)
+            prCyan('Checkpoint saved at step {}'.format(step))
+
+        if upload:
+            writer.add_scalar('r1', r1, step)
+            writer.add_scalar('c1', c1, step)
+            writer.add_scalar('r2', r2, step)
+            writer.add_scalar('c2', c2, step)
+            writer.add_scalar('wind_speed', env.u, step)
+            writer.add_scalar('reward', r, step)
+            writer.add_scalar('cost', c, step)
+            writer.add_scalar('lam1', agent_H.lam, step)
+            writer.add_scalar('lam2', agent_L.lam, step)
+            writer.add_scalar('d1', agent_H.cost_limit, step)
+            writer.add_scalar('d2', agent_L.cost_limit, step)
+            writer.add_scalar('soc', float(observation[2]), step)
+            writer.add_scalar('P_F', reward_details['P_F'], step)
+
+            # PRRBB wind×price segmentation
+            writer.add_scalar('seg/price_level',
+                              {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}.get(reward_details['price_level'], 0),
+                              step)
+            writer.add_scalar('seg/wind_level',
+                              {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}.get(reward_details['wind_level'], 0),
+                              step)
+            writer.add_scalar('seg/pr', reward_details['pr'], step)
+            writer.add_scalar('seg/u', reward_details['u'], step)
+            writer.add_scalar('seg/w_wind', reward_details['w_wind'], step)
+            writer.add_scalar('seg/w_bess', reward_details['w_bess'], step)
+
+            # PRRBB reward sub-components (upper): decomposed profit
+            writer.add_scalar('reward_upper/turbine_profit', reward_details['turbine_profit'], step)
+            writer.add_scalar('reward_upper/bess_profit', reward_details['bess_profit'], step)
+            writer.add_scalar('reward_upper/degradation', reward_details['degradation'], step)
+
+            # PRRBB reward sub-components (lower)
+            writer.add_scalar('reward_lower/shadow_profit', reward_details['shadow_profit'], step)
+            writer.add_scalar('reward_lower/soc_deviation', reward_details['soc_deviation'], step)
+            writer.add_scalar('reward_lower/shadow_price', shadow_price, step)
+            writer.add_scalar('reward_lower/clip_amount', reward_details['clip_amount'], step)
+
+            # RBB-specific metrics
+            writer.add_scalar('rbb/clip_amount', rbb_info['clip_amount'], step)
+            writer.add_scalar('rbb/unfeasible_gap', rbb_info['unfeasible_gap'], step)
+            writer.add_scalar('rbb/pbrule', float(pbrule), step)
+            writer.add_scalar('rbb/pb_original', pb_original, step)
+            writer.add_scalar('rbb/is_infeasible', float(rbb_info['is_infeasible']), step)
+            writer.add_scalar('rbb/inevitable_violation', rbb_info['inevitable_violation'], step)
+
+            # PRLE: dynamic wind thresholds
+            wind_low, wind_high = get_wind_thresholds()
+            writer.add_scalar('prle/wind_low_max', wind_low, step)
+            writer.add_scalar('prle/wind_high_min', wind_high, step)
+
+            if episode_steps % 5 == 4:
+                writer.add_scalar('sum_r1', sum_r1, step)
+                writer.add_scalar('sum_c1', sum_c1, step)
+
+            # ---- Action logging (every 5 steps) ----
+            if episode_steps % 5 == 4:
+                for i in range(5):
+                    writer.add_scalar('action/a_H_original_{}'.format(i),
+                                      original_action_H[i], step)
+                    writer.add_scalar('action/a_H_clipped_{}'.format(i),
+                                      applied_action_H[i], step)
+                writer.add_scalar('action/shadow_price_signal',
+                                  applied_action_H[5], step)
+                writer.add_scalar('action/pb_original', pb_original, step)
+                writer.add_scalar('action/pbrule', float(pbrule), step)
+
+            # ---- Env 1440-step window metrics ----
+            if step > 0 and step % 1440 == 0:
+                writer.add_scalar('env/window_violation_count',
+                                  window_violation_count, step)
+                writer.add_scalar('env/window_power_sum',
+                                  window_power_sum, step)
+                window_violation_count = 0
+                window_power_sum = 0.0
+
+        # ================================================================
+        # PRLE: LLM Threshold Adjustment at 1440-step boundaries
+        # ================================================================
+        if step > 0 and step % 1440 == 0:
+            prCyan('--- PRLE: 1440-step window boundary (step {}) ---'.format(step))
+
+            if episode >= min_episodes_before_llm:
+                current_low_max, current_high_min = get_wind_thresholds()
+                summary = window_stats.summary()
+
+                prCyan('Window summary: r1_avg={}, viol_rate={}, HIGH_pct={}%'.format(
+                    summary['r1_avg'], summary['violation_rate'],
+                    summary['high_wind']['pct']))
+
+                # Call LLM for threshold adjustment suggestions
+                adjust_low, adjust_high = llm_analyze_thresholds(
+                    summary, threshold_history,
+                    current_low_max, current_high_min,
+                    llm_call_fn=llm_call_fn
+                )
+
+                new_low_max = current_low_max + adjust_low
+                new_high_min = current_high_min + adjust_high
+                actual_low, actual_high = set_wind_thresholds(new_low_max, new_high_min)
+
+                if actual_low != current_low_max or actual_high != current_high_min:
+                    prYellow('PRLE: Thresholds changed: '
+                             'LOW_MAX {:.1f}→{:.1f}, HIGH_MIN {:.1f}→{:.1f}'.format(
+                                 current_low_max, actual_low,
+                                 current_high_min, actual_high))
+
+                    # ---- Relabel replay buffer rewards with new thresholds ----
+                    n_relabeled = agent_H.memory.relabel_all(relabel_r1_substep, relabel_c1_substep)
+                    prGreen('PRLE: Relabeled {} H-agent transitions'.format(n_relabeled))
+                    # L-agent buffer: no relabeling needed (r2 has no wind dependency)
+
+                    # Record this adjustment in history
+                    threshold_history.append({
+                        'step': step,
+                        'episode': episode,
+                        'old_low_max': current_low_max,
+                        'new_low_max': actual_low,
+                        'old_high_min': current_high_min,
+                        'new_high_min': actual_high,
+                        'summary': summary,
+                    })
+                else:
+                    prCyan('PRLE: No threshold change needed')
+            else:
+                prCyan('PRLE: Skipping LLM analysis (cold start: episode {} < {})'.format(
+                    episode, min_episodes_before_llm))
+
+            # Reset window statistics for the next window
+            window_stats.reset()
+
+        # ================================================================
+        # State transition
+        # ================================================================
+        step += 1
+        episode_steps += 1
+        episode_reward += r
+        episode_cost += c
+        episode_cost2 += c2
+        episode_profit += observation2[-1] * observation[0] * time \
+            - 4.9 * max(-float(pbrule), 0) * time
+        episode_bess_profit += reward_details['shadow_profit'] \
+            - 4.9 * max(-float(pbrule), 0) * time
+
+        norm_observation = deepcopy(norm_observation2)
+        observation = deepcopy(observation2)
+        pw_tru = pw_tru2
+
+        # ================================================================
+        # End of Episode
+        # ================================================================
+        if done:
+            agent_H.save_model(output)
+            agent_L.save_model(output)
+            prGreen('##########{}: episode_profit:{} episode_reward:{} step:{}'.format(
+                episode, round(episode_profit, 2), round(episode_reward, 2), step))
+
+            if upload:
+                writer.add_scalar('episode_reward', episode_reward, episode)
+                writer.add_scalar('episode_cost', episode_cost, episode)
+                writer.add_scalar('episode_cost2', episode_cost2, episode)
+                writer.add_scalar('episode_profit', episode_profit, episode)
+                writer.add_scalar('episode_bess_profit', episode_bess_profit, episode)
+                writer.add_scalar('wind_day', env.j, episode)
+                # PRLE: log thresholds per episode
+                wind_low, wind_high = get_wind_thresholds()
+                writer.add_scalar('prle/episode_wind_low_max', wind_low, episode)
+                writer.add_scalar('prle/episode_wind_high_min', wind_high, episode)
+
+            if use_csv:
+                wind_low, wind_high = get_wind_thresholds()
+                df_episode = pd.concat([df_episode, pd.DataFrame([{
+                    'episode': episode,
+                    'episode_reward': episode_reward,
+                    'episode_cost': episode_cost,
+                    'episode_cost2': episode_cost2,
+                    'episode_profit': episode_profit,
+                    'bess_profit': episode_bess_profit,
+                    'wind_day': env.j,
+                    'wind_low_max': wind_low,
+                    'wind_high_min': wind_high,
+                }])], ignore_index=True)
+                df_episode.to_csv('{}/df_episode_prle.csv'.format(output))
+
+            # Reset for next episode
+            observation = None
+            episode_steps = 0
+            episode_reward = episode_cost = episode_cost2 = episode_profit = 0.0
+            episode_bess_profit = 0.0
+            episode += 1
+
+    if use_csv:
+        df.to_csv('{}/df_prle.csv'.format(output))
+        df_episode.to_csv('{}/df_episode_prle.csv'.format(output))
+        df_test.to_csv('{}/df_test_prle.csv'.format(output))
+
+
+# =============================================================================
+# Main Entry Point
+# =============================================================================
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='PRLE: PRRBB + LLM Enhancement Training')
+
+    parser.add_argument('--mode', default='train', type=str,
+                        help='support option: train/test')
+    parser.add_argument('--env', default='PRLE', type=str,
+                        help='environment name')
+    parser.add_argument('--hidden1', default=16, type=int,
+                        help='hidden num of first fully connect layer')
+    parser.add_argument('--hidden2', default=100, type=int,
+                        help='hidden num of second fully connect layer')
+    parser.add_argument('--rate', default=0.01, type=float, help='learning rate')
+    parser.add_argument('--prate', default=0.0001, type=float,
+                        help='policy net learning rate (only for DDPG)')
+    parser.add_argument('--warmup', default=200, type=int,
+                        help='time without training but only filling the replay memory')
+    parser.add_argument('--discount', default=0.98, type=float, help='')
+    parser.add_argument('--bsize', default=32, type=int, help='minibatch size')
+    parser.add_argument('--rmsize', default=20000, type=int, help='memory size')
+    parser.add_argument('--window_length', default=1, type=int, help='')
+    parser.add_argument('--tau', default=0.001, type=float,
+                        help='moving average for target network')
+    parser.add_argument('--ou_theta', default=0.15, type=float, help='noise theta')
+    parser.add_argument('--ou_sigma', default=0.2, type=float, help='noise sigma')
+    parser.add_argument('--ou_mu', default=0.0, type=float, help='noise mu')
+    parser.add_argument('--validate_episodes', default=20, type=int,
+                        help='how many episode to perform during validate experiment')
+    parser.add_argument('--max_episode_length', default=500, type=int, help='')
+    parser.add_argument('--validate_steps', default=2000, type=int,
+                        help='how many steps to perform a validate experiment')
+    parser.add_argument('--output', default='output', type=str, help='')
+    parser.add_argument('--debug', dest='debug', action='store_true')
+    parser.add_argument('--init_w', default=0.003, type=float, help='')
+    parser.add_argument('--train_iter_H', default=200000, type=int,
+                        help='train iters each timestep')
+    parser.add_argument('--epsilon', default=50000, type=int,
+                        help='linear decay of exploration policy')
+    parser.add_argument('--seed', default=-1, type=int, help='')
+    parser.add_argument('--resume', default='default', type=str,
+                        help='Resuming model path for testing')
+    parser.add_argument('--cuda', default=True, type=bool,
+                        help='Whether to use CUDA')
+    parser.add_argument('--lam', default=3, type=float, help='safe constraint')
+    parser.add_argument('--lr_lam', default=0.1, type=float,
+                        help='learning rate for lambda')
+    parser.add_argument('--cost_single_limit', default=0.5, type=float,
+                        help='cost_bound for single step')
+    parser.add_argument('--PER_alpha', default=0.6, type=float,
+                        help='[0~1] convert the importance of TD error to priority')
+    parser.add_argument('--PER_beta', default=0.4, type=float,
+                        help='importance-sampling, from initial value increasing to 1')
+    parser.add_argument('--PER_epsilon', default=0.01, type=float,
+                        help='small amount to avoid zero priority')
+    parser.add_argument('--beta_increment_per_sampling', default=0., type=float, help='')
+    parser.add_argument('--nb_turbine', default=5, type=int,
+                        help='number of turbines')
+
+    # RBB parameters
+    parser.add_argument('--rbb_fluctuation_limit', default=3.0, type=float,
+                        help='Max grid power fluctuation between steps (MW)')
+    parser.add_argument('--rbb_rated_power', default=10.0, type=float,
+                        help='BESS rated charge/discharge power (MW)')
+
+    # PRLE: LLM configuration
+    parser.add_argument('--llm_provider', default=None, type=str,
+                        choices=['anthropic', 'openai', 'deepseek'],
+                        help='LLM API provider (overrides config file). '
+                             'Default: read from prle/llm_config.json')
+    parser.add_argument('--llm_config', default=None, type=str,
+                        help='Path to LLM config JSON file. '
+                             'Default: prle/llm_config.json')
+
+    args = parser.parse_args()
+    args.output = get_output_folder(args.output, args.env)
+    if args.resume == 'default':
+        args.resume = 'output/{}-run0'.format(args.env)
+
+    max_E = 6.0
+    upload = True
+    use_csv = True
+    args.max_episode_length = 1440  # 1 day = 24h * 60m = 1440 steps
+    args.train_iter_H = 1000 * args.max_episode_length
+    args.seed = np.random.randint(0, 10000)
+    args.cost_single_limit = 1000.0
+
+    # Set device and random seeds
+    if args.cuda and torch.cuda.is_available():
+        device = torch.device("cuda:0")
+        torch.cuda.empty_cache()
+        print("Using GPU:", torch.cuda.get_device_name(device))
+    else:
+        device = torch.device("cpu")
+        print("Using CPU")
+
+    if args.seed > 0:
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if args.cuda:
+            torch.cuda.manual_seed(args.seed)
+            torch.cuda.manual_seed_all(args.seed)
+
+    if upload:
+        writer = SummaryWriter(args.output)
+        writer.add_scalar('seed', args.seed)
+
+    # Start MATLAB engine
+    engine = matlab.engine.start_matlab()
+
+    # Create environments
+    env = WindBattery(max_E, args.nb_turbine, upload, engine)
+    env_test = WindBattery(max_E, args.nb_turbine, upload, engine)
+
+    if args.seed > 0:
+        np.random.seed(args.seed)
+
+    # Create RBB system (hard clipping before env.step)
+    rbb_system = RuleBasedBESS(
+        max_E=max_E,
+        min_E_factor=0.0,
+        rated_power=args.rbb_rated_power,
+        eta_c=0.98,
+        eta_d=0.98,
+        time=1.0 / 60,
+        fluctuation_limit=args.rbb_fluctuation_limit,
+    )
+
+    # Create agents
+    # H agent: PRLE_DDPG with reward relabeling support (block_size auto-detected = 5)
+    agent_H = PRLE_DDPG(nb_states=4, nb_actions=6, args=args)
+    # L agent: also PRLE_DDPG (block_size=1, stores context=None — no wind dependency)
+    agent_L = PRLE_DDPG(nb_states=5, nb_actions=1, args=args, lam_max=100.0)
+    agent_L.cost_limit = 10.0  # L-layer c2 dedicated initial value
+
+    if args.mode == 'train':
+        train_prle(args.train_iter_H,
+                   agent_H,
+                   agent_L,
+                   env,
+                   env_test,
+                   rbb_system,
+                   args.output,
+                   max_episode_length=args.max_episode_length,
+                   debug=args.debug,
+                   upload=upload,
+                   use_csv=use_csv,
+                   engine=engine)
+    else:
+        raise RuntimeError('undefined mode {}'.format(args.mode))
+
+    if upload:
+        writer.close()
