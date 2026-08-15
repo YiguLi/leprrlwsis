@@ -13,9 +13,11 @@
 #     MED wind ([7.0,11.0)): (1.0,0.8) (1.0,1.0) (1.2,1.2)
 #     HIGH wind (>=11.0):  (0.7,0.8) (0.8,1.0) (0.9,1.2)
 #
-# Lower layer (L): PER baseline — NO segmentation.
-#   r2 = 10.0 * shadow_profit - 300.0 * soc_deviation
-#   soc_deviation: standard [1.2, 4.8] safe range only
+# Lower layer (L):
+#   r2 = 10.0 * shadow_profit - 100.0 * clip_amount
+#   c2 = 700.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束, 保留原系数)
+#   soc_deviation: wind-segmented safe ranges
+#     LOW [0.5, 5.5] / MEDIUM [1.0, 5.0] / HIGH [1.5, 4.5]
 #
 # Philosophy: Wind farm maximizes profit under safety constraints.
 # Low risk (low wind) → aggressive generation.

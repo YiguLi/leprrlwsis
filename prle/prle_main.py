@@ -73,10 +73,11 @@ def train_prle(num_iterations_H,
     PRLE training loop with dynamic wind thresholds and LLM meta-controller.
 
     Reward structure (same as PRRBB):
-      Upper (H): r1 = R_revenue_aug - R_degradation_soc_scaled - penalty_NN_H
-                 c1 = unfeasible_gap + SOC_danger_penalty
-      Lower (L): r2 = w_soc * R_soc_safety + w_shadow * R_shadow_follow
-                 c2 = W_FLUCT * R_fluctuation + W_FEAS * R_feasibility
+      Upper (H): r1 = w_wind*pr*ptur*time + w_bess*(-pr*pbrule*time)
+                      - 490*max(-pbrule,0)*time - penalty_NN_H
+                 c1 = risk_coeff * (10*max(0,P_F-3) + 0.1*P_F)
+      Lower (L): r2 = 10*shadow_profit - 100*clip_amount
+                 c2 = 700*soc_deviation  (SOC-safe 项, 拉格朗日约束)
 
     PRLE additions:
       - Sub-step context accumulation for reward relabeling
@@ -235,11 +236,11 @@ def train_prle(num_iterations_H,
             round(reward_details['degradation'], 3)))
         prGreen('c1 = {} (fluct={})'.format(
             round(c1, 3), round(reward_details['c1_fluct'], 3)))
-        prGreen('r2 = {} (shadow_profit={}, soc_dev={})'.format(
+        prGreen('r2 = {} (shadow_profit={}, clip={})'.format(
             round(r2, 3), round(reward_details['shadow_profit'], 3),
-            round(reward_details['soc_deviation'], 3)))
-        prGreen('c2 = {} (clip_amount={})'.format(
-            round(c2, 3), round(reward_details['clip_amount'], 3)))
+            round(reward_details['clip_amount'], 3)))
+        prGreen('c2 = {} (soc_dev={})'.format(
+            round(c2, 3), round(reward_details['soc_deviation'], 3)))
         prGreen('price={} p_level={} wind={:.1f} w_level={} (wT={}, wB={})'.format(
             reward_details['pr'], reward_details['price_level'],
             reward_details['u'], reward_details['wind_level'],
@@ -282,7 +283,7 @@ def train_prle(num_iterations_H,
             )
             done_L = True
 
-        # Lower agent observes per-step r2, c2 (no context needed — r2 has no wind dependency)
+        # Lower agent observes per-step r2, c2 (no relabeling context stored for L)
         agent_L.observe_jump(
             norm_observation_L, original_action_L,
             r2, c2, norm_observation2_L, done_L,
@@ -768,8 +769,8 @@ if __name__ == "__main__":
     # Create agents
     # H agent: PRLE_DDPG with reward relabeling support (block_size auto-detected = 5)
     agent_H = PRLE_DDPG(nb_states=4, nb_actions=6, args=args)
-    # L agent: also PRLE_DDPG (block_size=1, stores context=None — no wind dependency)
-    agent_L = PRLE_DDPG(nb_states=5, nb_actions=1, args=args, lam_max=100.0)
+    # L agent: also PRLE_DDPG (block_size=1, stores context=None — no relabeling context)
+    agent_L = PRLE_DDPG(nb_states=5, nb_actions=1, args=args, lam_max=10.0, lam_min=1.0)
     agent_L.cost_limit = 10.0  # L-layer c2 dedicated initial value
 
     if args.mode == 'train':

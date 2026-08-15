@@ -71,10 +71,11 @@ def train_prrbb(num_iterations_H,
     PRRBB training loop with segmented reward functions.
 
     Reward structure:
-      Upper (H): r1 = R_revenue_aug - R_degradation_soc_scaled - penalty_NN_H
-                 c1 = unfeasible_gap + SOC_danger_penalty
-      Lower (L): r2 = w_soc * R_soc_safety + w_shadow * R_shadow_follow
-                 c2 = W_FLUCT * R_fluctuation + W_FEAS * R_feasibility
+      Upper (H): r1 = w_wind*pr*ptur*time + w_bess*(-pr*pbrule*time)
+                      - 490*max(-pbrule,0)*time - penalty_NN_H
+                 c1 = risk_coeff * (10*max(0,P_F-3) + 0.1*P_F)
+      Lower (L): r2 = 10*shadow_profit - 100*clip_amount
+                 c2 = 700*soc_deviation  (SOC-safe 项, 拉格朗日约束)
     """
     agent_H.is_training = True
     agent_L.is_training = True
@@ -203,11 +204,11 @@ def train_prrbb(num_iterations_H,
             round(reward_details['degradation'], 3)))
         prGreen('c1 = {} (fluct={})'.format(
             round(c1, 3), round(reward_details['c1_fluct'], 3)))
-        prGreen('r2 = {} (shadow_profit={}, soc_dev={})'.format(
+        prGreen('r2 = {} (shadow_profit={}, clip={})'.format(
             round(r2, 3), round(reward_details['shadow_profit'], 3),
-            round(reward_details['soc_deviation'], 3)))
-        prGreen('c2 = {} (clip_amount={})'.format(
-            round(c2, 3), round(reward_details['clip_amount'], 3)))
+            round(reward_details['clip_amount'], 3)))
+        prGreen('c2 = {} (soc_dev={})'.format(
+            round(c2, 3), round(reward_details['soc_deviation'], 3)))
         prGreen('price={} p_level={} wind={:.1f} w_level={} (wT={}, wB={})'.format(
             reward_details['pr'], reward_details['price_level'],
             reward_details['u'], reward_details['wind_level'],
@@ -632,7 +633,7 @@ if __name__ == "__main__":
 
     # Create agents (PER convention: H=6 dims, L=5 dims)
     agent_H = SP_DDPG(nb_states=4, nb_actions=6, args=args)
-    agent_L = SP_DDPG(nb_states=5, nb_actions=1, args=args, lam_max=100.0)
+    agent_L = SP_DDPG(nb_states=5, nb_actions=1, args=args, lam_max=10.0, lam_min=1.0)
     agent_L.cost_limit = 10.0  # L-layer c2 dedicated initial value
 
     if args.mode == 'train':

@@ -127,8 +127,8 @@ def test_one_episode(env, agent_H, agent_L, rbb_system,
     Each project uses its own training reward structure:
       - PER:    r1 = revenue - penalty_NN_H - 490·max(-pbrule,0)·time
                 c1 = 10·max(P_F−3, 0)
-                r2 = 10·shadow_profit − 1000·soc_deviation
-                c2 = RBB clip_amount
+                r2 = 10·shadow_profit − 100·clip_amount
+                c2 = 1000·soc_deviation
       - PRRBB:  Cal_Rew_PRRBB (segmented wind×price reward)
       - PRLE:   same as PRRBB
 
@@ -231,7 +231,7 @@ def test_one_episode(env, agent_H, agent_L, rbb_system,
                   - 490.0 * max(-float(pbrule), 0.0) * TIME)
             c1 = c
 
-            # r2 = shadow_profit - SOC deviation penalty
+            # r2 = shadow_profit - 100*clip_amount (pbrule 裁剪惩罚)
             signal = action[5]  # shadow price signal from H-agent
             shadow_price = signal * 2.0  # (-0.5, 0.5) → (-1, 1)
             shadow_profit = -shadow_price * float(pbrule)
@@ -244,10 +244,10 @@ def test_one_episode(env, agent_H, agent_L, rbb_system,
             elif soc > soc_safe_max:
                 soc_deviation = soc - soc_safe_max
 
-            r2 = 10.0 * shadow_profit - 1000.0 * soc_deviation
+            r2 = 10.0 * shadow_profit - 100.0 * float(rbb_info['clip_amount'])
 
-            # c2 = RBB clip amount (how much the action was clipped)
-            c2 = rbb_info['clip_amount']
+            # c2 = SOC 越界项（拉格朗日约束, 原系数 1000/MWh）
+            c2 = 1000.0 * soc_deviation
 
             # Common metric
             profit_step = (obs2[-1] * obs[0]

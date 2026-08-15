@@ -9,7 +9,7 @@ thresholds (relabel_all), without changing the sample path.
 Context storage:
   - H-agent transitions: list of 5 sub-step dicts
     {'u', 'pr', 'turbine_raw', 'bess_raw', 'degradation', 'penalty_NN_H', 'P_F'}
-  - L-agent transitions: None (r2/c2 have no wind dependency)
+  - L-agent transitions: None (no relabeling context stored for L)
 
 Base class: PER_buffer.PrioritizedReplayBuffer
 """

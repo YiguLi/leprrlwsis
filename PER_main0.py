@@ -135,6 +135,7 @@ def train(num_iterations_H,
         r1 = observation[0] * observation2[-1] * time - penalty_NN_H - 490.0 * max(-float(pbrule), 0) * time
 
         # SOC safe: [1.5, 4.5] (conservative, equivalent to HIGH wind in segmented schemes)
+        # —— c2 拉格朗日约束项的 SOC 越界计算
         soc_safe_min = 1.5
         soc_safe_max = 4.5
         soc = float(observation2[2])
@@ -163,8 +164,8 @@ def train(num_iterations_H,
         is_infeasible = rbb_info['is_infeasible']
         inevitable_violation = rbb_info['inevitable_violation']
 
-        # r2: 影子电价利润 + degradation + fluctuation + socsafe惩罚(1000/MWh)
-        # signal(影子价格) * 2 映射到(-1, 1), 再乘以 -pbrule*time 得利润
+        # r2: 影子套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
+        # signal(影子价格) * 2 映射到(-1, 1), 再乘以 -pbrule 得利润
         shadow_price = signal * 2  # (-0.5,0.5) → (-1,1)
         # TODO: 对比试验 —— 暂时禁用影子电价奖励项
         SHADOW_PRICE_ENABLED = True
@@ -173,13 +174,10 @@ def train(num_iterations_H,
         else:
             shadow_profit = 0.0
 
-        r2 = 10.0 * shadow_profit - 1000.0 * soc_deviation
+        r2 = 10.0 * shadow_profit - 100.0 * clip_amount
 
-        # c2: clip_amount (RBB裁剪量作为约束违反)
-        # Note: when is_infeasible, clip_amount includes both preventable and
-        # inevitable portions. The agent should learn to avoid states prone to
-        # infeasibility, so we keep the full clip_amount as the cost signal.
-        c2 = clip_amount
+        # c2: SOC 越界项进入拉格朗日约束（保留原系数 1000/MWh）
+        c2 = 1000.0 * soc_deviation
 
         # prGreen('r2 = {}'.format(round(r2, 3)))
         # prGreen('c2 = {}'.format(round(c2, 3)))
@@ -564,7 +562,7 @@ if __name__ == "__main__":
 
 
     agent_H = SP_DDPG(nb_states = 4, nb_actions = 6, args = args)
-    agent_L = SP_DDPG(nb_states = 5, nb_actions = 1, args = args, lam_max=100.0)
+    agent_L = SP_DDPG(nb_states = 5, nb_actions = 1, args = args, lam_max=10.0, lam_min=1.0)
     agent_L.cost_limit = 10.0  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
     #TODO 是否预训练
     # agent_H.load_weights('output/1_2310S-run18')

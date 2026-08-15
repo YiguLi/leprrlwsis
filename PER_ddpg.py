@@ -16,7 +16,7 @@ criterion = nn.MSELoss()
 
 
 class SP_DDPG(object):
-    def __init__(self, nb_states, nb_actions, args, lam_max=None):
+    def __init__(self, nb_states, nb_actions, args, lam_max=None, lam_min=0.1):
         
         # Determine device first
         self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -82,6 +82,7 @@ class SP_DDPG(object):
         self.lam = args.lam
         self.lr_lam = args.lr_lam
         self.lam_max = lam_max  # None means no upper bound
+        self.lam_min = lam_min  # lower bound on dual variable
         # self.cost_limit = args.cost_single_limit * (1 - args.discount**args.max_episode_length)/(1-args.discount) # long tern cost <= d
         # self.cost_limit = 0
         self.cost_limit = args.cost_single_limit
@@ -185,7 +186,7 @@ class SP_DDPG(object):
         # prGreen(lam_loss)
         self.lam += lam_loss * self.lr_lam
         # prLightPurple('New lambda = {}'.format(self.lam))
-        self.lam = max(self.lam, 0.1) # TODO beta>0.1
+        self.lam = max(self.lam, self.lam_min)
         if self.lam_max is not None:
             self.lam = min(self.lam, self.lam_max)
 

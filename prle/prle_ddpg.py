@@ -30,7 +30,7 @@ class PRLE_DDPG(object):
       3. observe() accepts an optional 'context' parameter
     """
 
-    def __init__(self, nb_states, nb_actions, args, lam_max=None):
+    def __init__(self, nb_states, nb_actions, args, lam_max=None, lam_min=0.1):
 
         # Determine device first
         self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -97,6 +97,7 @@ class PRLE_DDPG(object):
         self.lam = args.lam
         self.lr_lam = args.lr_lam
         self.lam_max = lam_max  # None means no upper bound
+        self.lam_min = lam_min  # lower bound on dual variable
         self.cost_limit = args.cost_single_limit
         self.lam_loss = 0.0  # critic_c - cost_limit, updated in update_policy()
 
@@ -188,7 +189,7 @@ class PRLE_DDPG(object):
         lam_loss = lam_loss.mean().item()
         self.lam_loss = lam_loss
         self.lam += lam_loss * self.lr_lam
-        self.lam = max(self.lam, 0.1)
+        self.lam = max(self.lam, self.lam_min)
         if self.lam_max is not None:
             self.lam = min(self.lam, self.lam_max)
 

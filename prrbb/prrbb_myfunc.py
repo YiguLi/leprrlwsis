@@ -21,8 +21,9 @@ Upper (H) r1:
 
   Wind boundaries: LOW < 7.0 m/s, MEDIUM [7.0, 11.0), HIGH >= 11.0 m/s
 
-Lower (L) r2 — PER baseline (no segmentation):
-  r2 = 10.0 * shadow_profit - 700.0 * soc_deviation
+Lower (L):
+  r2 = 10.0 * shadow_profit - 100.0 * clip_amount
+  c2 = 700.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束, 保留原系数)
 """
 
 import numpy as np
@@ -143,7 +144,7 @@ def Cal_r1_PRRBB(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
 
 
 # =============================================================================
-# 5. Lower-Level (L): r2 — wind-segmented SOC safety ranges
+# 5. Lower-Level (L): wind-segmented SOC safety ranges (c2 拉格朗日约束项)
 # =============================================================================
 
 # SOC safe ranges by wind level (risk level):
@@ -175,6 +176,11 @@ def Cal_soc_deviation(SOC, wind_level='MEDIUM'):
 
 def Cal_r2_PER_baseline(pbrule, shadow_price, SOC, wind_level='MEDIUM'):
     """
+    LEGACY helper (kept for backward compatibility, no longer called in
+    Cal_Rew_PRRBB). The current lower-level reward/cost are computed inline:
+      r2 = 10.0 * shadow_profit - 100.0 * clip_amount
+      c2 = 700.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束)
+
     Wind-segmented lower-level r2.
 
     r2 = 10.0 * shadow_profit - 700.0 * soc_deviation
@@ -200,7 +206,8 @@ def Cal_r2_PER_baseline(pbrule, shadow_price, SOC, wind_level='MEDIUM'):
 def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
                    penalty_NN_H=0.0, time=1.0 / 60, ptur=None):
     """
-    PRRBB reward: wind × price joint segmentation (upper) + PER baseline (lower).
+    PRRBB reward: wind × price joint segmentation (upper);
+    lower r2 = 10*shadow_profit - 100*clip_amount, c2 = 700*soc_deviation.
 
     Parameters
     ----------
@@ -250,13 +257,15 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     else:
         c1 = c1_risk_coeff * (0.1 * P_F)
 
-    # ==== Lower Level (L): wind-segmented SOC safety ====
-    r2 = Cal_r2_PER_baseline(pbrule, shadow_price, SOC_new, wind_level)
-    c2 = clip_amount
+    # ==== Lower Level (L) ====
+    # r2: 影子套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
+    # c2: SOC 越界项进入拉格朗日约束（保留原系数 700/MWh）
+    shadow_profit = -shadow_price * pbrule
+    soc_dev = Cal_soc_deviation(SOC_new, wind_level)
+    r2 = 10.0 * shadow_profit - 100.0 * clip_amount
+    c2 = 700.0 * soc_dev
 
     # ==== Details ====
-    soc_dev = Cal_soc_deviation(SOC_new, wind_level)
-    shadow_profit = -shadow_price * pbrule
     turbine_profit = w_wind * pr_old * ptur * time
     bess_profit    = w_bess * (-pr_old * pbrule * time)
 
