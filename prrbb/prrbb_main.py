@@ -81,8 +81,9 @@ def train_prrbb(num_iterations_H,
     Lagrange multiplier updates:
       Upper (H): EMA dual-ascent on ACTUAL block cost (EMA 方案)
                  EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
-                 lam1  ← clip(lam1 + 0.01*(EMA - d_block), 0.1, 10)
+                 lam1  ← clip(lam1 + 0.01*(EMA - d_block), 3, 20), 初始 5
                  d_block 初始 1.2, curriculum 连续满足则减半, 地板 0.3
+                 (每MW量纲对齐: λ≥2.55 时 c1 惩罚≥r1 收益)
       Lower (L): critic-based (unchanged): lam2 ∈ [1, 10],
                  cost_limit 减半地板 0.0
     """
@@ -668,10 +669,13 @@ if __name__ == "__main__":
     )
 
     # Create agents (PER convention: H=6 dims, L=5 dims)
-    # H-layer: EMA dual-ascent on actual c1 (α=0.02, η=0.01, λ∈[0.1,10])
+    # H-layer: EMA dual-ascent on actual c1 (α=0.02, η=0.01)
+    #          lam1 ∈ [3, 20], 初始 5.0
+    #          (每MW量纲对齐核算: 需 λ ≥ 2.55 保证任何风速×电价下惩罚≥利润)
     agent_H = SP_DDPG(nb_states=4, nb_actions=6, args=args,
-                      lam_max=10.0, lam_min=0.1,
+                      lam_max=20.0, lam_min=3.0,
                       ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01)
+    agent_H.lam = 5.0  # lam1 初始值
     agent_L = SP_DDPG(nb_states=5, nb_actions=1, args=args, lam_max=10.0, lam_min=1.0)
     agent_L.cost_limit = 10.0  # L-layer c2 dedicated initial value
 

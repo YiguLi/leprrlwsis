@@ -40,6 +40,7 @@
 # Lagrange multiplier updates (prrbb_main.py):
 #   H (EMA 方案, 实际成本): 每 5 步块
 #     EMA   ← (1-0.02)·EMA + 0.02·sum_c1
-#     lam1  ← clip(lam1 + 0.01·(EMA − d_block), 0.1, 10)
+#     lam1  ← clip(lam1 + 0.01·(EMA − d_block), 3, 20)，初始 5.0
+#     (每MW量纲对齐核算: λ ≥ 2.55 保证任何风速×电价下 c1 惩罚 ≥ r1 收益)
 #     d_block 初始 1.2，curriculum 连续 100 次满足则减半，地板 0.3
 #   L (critic 版, 维持现状): lam2 ∈ [1, 10]，cost_limit 减半地板 0.0
