@@ -278,9 +278,12 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
     Returns
     -------
     case_metrics : list of dict (length 9)
-        Per-case 5-step mean r1/c1/r2/c2/r/c plus violation count cvm.
+        Per-case 5-step mean r1/c1/r2/c2/r/c plus violation count cvm;
+        'profit' = the case's 5-step profit sum
+        (profit_step = P_G*pr*dt - 4.9*max(-pbrule,0)*dt).
     overall : dict
-        Mean over the 9 case means (cvm = total count).
+        Mean over the 9 case means (cvm = total count);
+        'profit' = the 45-step total profit sum.
     """
     if scenario is None:
         wind_seq, price_seq, case_ids, blocks = build_9case_scenario(seed=seed)
@@ -296,7 +299,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
     n_per_case = num_iterations // len(blocks)
 
     per_case = {i: {'r1': 0.0, 'c1': 0.0, 'r2': 0.0, 'c2': 0.0,
-                    'r': 0.0, 'c': 0.0, 'cvm': 0}
+                    'r': 0.0, 'c': 0.0, 'cvm': 0, 'profit': 0.0}
                 for i in range(len(blocks))}
     df = pd.DataFrame()
 
@@ -357,6 +360,10 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         if c > 0:
             pc['cvm'] += 1
 
+        # profit: 上层利润 = P_G * pr * dt - 4.9*max(-pb,0)*dt（与训练 episode_profit 同口径）
+        profit_step = obs2[-1] * obs[0] * time - 4.9 * max(-float(pbrule_test), 0.0) * time
+        pc['profit'] += profit_step
+
         if test_csv:
             df = pd.concat([df, pd.DataFrame([{
                 'step': step,
@@ -366,6 +373,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
                 'pr': obs2[0],
                 'r1': r1, 'c1': c1, 'r2': r2, 'c2': c2,
                 'r': r, 'c': c,
+                'profit': profit_step,
                 'pbrule': pbrule_test,
                 'clip_amount': clip_amount_test,
                 'action': action,
@@ -394,6 +402,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             'r': pc['r'] / n_per_case,
             'c': pc['c'] / n_per_case,
             'cvm': pc['cvm'],
+            'profit': pc['profit'],  # 该 case 5 步 profit 之和
         })
 
     overall = {
@@ -404,6 +413,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         'r': float(np.mean([m['r'] for m in case_metrics])),
         'c': float(np.mean([m['c'] for m in case_metrics])),
         'cvm': int(sum(m['cvm'] for m in case_metrics)),
+        'profit': float(sum(m['profit'] for m in case_metrics)),  # 45 步 profit 之和
     }
     return case_metrics, overall
 

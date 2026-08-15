@@ -234,7 +234,19 @@ def train(num_iterations_H,
                         'r2': m['r2'], 'c2': m['c2'],
                         'reward': m['r'], 'cost': m['c'],
                         'cvm': m['cvm'],
+                        'profit': m['profit'],
                     } for m in case_metrics])], ignore_index=True)
+                    # 附加一行 OVERALL：45 步 profit 之和等整体指标
+                    df_test = pd.concat([df_test, pd.DataFrame([{
+                        'step': step,
+                        'wind_level': 'OVERALL',
+                        'price_level': 'OVERALL',
+                        'r1': overall['r1'], 'c1': overall['c1'],
+                        'r2': overall['r2'], 'c2': overall['c2'],
+                        'reward': overall['r'], 'cost': overall['c'],
+                        'cvm': overall['cvm'],
+                        'profit': overall['profit'],
+                    }])], ignore_index=True)
                     df_test.to_csv('{}/df_test9.csv'.format(output))
                 if upload:
                     writer.add_scalar('test9/overall/r1', overall['r1'], step)
@@ -244,6 +256,7 @@ def train(num_iterations_H,
                     writer.add_scalar('test9/overall/r', overall['r'], step)
                     writer.add_scalar('test9/overall/c', overall['c'], step)
                     writer.add_scalar('test9/overall/cvm', overall['cvm'], step)
+                    writer.add_scalar('test9/overall/profit', overall['profit'], step)
                     for m in case_metrics:
                         tag = 'test9/{}_{}'.format(m['wind_level'], m['price_level'])
                         writer.add_scalar(tag + '/r1', m['r1'], step)
@@ -253,6 +266,7 @@ def train(num_iterations_H,
                         writer.add_scalar(tag + '/r', m['r'], step)
                         writer.add_scalar(tag + '/c', m['c'], step)
                         writer.add_scalar(tag + '/cvm', m['cvm'], step)
+                        writer.add_scalar(tag + '/profit', m['profit'], step)
 
         
 
