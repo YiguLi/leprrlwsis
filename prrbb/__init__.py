@@ -36,3 +36,10 @@
 #
 # Shadow price signal (PER convention): range (-0.5, 0.5), kept unchanged.
 # RBB clipping: same hard clipping before env.step (unchanged).
+#
+# Lagrange multiplier updates (prrbb_main.py):
+#   H (EMA 方案, 实际成本): 每 5 步块
+#     EMA   ← (1-0.02)·EMA + 0.02·sum_c1
+#     lam1  ← clip(lam1 + 0.01·(EMA − d_block), 0.1, 10)
+#     d_block 初始 1.2，curriculum 连续 100 次满足则减半，地板 0.3
+#   L (critic 版, 维持现状): lam2 ∈ [1, 10]，cost_limit 减半地板 0.0

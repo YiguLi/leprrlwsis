@@ -70,12 +70,21 @@ def train_prrbb(num_iterations_H,
     """
     PRRBB training loop with segmented reward functions.
 
-    Reward structure:
-      Upper (H): r1 = w_wind*pr*ptur*time + w_bess*(-pr*pbrule*time)
+    Reward structure (机会/风险分离版, prrbb_myfunc.py):
+      Upper (H): r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
                       - 490*max(-pbrule,0)*time - penalty_NN_H
-                 c1 = risk_coeff * (10*max(0,P_F-3) + 0.1*P_F)
-      Lower (L): r2 = 10*shadow_profit - 100*clip_amount
+                      wT=wT_u(u)*wT_p(pr), wB=wB_p(pr)*wB_soc(SOC,wind)
+                 c1 = r_u(u)*(10*max(0,P_F-3) + 0.1*P_F) + 50*unfeasible_gap
+      Lower (L): r2 = 10*shadow_profit - 100*clip_amount + 0.5*real_profit
                  c2 = 700*soc_deviation  (SOC-safe 项, 拉格朗日约束)
+
+    Lagrange multiplier updates:
+      Upper (H): EMA dual-ascent on ACTUAL block cost (EMA 方案)
+                 EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
+                 lam1  ← clip(lam1 + 0.01*(EMA - d_block), 0.1, 10)
+                 d_block 初始 1.2, curriculum 连续满足则减半, 地板 0.3
+      Lower (L): critic-based (unchanged): lam2 ∈ [1, 10],
+                 cost_limit 减半地板 0.0
     """
     agent_H.is_training = True
     agent_L.is_training = True
@@ -84,12 +93,15 @@ def train_prrbb(num_iterations_H,
     episode_bess_profit = 0.0
     observation = None
     time = 1.0 / 60
-    lamo_H = deepcopy(agent_H.lam)
     lamo_L = deepcopy(agent_L.lam)
 
     # Curriculum learning trackers
     consecutive_satisfied_H = 0
     consecutive_satisfied_L = 0
+
+    # ---- H-layer EMA dual-ascent (actual-cost based lam update) ----
+    d_block_H = 1.2          # 每块 c1 均值的约束目标（初始）
+    d_block_H_min = 0.3      # curriculum 收紧地板
 
     if use_csv:
         df = pd.DataFrame()
@@ -251,7 +263,8 @@ def train_prrbb(num_iterations_H,
                     update_num += 1
 
                     # Track consecutive satisfaction for curriculum learning
-                    if agent_H.lam_loss < 0:
+                    # H: EMA 方案 — 判据为实际成本 EMA ≤ d_block
+                    if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
                         consecutive_satisfied_H += 1
                     else:
                         consecutive_satisfied_H = 0
@@ -260,24 +273,29 @@ def train_prrbb(num_iterations_H,
                     else:
                         consecutive_satisfied_L = 0
 
-                # Curriculum convergence: halve cost_limit when constraints
-                # are satisfied for 100 consecutive policy updates
+                # Curriculum convergence: tighten constraint targets when
+                # satisfied for 100 consecutive policy updates.
+                #   H (EMA): halve d_block, floor d_block_H_min
+                #   L (critic): halve cost_limit, floor 0.0
                 if consecutive_satisfied_H >= 100:
-                    agent_H.cost_limit = max(agent_H.cost_limit / 2, 60.0)
+                    d_block_H = max(d_block_H / 2, d_block_H_min)
                     consecutive_satisfied_H = 0
-                    prGreen('H: cost_limit halved to {}'.format(agent_H.cost_limit))
+                    prGreen('H: d_block halved to {}'.format(d_block_H))
                 if consecutive_satisfied_L >= 100:
                     agent_L.cost_limit = max(agent_L.cost_limit / 2, 0.0)
                     consecutive_satisfied_L = 0
                     prGreen('L: cost_limit halved to {}'.format(agent_L.cost_limit))
 
-                # Lambda adjustment (backup mechanism)
-                if abs(lamo_H - agent_H.lam) <= 0.1:
-                    agent_H.cost_limit = max(agent_H.cost_limit / 2, 60.0)
+                # ---- H-layer: EMA dual ascent on actual block cost ----
+                # 每 5 步块一次：EMA ← (1-α)EMA + α·sum_c1，随后
+                # lam1 ← clip(lam1 + η·(EMA − d_block), 0.1, 10)
+                agent_H.update_ema_cost(sum_c1)
+                agent_H.update_lam_ema(d_block_H)
+
+                # Lambda adjustment (backup mechanism, L only)
                 if abs(lamo_L - agent_L.lam) <= 0.1:
                     agent_L.cost_limit = agent_L.cost_limit / 2
 
-                lamo_H = deepcopy(agent_H.lam)
                 lamo_L = deepcopy(agent_L.lam)
 
             # Test evaluation: 9-case segmented test every 480 episode steps
@@ -345,6 +363,8 @@ def train_prrbb(num_iterations_H,
                 'r1': r1, 'c1': c1, 'r2': r2, 'c2': c2,
                 'reward': r, 'cost': c,
                 'lam1': agent_H.lam, 'lam2': agent_L.lam,
+                'd_block_H': d_block_H,
+                'ema_c1_H': agent_H.ema_cost,
                 # RBB metrics
                 'pb_original': rbb_info['pb_original'],
                 'pbrule': rbb_info['pbrule'],
@@ -404,8 +424,10 @@ def train_prrbb(num_iterations_H,
             writer.add_scalar('cost', c, step)
             writer.add_scalar('lam1', agent_H.lam, step)
             writer.add_scalar('lam2', agent_L.lam, step)
-            writer.add_scalar('d1', agent_H.cost_limit, step)
+            writer.add_scalar('d1', d_block_H, step)
             writer.add_scalar('d2', agent_L.cost_limit, step)
+            if agent_H.ema_cost is not None:
+                writer.add_scalar('ema_c1_H', agent_H.ema_cost, step)
             writer.add_scalar('soc', float(observation[2]), step)
             writer.add_scalar('P_F', reward_details['P_F'], step)
 
@@ -646,7 +668,10 @@ if __name__ == "__main__":
     )
 
     # Create agents (PER convention: H=6 dims, L=5 dims)
-    agent_H = SP_DDPG(nb_states=4, nb_actions=6, args=args)
+    # H-layer: EMA dual-ascent on actual c1 (α=0.02, η=0.01, λ∈[0.1,10])
+    agent_H = SP_DDPG(nb_states=4, nb_actions=6, args=args,
+                      lam_max=10.0, lam_min=0.1,
+                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01)
     agent_L = SP_DDPG(nb_states=5, nb_actions=1, args=args, lam_max=10.0, lam_min=1.0)
     agent_L.cost_limit = 10.0  # L-layer c2 dedicated initial value
 
