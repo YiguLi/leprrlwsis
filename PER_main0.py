@@ -156,7 +156,6 @@ def train(num_iterations_H,
         c1 = c + 0.1 * P_F
         sum_r1 += r1
         sum_c1 += c1
-        sum_c2 += c2  # B1: 累计块成本 (每 5 步归零)
         prGreen('r1 = {}'.format(round(r1, 3)))
         prGreen('c1 (fluct={}, no_soc_safe) = {}'.format(round(c, 3), round(c1, 3)))
 
@@ -186,6 +185,7 @@ def train(num_iterations_H,
 
         # c2: SOC 越界项进入拉格朗日约束（保留原系数 1000/MWh）
         c2 = 1000.0 * soc_deviation
+        sum_c2 += c2  # B1: 累计块成本 (每 5 步归零)
 
         # prGreen('r2 = {}'.format(round(r2, 3)))
         # prGreen('c2 = {}'.format(round(c2, 3)))
