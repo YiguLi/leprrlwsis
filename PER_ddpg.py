@@ -89,6 +89,10 @@ class SP_DDPG(object):
         self.cost_limit = args.cost_single_limit
         self.lam_loss = 0.0  # critic_c - cost_limit, updated in update_policy()
 
+        # B2: 优先级归一化的 TD running-mean (|TD_p|、|TD_c| 各自 EMA)
+        self.td_mean_p = None
+        self.td_mean_c = None
+
         # ---- EMA dual-ascent mode (lam updated from ACTUAL collected cost) ----
         # When ema_lam=True, update_policy() no longer touches lam; instead the
         # training loop feeds per-block actual cost via update_ema_cost() and
@@ -104,6 +108,10 @@ class SP_DDPG(object):
         self.nb_turbine = args.nb_turbine
 
     def update_policy(self):
+        # A2: β 退火 —— 每次更新推进 self.PER_beta (0.4→1)，写回实例属性
+        # (原 PER_buffer.sample 内递增是局部变量，退火永不生效；此处推进后传入)
+        self.PER_beta = min(1.0, self.PER_beta + self.beta_increment_per_sampling)
+
         # Sample batch
         state_batch, action_batch, profit_batch, cost_batch,\
         next_state_batch, terminal_batch, weights, batch_idxes \
@@ -137,10 +145,13 @@ class SP_DDPG(object):
             self.actor_target(next_state_batch),
         ])
 
+        # A1: terminal 语义修复 —— bootstrap 当且仅当非终止转移
+        # (terminal_batch = 存储的 done: 1=终止/块结束 → (1-done)=0 切断 bootstrap;
+        #  0=正常转移 → 正常 bootstrap。修复原公式把 done 直接当乘子的反转)
         target_q_batch_p = profit_batch + \
-            self.discount * terminal_batch * next_q_values_p
+            self.discount * (1 - terminal_batch) * next_q_values_p
         target_q_batch_c = cost_batch + \
-            self.discount * terminal_batch * next_q_values_c
+            self.discount * (1 - terminal_batch) * next_q_values_c
 
         # Critic update
         self.critic_p.zero_grad()
@@ -211,7 +222,20 @@ class SP_DDPG(object):
         #For prioritized exprience replay
         #Update priorities of experiences with TD errors
         # Ensure tensors are on CPU before converting to numpy
-        td_errors = (TD_errors_p + self.lam * TD_errors_c).detach().cpu().numpy()
+        # B2: 优先级 = |TD_p|/mean_p + |TD_c|/mean_c (去 lam，量纲归一化)
+        # 各自除以 running-mean 后相加：两路 TD 同量级，避免利润/成本任一侧主导采样，
+        # 且与 lam 解耦（lam 已改 EMA 实际成本，不再进入回放分布）。
+        td_errors_p_np = TD_errors_p.detach().cpu().numpy()
+        td_errors_c_np = TD_errors_c.detach().cpu().numpy()
+        mean_p = float(np.mean(td_errors_p_np))
+        mean_c = float(np.mean(td_errors_c_np))
+        if self.td_mean_p is None:
+            self.td_mean_p, self.td_mean_c = mean_p, mean_c
+        else:
+            self.td_mean_p = 0.99 * self.td_mean_p + 0.01 * mean_p
+            self.td_mean_c = 0.99 * self.td_mean_c + 0.01 * mean_c
+        td_errors = (td_errors_p_np / (self.td_mean_p + 1e-6)
+                     + td_errors_c_np / (self.td_mean_c + 1e-6))
         new_priorities = td_errors + self.PER_epsilon
         self.memory.update_priorities(batch_idxes, new_priorities)
 

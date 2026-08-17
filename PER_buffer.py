@@ -146,7 +146,8 @@ class PrioritizedReplayBuffer(ReplayBuffer):
         """
 
         assert beta > 0
-        beta = np.min([1., beta + beta_increment_per_sampling]) # max=1
+        # A2: β 由调用方 (agent.update_policy) 推进并传入。
+        # 原实现此处做局部递增但未写回实例，退火永不生效；现已移除。
 
         idxes = self._sample_proportional(batch_size)
 

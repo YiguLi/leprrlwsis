@@ -101,6 +101,10 @@ class PRLE_DDPG(object):
         self.cost_limit = args.cost_single_limit
         self.lam_loss = 0.0  # critic_c - cost_limit, updated in update_policy()
 
+        # B2: 优先级归一化的 TD running-mean (|TD_p|、|TD_c| 各自 EMA)
+        self.td_mean_p = None
+        self.td_mean_c = None
+
         self.PER_beta = args.PER_beta
         self.PER_epsilon = args.PER_epsilon
         self.beta_increment_per_sampling = args.beta_increment_per_sampling
@@ -108,6 +112,9 @@ class PRLE_DDPG(object):
 
     def update_policy(self):
         """Sample batch, compute TD errors, update actor/critic/dual. Identical to SP_DDPG."""
+        # A2: β 退火 —— 每次更新推进 self.PER_beta (0.4→1)，写回实例属性
+        self.PER_beta = min(1.0, self.PER_beta + self.beta_increment_per_sampling)
+
         # Sample batch
         state_batch, action_batch, profit_batch, cost_batch,\
         next_state_batch, terminal_batch, weights, batch_idxes \
@@ -140,9 +147,9 @@ class PRLE_DDPG(object):
         ])
 
         target_q_batch_p = profit_batch + \
-            self.discount * terminal_batch * next_q_values_p
+            self.discount * (1 - terminal_batch) * next_q_values_p
         target_q_batch_c = cost_batch + \
-            self.discount * terminal_batch * next_q_values_c
+            self.discount * (1 - terminal_batch) * next_q_values_c
 
         # Critic update
         self.critic_p.zero_grad()
@@ -199,7 +206,18 @@ class PRLE_DDPG(object):
         soft_update(self.critic_target_c, self.critic_c, self.tau)
 
         # For prioritized experience replay
-        td_errors = (TD_errors_p + self.lam * TD_errors_c).detach().cpu().numpy()
+        # B2: 优先级 = |TD_p|/mean_p + |TD_c|/mean_c (去 lam，量纲归一化)
+        td_errors_p_np = TD_errors_p.detach().cpu().numpy()
+        td_errors_c_np = TD_errors_c.detach().cpu().numpy()
+        mean_p = float(np.mean(td_errors_p_np))
+        mean_c = float(np.mean(td_errors_c_np))
+        if self.td_mean_p is None:
+            self.td_mean_p, self.td_mean_c = mean_p, mean_c
+        else:
+            self.td_mean_p = 0.99 * self.td_mean_p + 0.01 * mean_p
+            self.td_mean_c = 0.99 * self.td_mean_c + 0.01 * mean_c
+        td_errors = (td_errors_p_np / (self.td_mean_p + 1e-6)
+                     + td_errors_c_np / (self.td_mean_c + 1e-6))
         new_priorities = td_errors + self.PER_epsilon
         self.memory.update_priorities(batch_idxes, new_priorities)
 

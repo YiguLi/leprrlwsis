@@ -52,6 +52,9 @@ def train(num_iterations_H,
     # Curriculum learning: consecutive steps where critic_c < cost_limit
     consecutive_satisfied_H = 0
     consecutive_satisfied_L = 0
+    # B1: L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
+    d_block_L = 20.0        # 初值: 每块 sum_c2 预算 (≈每步 4, 按 c2 系数 1000 标定)
+    d_block_L_min = 2.5     # curriculum 收紧地板 (≈每步 0.5)
     if use_csv:
         df = pd.DataFrame()
         df_episode = pd.DataFrame()
@@ -72,7 +75,8 @@ def train(num_iterations_H,
         # agent pick action 上层选择动作 
         if episode_steps % 5 == 0:   
             sum_r1 = 0 
-            sum_c1 = 0     
+            sum_c1 = 0 
+            sum_c2 = 0     # B1: L 层 5 步块累计成本 (喂 EMA 对偶)     
             if step <= args.warmup:
                 applied_action_H = original_action_H = agent_H.random_action() 
                 penalty_NN_H = 0
@@ -149,6 +153,7 @@ def train(num_iterations_H,
         c1 = c + 0.1 * P_F
         sum_r1 += r1
         sum_c1 += c1
+        sum_c2 += c2  # B1: 累计块成本 (每 5 步归零)
         prGreen('r1 = {}'.format(round(r1, 3)))
         prGreen('c1 (fluct={}, no_soc_safe) = {}'.format(round(c, 3), round(c1, 3)))
 
@@ -186,6 +191,10 @@ def train(num_iterations_H,
             done = True 
         if episode_steps % 5 == 4:
             agent_H.observe_jump(norm_observation_H, original_action_H, sum_r1, sum_c1, norm_observation2, done)
+            # B1: L 层 EMA 对偶上升 —— 用 5 步块实际成本 sum_c2 更新 lam2 (与 d_block_L 同口径)
+            if step > args.warmup:
+                agent_L.update_ema_cost(sum_c2)
+                agent_L.update_lam_ema(d_block_L)
             done_L = True
             # c2 = 0.01 * abs(sum(pb_l)-action[5]) + c2 # todo 是否要*0.1， 有关 signal 的 terminal reward 
         agent_L.observe_jump(norm_observation_L, original_action_L, r2, c2, norm_observation2_L, done_L)
@@ -206,8 +215,9 @@ def train(num_iterations_H,
                         consecutive_satisfied_H += 1
                     else:
                         consecutive_satisfied_H = 0
-                    # Track consecutive satisfaction for L
-                    if agent_L.lam_loss < 0:
+                    # Track consecutive satisfaction for L (B1: EMA 实际成本判据,
+                    # 替换原 critic-based lam_loss —— EMA 模式下 lam_loss 恒为 0)
+                    if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
                         consecutive_satisfied_L += 1
                     else:
                         consecutive_satisfied_L = 0
@@ -217,9 +227,9 @@ def train(num_iterations_H,
                     consecutive_satisfied_H = 0
                     prGreen('H: cost_limit halved to {}'.format(agent_H.cost_limit))
                 if consecutive_satisfied_L >= 100:
-                    agent_L.cost_limit = max(agent_L.cost_limit / 2, 0.0)  # L层c2 floor=0
+                    d_block_L = max(d_block_L / 2, d_block_L_min)  # B1: 收紧块预算
                     consecutive_satisfied_L = 0
-                    prGreen('L: cost_limit halved to {}'.format(agent_L.cost_limit))
+                    prGreen('L: d_block_L halved to {}'.format(d_block_L))
 
             # Test: 9-case segmented evaluation every 480 episode steps
             if episode_steps % 480 == 0:
@@ -509,8 +519,8 @@ if __name__ == "__main__":
                         help='importance-sampling, from initial value increasing to 1. 0 - no corrections, 1 - full correction')
     parser.add_argument('--PER_epsilon', default=0.01, type=float, 
                         help='small amount to avoid zero priority')
-    parser.add_argument('--beta_increment_per_sampling', default=0., type=float, 
-                        help='')
+    parser.add_argument('--beta_increment_per_sampling', default=3e-5, type=float, 
+                        help='β退火增量/次更新: 0.6/20000次更新 → 10k env步内 0.4→1 (100k预算)')
     parser.add_argument('--nb_turbine', default=5, type=int,
                         help='number of turbines')
 
@@ -576,7 +586,11 @@ if __name__ == "__main__":
 
 
     agent_H = SP_DDPG(nb_states = 4, nb_actions = 6, args = args)
-    agent_L = SP_DDPG(nb_states = 5, nb_actions = 1, args = args, lam_max=10.0, lam_min=1.0)
+    # B1: L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
+    #     lam2 ∈ [10, 100]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
+    agent_L = SP_DDPG(nb_states = 5, nb_actions = 1, args = args,
+                      lam_max=100.0, lam_min=10.0,
+                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01)
     agent_L.cost_limit = 10.0  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
     #TODO 是否预训练
     # agent_H.load_weights('output/1_2310S-run18')

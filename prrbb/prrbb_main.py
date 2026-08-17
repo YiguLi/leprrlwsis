@@ -604,7 +604,8 @@ if __name__ == "__main__":
                         help='importance-sampling, from initial value increasing to 1')
     parser.add_argument('--PER_epsilon', default=0.01, type=float,
                         help='small amount to avoid zero priority')
-    parser.add_argument('--beta_increment_per_sampling', default=0., type=float, help='')
+    parser.add_argument('--beta_increment_per_sampling', default=3e-5, type=float,
+                        help='β退火增量/次更新: 10k env步内 0.4→1 (与PER_main0一致)')
     parser.add_argument('--nb_turbine', default=5, type=int,
                         help='number of turbines')
 
