@@ -52,6 +52,9 @@ def train(num_iterations_H,
     # Curriculum learning: consecutive steps where critic_c < cost_limit
     consecutive_satisfied_H = 0
     consecutive_satisfied_L = 0
+    # H 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_H (与 sum_c1 同口径)
+    d_block_H = 1.2         # 初值: 每块 sum_c1 预算 (与 PRRBB H 同量级)
+    d_block_H_min = 0.3     # curriculum 收紧地板
     # B1: L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
     d_block_L = 20.0        # 初值: 每块 sum_c2 预算 (≈每步 4, 按 c2 系数 1000 标定)
     d_block_L_min = 2.5     # curriculum 收紧地板 (≈每步 0.5)
@@ -191,6 +194,10 @@ def train(num_iterations_H,
             done = True 
         if episode_steps % 5 == 4:
             agent_H.observe_jump(norm_observation_H, original_action_H, sum_r1, sum_c1, norm_observation2, done)
+            # H 层 EMA 对偶上升 —— 用 5 步块实际成本 sum_c1 更新 lam1 (与 d_block_H 同口径)
+            if step > args.warmup:
+                agent_H.update_ema_cost(sum_c1)
+                agent_H.update_lam_ema(d_block_H)
             # B1: L 层 EMA 对偶上升 —— 用 5 步块实际成本 sum_c2 更新 lam2 (与 d_block_L 同口径)
             if step > args.warmup:
                 agent_L.update_ema_cost(sum_c2)
@@ -210,8 +217,9 @@ def train(num_iterations_H,
                     agent_L.update_policy()
                     update_num += 1
 
-                    # Track consecutive satisfaction for H
-                    if agent_H.lam_loss < 0:
+                    # Track consecutive satisfaction for H (EMA 实际成本判据,
+                    # 替换原 critic-based lam_loss —— EMA 模式下 lam_loss 恒为 0)
+                    if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
                         consecutive_satisfied_H += 1
                     else:
                         consecutive_satisfied_H = 0
@@ -223,9 +231,9 @@ def train(num_iterations_H,
                         consecutive_satisfied_L = 0
 
                 if consecutive_satisfied_H >= 100:
-                    agent_H.cost_limit = max(agent_H.cost_limit / 2, 60.0)
+                    d_block_H = max(d_block_H / 2, d_block_H_min)  # H: 收紧块预算
                     consecutive_satisfied_H = 0
-                    prGreen('H: cost_limit halved to {}'.format(agent_H.cost_limit))
+                    prGreen('H: d_block_H halved to {}'.format(d_block_H))
                 if consecutive_satisfied_L >= 100:
                     d_block_L = max(d_block_L / 2, d_block_L_min)  # B1: 收紧块预算
                     consecutive_satisfied_L = 0
@@ -585,7 +593,12 @@ if __name__ == "__main__":
     )
 
 
-    agent_H = SP_DDPG(nb_states = 4, nb_actions = 6, args = args)
+    # H 层对偶改 EMA 实际成本更新 —— lam1 不再读 critic (Q_c)；
+    #     lam1 ∈ [3, 20] 初始 5.0 (与 PRRBB H 层同配置, c1 公式同量级)
+    agent_H = SP_DDPG(nb_states = 4, nb_actions = 6, args = args,
+                      lam_max=20.0, lam_min=3.0,
+                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01)
+    agent_H.lam = 5.0
     # B1: L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
     #     lam2 ∈ [10, 100]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
     agent_L = SP_DDPG(nb_states = 5, nb_actions = 1, args = args,

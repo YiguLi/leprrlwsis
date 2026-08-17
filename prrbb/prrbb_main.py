@@ -94,7 +94,6 @@ def train_prrbb(num_iterations_H,
     episode_bess_profit = 0.0
     observation = None
     time = 1.0 / 60
-    lamo_L = deepcopy(agent_L.lam)
 
     # Curriculum learning trackers
     consecutive_satisfied_H = 0
@@ -103,6 +102,10 @@ def train_prrbb(num_iterations_H,
     # ---- H-layer EMA dual-ascent (actual-cost based lam update) ----
     d_block_H = 1.2          # 每块 c1 均值的约束目标（初始）
     d_block_H_min = 0.3      # curriculum 收紧地板
+
+    # ---- L-layer EMA dual-ascent (actual-cost based lam update) ----
+    d_block_L = 14.0         # 每块 sum_c2 的约束目标（初始, 按 700 系数 = PER 20×0.7 标定）
+    d_block_L_min = 1.75     # curriculum 收紧地板
 
     if use_csv:
         df = pd.DataFrame()
@@ -127,6 +130,7 @@ def train_prrbb(num_iterations_H,
         if episode_steps % 5 == 0:
             sum_r1 = 0.0
             sum_c1 = 0.0
+            sum_c2 = 0.0  # L 层 5 步块累计成本 (喂 EMA 对偶)
             if step <= args.warmup:
                 applied_action_H = original_action_H = agent_H.random_action()
                 penalty_NN_H = 0
@@ -204,6 +208,7 @@ def train_prrbb(num_iterations_H,
 
         sum_r1 += r1
         sum_c1 += c1
+        sum_c2 += c2  # 累计块成本 (每 5 步归零)
 
         # Track shadow price for logging
         shadow_price = reward_details['shadow_price']
@@ -269,35 +274,33 @@ def train_prrbb(num_iterations_H,
                         consecutive_satisfied_H += 1
                     else:
                         consecutive_satisfied_H = 0
-                    if agent_L.lam_loss < 0:
+                    # L: EMA 方案 — 判据为实际成本 EMA ≤ d_block
+                    if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
                         consecutive_satisfied_L += 1
                     else:
                         consecutive_satisfied_L = 0
 
                 # Curriculum convergence: tighten constraint targets when
-                # satisfied for 100 consecutive policy updates.
-                #   H (EMA): halve d_block, floor d_block_H_min
-                #   L (critic): halve cost_limit, floor 0.0
+                # satisfied for 100 consecutive policy updates (EMA: halve d_block)
                 if consecutive_satisfied_H >= 100:
                     d_block_H = max(d_block_H / 2, d_block_H_min)
                     consecutive_satisfied_H = 0
                     prGreen('H: d_block halved to {}'.format(d_block_H))
                 if consecutive_satisfied_L >= 100:
-                    agent_L.cost_limit = max(agent_L.cost_limit / 2, 0.0)
+                    d_block_L = max(d_block_L / 2, d_block_L_min)
                     consecutive_satisfied_L = 0
-                    prGreen('L: cost_limit halved to {}'.format(agent_L.cost_limit))
+                    prGreen('L: d_block_L halved to {}'.format(d_block_L))
 
                 # ---- H-layer: EMA dual ascent on actual block cost ----
                 # 每 5 步块一次：EMA ← (1-α)EMA + α·sum_c1，随后
-                # lam1 ← clip(lam1 + η·(EMA − d_block), 0.1, 10)
+                # lam1 ← clip(lam1 + η·(EMA − d_block), 3, 20)
                 agent_H.update_ema_cost(sum_c1)
                 agent_H.update_lam_ema(d_block_H)
 
-                # Lambda adjustment (backup mechanism, L only)
-                if abs(lamo_L - agent_L.lam) <= 0.1:
-                    agent_L.cost_limit = agent_L.cost_limit / 2
-
-                lamo_L = deepcopy(agent_L.lam)
+                # ---- L-layer: EMA dual ascent on actual block cost ----
+                # lam2 ← clip(lam2 + η·(EMA − d_block_L), 10, 100)
+                agent_L.update_ema_cost(sum_c2)
+                agent_L.update_lam_ema(d_block_L)
 
             # Test evaluation: 9-case segmented test every 480 episode steps
             if episode_steps % 480 == 0:
@@ -677,8 +680,11 @@ if __name__ == "__main__":
                       lam_max=20.0, lam_min=3.0,
                       ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01)
     agent_H.lam = 5.0  # lam1 初始值
-    agent_L = SP_DDPG(nb_states=5, nb_actions=1, args=args, lam_max=10.0, lam_min=1.0)
-    agent_L.cost_limit = 10.0  # L-layer c2 dedicated initial value
+    # L 层对偶改 EMA 实际成本更新 (与 H 层同方案, 与 PER L 同边界)
+    agent_L = SP_DDPG(nb_states=5, nb_actions=1, args=args,
+                      lam_max=100.0, lam_min=10.0,
+                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01)
+    agent_L.cost_limit = 10.0  # L-layer c2 dedicated initial value (EMA 模式下不使用)
 
     if args.mode == 'train':
         train_prrbb(args.train_iter_H,

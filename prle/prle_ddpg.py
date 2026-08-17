@@ -30,7 +30,8 @@ class PRLE_DDPG(object):
       3. observe() accepts an optional 'context' parameter
     """
 
-    def __init__(self, nb_states, nb_actions, args, lam_max=None, lam_min=0.1):
+    def __init__(self, nb_states, nb_actions, args, lam_max=None, lam_min=0.1,
+                 ema_lam=False, ema_alpha=0.02, ema_lam_lr=0.01):
 
         # Determine device first
         self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -100,6 +101,12 @@ class PRLE_DDPG(object):
         self.lam_min = lam_min  # lower bound on dual variable
         self.cost_limit = args.cost_single_limit
         self.lam_loss = 0.0  # critic_c - cost_limit, updated in update_policy()
+
+        # EMA dual-ascent mode (lam updated from ACTUAL collected cost, 与 SP_DDPG 一致)
+        self.ema_lam = ema_lam
+        self.ema_alpha = ema_alpha
+        self.ema_lam_lr = ema_lam_lr
+        self.ema_cost = None
 
         # B2: 优先级归一化的 TD running-mean (|TD_p|、|TD_c| 各自 EMA)
         self.td_mean_p = None
@@ -191,14 +198,16 @@ class PRLE_DDPG(object):
 
         self.actor_optim.step()
 
-        # Update dual variable
-        lam_loss = (self.critic_c([state_batch, self.actor(state_batch)]) - self.cost_limit)
-        lam_loss = lam_loss.mean().item()
-        self.lam_loss = lam_loss
-        self.lam += lam_loss * self.lr_lam
-        self.lam = max(self.lam, self.lam_min)
-        if self.lam_max is not None:
-            self.lam = min(self.lam, self.lam_max)
+        # Update dual variable (critic-based; 仅在非 EMA 模式)
+        if not self.ema_lam:
+            lam_loss = (self.critic_c([state_batch, self.actor(state_batch)]) - self.cost_limit)
+            lam_loss = lam_loss.mean().item()
+            self.lam_loss = lam_loss
+            self.lam += lam_loss * self.lr_lam
+            self.lam = max(self.lam, self.lam_min)
+            if self.lam_max is not None:
+                self.lam = min(self.lam, self.lam_max)
+        # else: EMA mode — lam is advanced externally via update_lam_ema()
 
         # Target update
         soft_update(self.actor_target, self.actor, self.tau)
@@ -220,6 +229,29 @@ class PRLE_DDPG(object):
                      + td_errors_c_np / (self.td_mean_c + 1e-6))
         new_priorities = td_errors + self.PER_epsilon
         self.memory.update_priorities(batch_idxes, new_priorities)
+
+    # ========================================================================
+    # EMA dual-ascent (actual-cost based lam update, 与 SP_DDPG 一致)
+    #   EMA_t   = (1-α)·EMA_{t-1} + α·x_t          (x_t = per-block actual cost)
+    #   λ      ← clip(λ + η·(EMA − d_block), λ_min, λ_max)
+    # Called from the training loop (once per 5-step block, after warmup).
+    # ========================================================================
+    def update_ema_cost(self, x):
+        """EMA update with the actual per-block cost (EMA dual-ascent mode)."""
+        if self.ema_cost is None:
+            self.ema_cost = float(x)
+        else:
+            self.ema_cost = (1.0 - self.ema_alpha) * self.ema_cost \
+                + self.ema_alpha * float(x)
+
+    def update_lam_ema(self, d_block):
+        """Dual ascent on the actual-cost EMA: lam += η·(EMA − d_block), clipped."""
+        if self.ema_cost is None:
+            return
+        self.lam += self.ema_lam_lr * (self.ema_cost - float(d_block))
+        self.lam = max(self.lam, self.lam_min)
+        if self.lam_max is not None:
+            self.lam = min(self.lam, self.lam_max)
 
     def eval(self):
         self.actor.eval()

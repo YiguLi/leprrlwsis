@@ -92,12 +92,16 @@ def train_prle(num_iterations_H,
     episode_bess_profit = 0.0
     observation = None
     time = 1.0 / 60
-    lamo_H = deepcopy(agent_H.lam)
-    lamo_L = deepcopy(agent_L.lam)
 
     # Curriculum learning trackers
     consecutive_satisfied_H = 0
     consecutive_satisfied_L = 0
+
+    # ---- H/L 层 EMA dual-ascent (actual-cost based lam update) ----
+    d_block_H = 1.2          # 每块 sum_c1 的约束目标（初始, 与 PRRBB H 同量级）
+    d_block_H_min = 0.3      # curriculum 收紧地板
+    d_block_L = 14.0         # 每块 sum_c2 的约束目标（初始, 按 700 系数标定）
+    d_block_L_min = 1.75     # curriculum 收紧地板
 
     # ---- PRLE: Window statistics for LLM analysis ----
     window_stats = WindowStats()
@@ -145,6 +149,7 @@ def train_prle(num_iterations_H,
         if episode_steps % 5 == 0:
             sum_r1 = 0.0
             sum_c1 = 0.0
+            sum_c2 = 0.0  # L 层 5 步块累计成本 (喂 EMA 对偶)
             block_ctx_H = []  # reset sub-step context for new 5-step block
             if step <= args.warmup:
                 applied_action_H = original_action_H = agent_H.random_action()
@@ -223,6 +228,7 @@ def train_prle(num_iterations_H,
 
         sum_r1 += r1
         sum_c1 += c1
+        sum_c2 += c2  # 累计块成本 (每 5 步归零)
 
         # Track shadow price for logging
         shadow_price = reward_details['shadow_price']
@@ -302,34 +308,32 @@ def train_prle(num_iterations_H,
                     update_num += 1
 
                     # Track consecutive satisfaction for curriculum learning
-                    if agent_H.lam_loss < 0:
+                    # H/L: EMA 方案 — 判据为实际成本 EMA ≤ d_block
+                    if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
                         consecutive_satisfied_H += 1
                     else:
                         consecutive_satisfied_H = 0
-                    if agent_L.lam_loss < 0:
+                    if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
                         consecutive_satisfied_L += 1
                     else:
                         consecutive_satisfied_L = 0
 
-                # Curriculum convergence: halve cost_limit when constraints
-                # are satisfied for 100 consecutive policy updates
+                # Curriculum convergence: tighten constraint targets when
+                # satisfied for 100 consecutive policy updates (EMA: halve d_block)
                 if consecutive_satisfied_H >= 100:
-                    agent_H.cost_limit = max(agent_H.cost_limit / 2, 60.0)
+                    d_block_H = max(d_block_H / 2, d_block_H_min)
                     consecutive_satisfied_H = 0
-                    prGreen('H: cost_limit halved to {}'.format(agent_H.cost_limit))
+                    prGreen('H: d_block_H halved to {}'.format(d_block_H))
                 if consecutive_satisfied_L >= 100:
-                    agent_L.cost_limit = max(agent_L.cost_limit / 2, 0.0)
+                    d_block_L = max(d_block_L / 2, d_block_L_min)
                     consecutive_satisfied_L = 0
-                    prGreen('L: cost_limit halved to {}'.format(agent_L.cost_limit))
+                    prGreen('L: d_block_L halved to {}'.format(d_block_L))
 
-                # Lambda adjustment (backup mechanism)
-                if abs(lamo_H - agent_H.lam) <= 0.1:
-                    agent_H.cost_limit = max(agent_H.cost_limit / 2, 60.0)
-                if abs(lamo_L - agent_L.lam) <= 0.1:
-                    agent_L.cost_limit = agent_L.cost_limit / 2
-
-                lamo_H = deepcopy(agent_H.lam)
-                lamo_L = deepcopy(agent_L.lam)
+                # ---- H/L 层 EMA dual ascent on actual block cost ----
+                agent_H.update_ema_cost(sum_c1)
+                agent_H.update_lam_ema(d_block_H)
+                agent_L.update_ema_cost(sum_c2)
+                agent_L.update_lam_ema(d_block_L)
 
             # Test evaluation: 9-case segmented test every 480 episode steps
             if episode_steps % 480 == 0:
@@ -786,10 +790,17 @@ if __name__ == "__main__":
 
     # Create agents
     # H agent: PRLE_DDPG with reward relabeling support (block_size auto-detected = 5)
-    agent_H = PRLE_DDPG(nb_states=4, nb_actions=6, args=args)
+    # H 层对偶改 EMA 实际成本更新 (与 PRRBB H 同配置)
+    agent_H = PRLE_DDPG(nb_states=4, nb_actions=6, args=args,
+                        lam_max=20.0, lam_min=3.0,
+                        ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01)
+    agent_H.lam = 5.0
     # L agent: also PRLE_DDPG (block_size=1, stores context=None — no relabeling context)
-    agent_L = PRLE_DDPG(nb_states=5, nb_actions=1, args=args, lam_max=10.0, lam_min=1.0)
-    agent_L.cost_limit = 10.0  # L-layer c2 dedicated initial value
+    # L 层对偶改 EMA 实际成本更新 (与 PER L 同边界)
+    agent_L = PRLE_DDPG(nb_states=5, nb_actions=1, args=args,
+                        lam_max=100.0, lam_min=10.0,
+                        ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01)
+    agent_L.cost_limit = 10.0  # L-layer c2 dedicated initial value (EMA 模式下不使用)
 
     if args.mode == 'train':
         train_prle(args.train_iter_H,
