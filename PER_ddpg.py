@@ -284,14 +284,12 @@ class SP_DDPG(object):
 
     def random_action(self):
         charge = 10.
-        # warmup 阶段轴向因子集中在盈利带 [0.2, 0.4]；
-        # 边界探索由正式阶段的 OU 噪声覆盖
         if self.nb_actions == self.nb_turbine:
-            action = np.random.uniform(0.2, 0.4, self.nb_actions)
+            action = np.random.uniform(0., 0.5, self.nb_actions)
         if self.nb_actions == 1:
             action = np.random.uniform(-charge, charge, self.nb_actions)
         if self.nb_actions == self.nb_turbine + 1:
-            action_H = np.random.uniform(0.2, 0.4, self.nb_turbine)
+            action_H = np.random.uniform(0., 0.5, self.nb_turbine)
             action_L = np.random.uniform(-charge, charge, 1)
             action = np.concatenate((action_H, action_L))
         self.a_t = action
