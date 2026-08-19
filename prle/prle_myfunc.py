@@ -393,13 +393,13 @@ def CheckAction(action, charge=10.):
     if len(action) == 7:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 500 *((ma - 0.5) + (0. - mi))
+            penalty += 200 *((ma - 0.5) + (0. - mi))
         sig = action[5]
-        if sig > SIGNAL_MAX:    penalty += 500 *(sig - SIGNAL_MAX)
-        elif sig < SIGNAL_MIN:  penalty += 500 *(SIGNAL_MIN - sig)
+        if sig > SIGNAL_MAX:    penalty += 200 *(sig - SIGNAL_MAX)
+        elif sig < SIGNAL_MIN:  penalty += 200 *(SIGNAL_MIN - sig)
         for j in action[6:]:
             ma, mi = max(charge, j), min(-charge, j)
-            penalty += 500 *((ma - charge) + (-charge - mi))
+            penalty += 200 *((ma - charge) + (-charge - mi))
         a_H = np.append(np.clip(action[:5], 0., 0.5),
                         np.clip(action[5], SIGNAL_MIN, SIGNAL_MAX))
         a_L = np.clip(action[6:], -charge, charge)
@@ -408,10 +408,10 @@ def CheckAction(action, charge=10.):
     elif len(action) == 6:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 500 *((ma - 0.5) + (0. - mi))
+            penalty += 200 *((ma - 0.5) + (0. - mi))
         sig = action[5]
-        if sig > SIGNAL_MAX:    penalty += 500 *(sig - SIGNAL_MAX)
-        elif sig < SIGNAL_MIN:  penalty += 500 *(SIGNAL_MIN - sig)
+        if sig > SIGNAL_MAX:    penalty += 200 *(sig - SIGNAL_MAX)
+        elif sig < SIGNAL_MIN:  penalty += 200 *(SIGNAL_MIN - sig)
         applied = np.append(np.clip(action[:5], 0., 0.5),
                             np.clip(action[5], SIGNAL_MIN, SIGNAL_MAX))
         return applied, penalty
@@ -419,13 +419,13 @@ def CheckAction(action, charge=10.):
     elif len(action) == 5:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 500 *((ma - 0.5) + (0. - mi))
+            penalty += 200 *((ma - 0.5) + (0. - mi))
         return np.clip(action[:5], 0., 0.5), penalty
 
     elif len(action) == 1:
         for j in action:
             ma, mi = max(charge, j), min(-charge, j)
-            penalty += 500 *((ma - charge) + (-charge - mi))
+            penalty += 200 *((ma - charge) + (-charge - mi))
         return np.clip(action, -charge, charge), penalty
 
     return action, penalty

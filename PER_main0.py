@@ -457,9 +457,9 @@ if __name__ == "__main__":
                         type=int,
                         help='hidden num of second fully connect layer')  # 300
     parser.add_argument('--rate',
-                        default=0.001,
+                        default=0.01,
                         type=float,
-                        help='learning rate (critic_p/critic_c 共用)')
+                        help='learning rate')
     parser.add_argument('--prate',
                         default=0.0001,
                         type=float,
@@ -470,7 +470,7 @@ if __name__ == "__main__":
                         help='time without training but only filling the replay memory')
     parser.add_argument('--discount', default=0.98, type=float, help='')
     # 0.99
-    parser.add_argument('--bsize', default=64, type=int,
+    parser.add_argument('--bsize', default=32, type=int,
                         help='minibatch size')  #64
     parser.add_argument('--rmsize',
                         default=20000,
