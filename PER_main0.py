@@ -356,12 +356,6 @@ def train(num_iterations_H,
             if episode_steps % 5 == 4:
                 writer.add_scalar('sum_r1', sum_r1, step)
                 writer.add_scalar('sum_c1', sum_c1, step)
-                # H 层（上层）critic/TD 监控：仅记录上层，不记录下层
-                if agent_H.td_mean_p is not None:
-                    writer.add_scalar('td_mean_p', agent_H.td_mean_p, step)
-                    writer.add_scalar('td_mean_c', agent_H.td_mean_c, step)
-                    writer.add_scalar('meanQp', agent_H.mean_qp, step)
-                    writer.add_scalar('meanQc', agent_H.mean_qc, step)
 
             # ---- Action logging (every 5 steps) ----
             if episode_steps % 5 == 4:

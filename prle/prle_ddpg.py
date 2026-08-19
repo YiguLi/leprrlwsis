@@ -171,10 +171,6 @@ class PRLE_DDPG(object):
             action_batch
         ])
 
-        # 记录本批 Q 均值（供 TB 监控；仅上层 agent_H 会被主循环记录）
-        self.mean_qp = float(q_batch_p.mean().item())
-        self.mean_qc = float(q_batch_c.mean().item())
-
         TD_errors_p = abs(target_q_batch_p - q_batch_p)
         TD_errors_c = abs(target_q_batch_c - q_batch_c)
 
