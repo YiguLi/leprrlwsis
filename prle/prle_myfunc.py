@@ -393,7 +393,7 @@ def CheckAction(action, charge=10.):
     if len(action) == 7:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 200 *((ma - 0.5) + (0. - mi))
+            penalty += 500 *((ma - 0.5) + (0. - mi))
         sig = action[5]
         if sig > SIGNAL_MAX:    penalty += 200 *(sig - SIGNAL_MAX)
         elif sig < SIGNAL_MIN:  penalty += 200 *(SIGNAL_MIN - sig)
@@ -408,7 +408,7 @@ def CheckAction(action, charge=10.):
     elif len(action) == 6:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 200 *((ma - 0.5) + (0. - mi))
+            penalty += 500 *((ma - 0.5) + (0. - mi))
         sig = action[5]
         if sig > SIGNAL_MAX:    penalty += 200 *(sig - SIGNAL_MAX)
         elif sig < SIGNAL_MIN:  penalty += 200 *(SIGNAL_MIN - sig)
@@ -419,7 +419,7 @@ def CheckAction(action, charge=10.):
     elif len(action) == 5:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 200 *((ma - 0.5) + (0. - mi))
+            penalty += 500 *((ma - 0.5) + (0. - mi))
         return np.clip(action[:5], 0., 0.5), penalty
 
     elif len(action) == 1:
