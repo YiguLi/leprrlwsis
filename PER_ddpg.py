@@ -297,11 +297,11 @@ class SP_DDPG(object):
 
     def select_action(self, s_t, decay_epsilon=True):
         action = to_numpy(self.actor(to_tensor(np.array([s_t])))).squeeze(0)
-        if self.is_training:
-            # 每维独立 OU 探索噪声（替代原 ε·uniform 标量噪声：
-            # 原噪声幅度仅 ±0.05ε，且 [0] 索引导致所有动作维度共用同一随机值，
-            # 探索几乎失效；ε 衰减逻辑随之废弃）
-            action += self.random_process.sample()
+        action += self.is_training * max(self.epsilon,0) * ((np.random.random(self.nb_actions)-0.5)/10)[0] # noise [0.0, 1.0)
+
+        if decay_epsilon:
+            self.epsilon -= self.depsilon
+
         self.a_t = action
         return action
 
