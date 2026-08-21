@@ -196,16 +196,19 @@ class PERNEWACT_DDPG(object):
         # Prepare for the target q batch -- profit
         # pernewact: target 动作先 clamp（+ raw 卫生界）再进 target critic，
         # 保证 Q 只在界内动作上被求值（外推区不进入 bootstrap 链）。
-        a_next = self._bound_tensor(self._bound_raw(self.actor_target(next_state_batch)))
+        # 注意：critic_p / critic_c 的 target 必须各自独立 forward actor_target
+        # （保持原版结构）——若共享同一个 actor_target 输出张量，value_loss_p
+        # 的 backward 会释放该张量的 saved tensors，导致 value_loss_c 二次
+        # backward 报 "backward through the graph a second time"。
         next_q_values_p = self.critic_target_p([
             next_state_batch,
-            a_next,
+            self._bound_tensor(self._bound_raw(self.actor_target(next_state_batch))),
         ])
 
         # Prepare for the target q batch -- cost
         next_q_values_c = self.critic_target_c([
             next_state_batch,
-            a_next,
+            self._bound_tensor(self._bound_raw(self.actor_target(next_state_batch))),
         ])
 
         # A1: terminal 语义修复 —— bootstrap 当且仅当非终止转移
