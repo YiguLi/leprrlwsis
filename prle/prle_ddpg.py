@@ -31,7 +31,8 @@ class PRLE_DDPG(object):
     """
 
     def __init__(self, nb_states, nb_actions, args, lam_max=None, lam_min=0.1,
-                 ema_lam=False, ema_alpha=0.02, ema_lam_lr=0.01):
+                 ema_lam=False, ema_alpha=0.02, ema_lam_lr=0.01,
+                 record_update_stats=False):
 
         # Determine device first
         self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -116,6 +117,10 @@ class PRLE_DDPG(object):
         self.PER_epsilon = args.PER_epsilon
         self.beta_increment_per_sampling = args.beta_increment_per_sampling
         self.nb_turbine = args.nb_turbine
+
+        # ---- H 层更新数据记录（每批统计；主循环块末汇总写入 TB/csv） ----
+        self.record_update_stats = record_update_stats
+        self.update_stats = []
 
     def update_policy(self):
         """Sample batch, compute TD errors, update actor/critic/dual. Identical to SP_DDPG."""
@@ -229,6 +234,22 @@ class PRLE_DDPG(object):
                      + td_errors_c_np / (self.td_mean_c + 1e-6))
         new_priorities = td_errors + self.PER_epsilon
         self.memory.update_priorities(batch_idxes, new_priorities)
+
+        # ---- H 层更新数据收集：本批（batch）统计，供主循环块末汇总 ----
+        # 记录的是"这次更新实际吃进去的数据"：TD 误差（PER 优先级来源）、
+        # critic 预测 Q、bootstrap 目标、batch 奖励/成本水平、ISW 权重。
+        if self.record_update_stats:
+            self.update_stats.append({
+                'td_p_mean': float(np.mean(td_errors_p_np)),
+                'td_c_mean': float(np.mean(td_errors_c_np)),
+                'q_p_mean': float(q_batch_p.mean().item()),
+                'q_c_mean': float(q_batch_c.mean().item()),
+                'target_p_mean': float(target_q_batch_p.mean().item()),
+                'target_c_mean': float(target_q_batch_c.mean().item()),
+                'reward_mean': float(profit_batch.mean().item()),
+                'cost_mean': float(cost_batch.mean().item()),
+                'weight_mean': float(weights.mean().item()),
+            })
 
     # ========================================================================
     # EMA dual-ascent (actual-cost based lam update, 与 SP_DDPG 一致)

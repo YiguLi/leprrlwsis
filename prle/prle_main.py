@@ -130,6 +130,7 @@ def train_prle(num_iterations_H,
         df = pd.DataFrame()
         df_episode = pd.DataFrame()
         df_test = pd.DataFrame()
+        df_update = pd.DataFrame()  # H 层更新数据（TD/Q/batch 统计）
 
     # ---- 1440-step window counters for env metrics ----
     window_violation_count = 0
@@ -334,6 +335,21 @@ def train_prle(num_iterations_H,
                 agent_H.update_lam_ema(d_block_H)
                 agent_L.update_ema_cost(sum_c2)
                 agent_L.update_lam_ema(d_block_L)
+
+                # ---- H 层更新数据记录（本块 10 批均值 → TB/csv） ----
+                # 记录"神经网络更新时实际采用的数据"：TD/Q/target/batch 奖励成本/ISW。
+                if agent_H.record_update_stats and len(agent_H.update_stats) > 0:
+                    _stats = agent_H.update_stats
+                    _mean = {k: float(np.mean([s[k] for s in _stats]))
+                             for k in _stats[0]}
+                    agent_H.update_stats = []  # 清空，下一块重收
+                    if upload:
+                        for _k, _v in _mean.items():
+                            writer.add_scalar('update/' + _k, _v, step)
+                    if use_csv:
+                        df_update = pd.concat([df_update, pd.DataFrame(
+                            [{'step': step, **_mean}])], ignore_index=True)
+                        df_update.to_csv('{}/update_stats_H.csv'.format(output))
 
             # Test evaluation: 9-case segmented test every 480 episode steps
             if episode_steps % 480 == 0:
@@ -793,7 +809,8 @@ if __name__ == "__main__":
     # H 层对偶改 EMA 实际成本更新 (与 PRRBB H 同配置)
     agent_H = PRLE_DDPG(nb_states=4, nb_actions=6, args=args,
                         lam_max=20.0, lam_min=3.0,
-                        ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01)
+                        ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
+                        record_update_stats=True)
     agent_H.lam = 5.0
     # L agent: also PRLE_DDPG (block_size=1, stores context=None — no relabeling context)
     # L 层对偶改 EMA 实际成本更新 (与 PER L 同边界)
