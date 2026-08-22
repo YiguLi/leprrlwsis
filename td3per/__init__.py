@@ -6,8 +6,10 @@ Prioritized Experience Replay (PER) and a Lagrangian cost constraint,
 adapted from the PER method (PER_ddpg.SP_DDPG).
 
 Key differences from SP_DDPG:
-  1. Twin critics per channel (profit/cost): min of the pair in targets
-     and policy loss (clipped double Q-learning).
+  1. Twin critics per channel: MIN of the profit pair in targets and
+     policy loss (clipped double Q-learning); MAX of the cost pair
+     (safe: avoid cost underestimation), with cost bootstrap targets
+     clamped to >= 0 (costs are non-negative by construction).
   2. Delayed policy update (actor + target nets updated every
      policy_delay critic updates).
   3. Target policy smoothing: clipped Gaussian noise added to

@@ -576,9 +576,9 @@ if __name__ == "__main__":
                         help='target policy smoothing noise std, as fraction of action amplitude')
     parser.add_argument('--noise_clip', default=0.3, type=float,
                         help='target policy smoothing noise clip, as fraction of action amplitude')
-    parser.add_argument('--cost_critic_mode', default='min', type=str,
+    parser.add_argument('--cost_critic_mode', default='max', type=str,
                         choices=['min', 'max'],
-                        help='cost twin-critic aggregation: min (TD3 paper) or max (conservative/safe)')
+                        help='cost twin-critic aggregation: max (safe, recommended) or min (TD3 paper; risks cost underestimation -> Q_c collapse)')
 
     # RBB parameters (for soft penalty computation only, no hard clipping)
     parser.add_argument('--rbb_fluctuation_limit', default=3.0, type=float,

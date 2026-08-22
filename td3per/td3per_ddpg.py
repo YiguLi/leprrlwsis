@@ -20,8 +20,12 @@ class SP_TD3(object):
 
     Adapted from PER_ddpg.SP_DDPG. TD3 upgrades over DDPG:
       1. Twin critics per channel (critic_p/critic_p2 for profit,
-         critic_c/critic_c2 for cost); targets and policy loss take
-         the MIN of each pair (clipped double Q-learning).
+         critic_c/critic_c2 for cost). Profit targets and policy loss
+         take the MIN of each pair (clipped double Q-learning); the cost
+         aggregate defaults to MAX (safe: cost underestimation would make
+         the Lagrangian treat constraints as cheaper than they are) and
+         cost bootstrap targets are clamped to >= 0 (costs are
+         non-negative by construction).
       2. Delayed policy update: actor + target nets are soft-updated
          only every `policy_delay` critic updates.
       3. Target policy smoothing: clipped Gaussian noise added to
@@ -36,7 +40,7 @@ class SP_TD3(object):
                  ema_lam=False, ema_alpha=0.02, ema_lam_lr=0.01,
                  record_update_stats=False,
                  policy_delay=2, policy_noise=0.1, noise_clip=0.3,
-                 cost_critic_mode='min'):
+                 cost_critic_mode='max'):
 
         # Determine device first
         self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -218,7 +222,11 @@ class SP_TD3(object):
         q_c2_next = self.critic_target_c2([next_state_batch, a_smoothed])
 
         min_p_next = self._pair_min(q_p1_next, q_p2_next)
-        min_c_next = self._aggregate_pair(q_c1_next, q_c2_next)  # cost: min (TD3) or max (safe)
+        # cost aggregate: max (safe, avoid underestimation) or min (TD3 paper).
+        # clamp(min=0): costs are non-negative by construction (c1 = c+0.1*P_F,
+        # c2 = 1000*soc_deviation), so a negative cost bootstrap target is
+        # impossible and only corrupts the Lagrangian — clamp enforces it.
+        min_c_next = self._aggregate_pair(q_c1_next, q_c2_next).clamp(min=0.0)
 
         # A1: terminal 语义修复 —— bootstrap 当且仅当非终止转移
         target_q_batch_p = profit_batch + \
@@ -268,9 +276,11 @@ class SP_TD3(object):
             min_p_cur = self._pair_min(
                 self.critic_p([state_batch, self.actor(state_batch)]),
                 self.critic_p2([state_batch, self.actor(state_batch)]))
+            # clamp(min=0) on cost: prevents the actor from exploiting a
+            # (pathological) negative cost Q inside the Lagrangian objective.
             min_c_cur = self._aggregate_pair(
                 self.critic_c([state_batch, self.actor(state_batch)]),
-                self.critic_c2([state_batch, self.actor(state_batch)]))
+                self.critic_c2([state_batch, self.actor(state_batch)])).clamp(min=0.0)
 
             # cost 为 +
             policy_loss = -(min_p_cur - self.lam * min_c_cur)  # TODO
