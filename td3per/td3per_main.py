@@ -277,9 +277,11 @@ def train(num_iterations_H,
                         df_update.to_csv('{}/update_stats_H.csv'.format(output))
 
             # Test: 9-case segmented evaluation every 480 episode steps
+            # (fixed scenario seed 42 -> same wind trajectory each test, so
+            # consecutive test9 events are point-comparable and smooth)
             if episode_steps % 480 == 0:
                 case_metrics, overall = nine_case_test(
-                    agent_H, agent_L, env_test, rbb_system)
+                    agent_H, agent_L, env_test, rbb_system, seed=42)
                 if use_csv:
                     df_test = pd.concat([df_test, pd.DataFrame([{
                         'step': step,
