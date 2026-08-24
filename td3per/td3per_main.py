@@ -235,8 +235,10 @@ def train(num_iterations_H,
             if episode_steps % 5 == 4:
                 # Curriculum convergence: halve cost_limit when
                 # critic_c < cost_limit for 100 consecutive policy updates
+                # UTD 2:1 -> 1:1: one policy update per new transition
+                # (5 env steps per block -> 5 updates), TD3 paper default.
                 update_num = 0
-                while update_num < 10:
+                while update_num < 5:
                     agent_H.update_policy()
                     agent_L.update_policy()
                     update_num += 1
