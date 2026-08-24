@@ -74,8 +74,10 @@ def train(num_iterations_H,
     consecutive_satisfied_H = 0
     consecutive_satisfied_L = 0
     # H 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_H (与 sum_c1 同口径)
-    d_block_H = 1.2         # 初值: 每块 sum_c1 预算 (与 PRRBB H 同量级)
-    d_block_H_min = 0.3     # curriculum 收紧地板
+    # 按波动设计: c1=0.1*P_F (P_F<=3 时 c=0), 预算 = 0.5*P_F目标;
+    # 初值 2.5 = 允许 5 MW/步; 地板 1.25 = 允许 2.5 MW/步 (不再收得更紧)
+    d_block_H = 2.5         # 初值: 每块 sum_c1 预算 (≈允许 5 MW/步)
+    d_block_H_min = 1.25    # curriculum 收紧地板 (≈允许 2.5 MW/步)
     # B1: L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
     d_block_L = 20.0        # 初值: 每块 sum_c2 预算 (≈每步 4, 按 c2 系数 1000 标定)
     d_block_L_min = 2.5     # curriculum 收紧地板 (≈每步 0.5)
