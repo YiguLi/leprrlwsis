@@ -127,9 +127,10 @@ def Original(obs, max_E = 6.):
     return np.array([pr, u, e, p])
 
 def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
-    """TD3 蒸馏 L 观测 (4维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10].
+    """TD3 蒸馏 L 观测 (5维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10].
 
-    只保留 L 决策所需: 当前可行域 (RBB, 与 pb 无关) + H 影子价格信号 + 自身 SOC。
+    当前可行域 (RBB, 与 pb 无关) + H 影子价格信号 + 自身 SOC + 风速
+    (u 供 PRRBB 风速分段 c2 SOC 安全带可观测; TD3PER 固定带下为冗余信息).
     """
     shadow_price = float(applied_action_H[-1]) * 2.0  # (-0.5,0.5) → (-1,1)
     return np.array([
@@ -137,6 +138,7 @@ def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
         rbb_info['pbrulemax'] / 10.0,
         shadow_price,
         float(observation[2]) / 10.0,
+        float(observation[1]) / 10.0,  # u: 风速 (0~25 → 0~2.5)
     ])
 
 def S_test(agent_H, agent_L, env_test, rbb_system, num_iterations = 5, test_csv = False, output = None, day = 0):
@@ -163,9 +165,9 @@ def S_test(agent_H, agent_L, env_test, rbb_system, num_iterations = 5, test_csv 
             sum_r1 = 0
             sum_c1 = 0
 
-        # L 层观测: TD3 蒸馏 4 维 [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10]
+        # L 层观测: TD3 蒸馏 5 维 [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
         #           / TD3 旧 6 维 / 基线 5 维
-        if agent_L.nb_states == 4:
+        if getattr(agent_L, 'distilled_obs', False):
             _, rbb_info_obs = rbb_system.compute_pbrule(
                 pb_original=0.0, ptur=float(pw_tru),
                 pg_prev=float(obs[-1]), E=float(obs[2]))
@@ -333,9 +335,9 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             pw_tru = env_test.PowerOutput(obs[1], action_H)
             pb_l = list()
 
-        # L 层观测: TD3 蒸馏 4 维 [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10]
+        # L 层观测: TD3 蒸馏 5 维 [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
         #           / TD3 旧 6 维 / 基线 5 维
-        if agent_L.nb_states == 4:
+        if getattr(agent_L, 'distilled_obs', False):
             _, rbb_info_obs = rbb_system.compute_pbrule(
                 pb_original=0.0, ptur=float(pw_tru),
                 pg_prev=float(obs[-1]), E=float(obs[2]))
@@ -473,9 +475,9 @@ def H_test(agent_H, agent_L, env_test, num_iterations = 5, test_csv = False, out
             pb_l = list()
             sum_r1 = 0
 
-        # L 层观测: TD3 蒸馏 4 维 [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10]
+        # L 层观测: TD3 蒸馏 5 维 [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
         #           / TD3 旧 6 维 / 基线 5 维
-        if agent_L.nb_states == 4:
+        if getattr(agent_L, 'distilled_obs', False):
             _, rbb_info_obs = rbb_system.compute_pbrule(
                 pb_original=0.0, ptur=float(pw_tru),
                 pg_prev=float(obs[-1]), E=float(obs[2]))

@@ -393,11 +393,11 @@ def Original(obs, max_E=6.):
 
 
 def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
-    """TD3PRRBB 蒸馏 L 观测 (4维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10].
+    """TD3PRRBB 蒸馏 L 观测 (5维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10].
 
-    与 TD3PER 同步的四维蒸馏观测: 当前可行域 (RBB, 与 pb 无关) + H 影子价格
-    信号 + 自身 SOC。注: PRRBB 的 c2 SOC 安全带是风速分段 (SOC_SAFE_RANGES
-    [wind_level]), 该信息不在观测内, 成本通道部分不可观测。
+    与 TD3PER 同步的五维蒸馏观测: 当前可行域 (RBB, 与 pb 无关) + H 影子价格
+    信号 + 自身 SOC + 风速。u 使 PRRBB 风速分段 c2 SOC 安全带
+    (SOC_SAFE_RANGES[wind_level]) 可观测。
     """
     shadow_price = float(applied_action_H[-1]) * 2.0  # (-0.5,0.5) → (-1,1)
     return np.array([
@@ -405,6 +405,7 @@ def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
         rbb_info['pbrulemax'] / 10.0,
         shadow_price,
         float(observation[2]) / 10.0,
+        float(observation[1]) / 10.0,  # u: 风速 (0~25 → 0~2.5)
     ])
 
 
@@ -439,7 +440,7 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
             sum_r1 = 0.0
             sum_c1 = 0.0
 
-        # L 层观测蒸馏 (4维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10]
+        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
         _, rbb_info_obs = rbb_system.compute_pbrule(
             pb_original=0.0, ptur=float(pw_tru),
             pg_prev=float(obs[-1]), E=float(obs[2]))
@@ -601,7 +602,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             action_H, penalty_NN_H = CheckAction(action_H)
             pw_tru = env_test.PowerOutput(obs[1], action_H)
 
-        # L 层观测蒸馏 (4维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10]
+        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
         _, rbb_info_obs = rbb_system.compute_pbrule(
             pb_original=0.0, ptur=float(pw_tru),
             pg_prev=float(obs[-1]), E=float(obs[2]))

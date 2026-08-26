@@ -139,9 +139,9 @@ def train(num_iterations_H,
             pw_tru = env.PowerOutput(observation[1], applied_action_H)
         prGreen('--H-- ori a_t = {}'.format(round_list(original_action_H, 3)))
 
-        # L 层观测蒸馏 (4维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10]
-        # 可行域 (RBB, 与 pb 无关, 预计算) + H 影子价格信号 + 自身 SOC;
-        # 不再直接看 pr/u/P_G/ptur —— 分层: H 给信号, L 在约束内执行.
+        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
+        # 可行域 (RBB, 与 pb 无关, 预计算) + H 影子价格信号 + 自身 SOC + 风速;
+        # 不再直接看 pr/P_G/ptur —— 分层: H 给信号, L 在约束内执行.
         ptur = float(pw_tru)
         pg_prev = float(observation[-1])
         E_current = float(observation[2])
@@ -735,8 +735,8 @@ if __name__ == "__main__":
     agent_H.lam = 5.0
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
     #     lam2 ∈ [10, 100]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
-    #     蒸馏观测 4 维 = [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10]
-    agent_L = SP_TD3(nb_states = 4, nb_actions = 1, args = args,
+    #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
+    agent_L = SP_TD3(nb_states = 5, nb_actions = 1, args = args,
                      lam_max=100.0, lam_min=10.0,
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                      policy_delay=args.policy_delay,
