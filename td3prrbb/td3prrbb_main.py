@@ -22,7 +22,6 @@ Reward structure (td3prrbb_myfunc.Cal_Rew_PRRBB):
                   wT = wT_u(u)×wT_p(pr), wB = wB_p(pr)×wB_soc(SOC,wind)
              c1 = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + 50*unfeasible_gap
   Lower (L): r2 = 10*shadow_profit - 100*clip_amount
-                  + 0.5*(-pr*pbrule - 490*max(-pb,0))*time
              c2 = 700*soc_deviation   (wind-segmented SOC 安全带)
 
 Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
