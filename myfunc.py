@@ -150,7 +150,11 @@ def S_test(agent_H, agent_L, env_test, rbb_system, num_iterations = 5, test_csv 
             sum_r1 = 0
             sum_c1 = 0
 
-        norm_obs_L = np.append(norm_obs,action_H[-1])
+        # L 层观测自适应: TD3 系 (nb_states=6) 拼入 ptur/10, 基线 (5) 保持原样
+        if agent_L.nb_states == 6:
+            norm_obs_L = np.concatenate([norm_obs, [pw_tru / 10.0], [action_H[-1]]])
+        else:
+            norm_obs_L = np.append(norm_obs, action_H[-1])
         action_L = agent_L.select_action(norm_obs_L)
         action_L, penalty_NN_L = CheckAction(action_L)
 
@@ -310,7 +314,11 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             pw_tru = env_test.PowerOutput(obs[1], action_H)
             pb_l = list()
 
-        norm_obs_L = np.append(norm_obs, action_H[-1])
+        # L 层观测自适应: TD3 系 (nb_states=6) 拼入 ptur/10, 基线 (5) 保持原样
+        if agent_L.nb_states == 6:
+            norm_obs_L = np.concatenate([norm_obs, [pw_tru / 10.0], [action_H[-1]]])
+        else:
+            norm_obs_L = np.append(norm_obs, action_H[-1])
         action_L = agent_L.select_action(norm_obs_L)
         action_L, penalty_NN_L = CheckAction(action_L)
 
@@ -440,7 +448,11 @@ def H_test(agent_H, agent_L, env_test, num_iterations = 5, test_csv = False, out
             pb_l = list()
             sum_r1 = 0
 
-        norm_obs_L = np.append(norm_obs,action_H[-1])
+        # L 层观测自适应: TD3 系 (nb_states=6) 拼入 ptur/10, 基线 (5) 保持原样
+        if agent_L.nb_states == 6:
+            norm_obs_L = np.concatenate([norm_obs, [pw_tru / 10.0], [action_H[-1]]])
+        else:
+            norm_obs_L = np.append(norm_obs, action_H[-1])
         action_L = agent_L.select_action(norm_obs_L)
         action_L, penalty_NN_L = CheckAction(action_L)
 

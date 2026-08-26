@@ -132,7 +132,11 @@ def train(num_iterations_H,
             pw_tru = env.PowerOutput(observation[1], applied_action_H)
         prGreen('--H-- ori a_t = {}'.format(round_list(original_action_H, 3)))
 
-        norm_observation_L = np.append(norm_observation, applied_action_H[-1])
+        # L 层观测: [pr, u, SOC, P_G_last, ptur/10, H影子信号] (6维)
+        # ptur = 风机实时出力: pbrule 完全由 P_G, ptur 与固定参数决定,
+        # 让 L 层直接看到 ptur, 自行学习 pb 与执行值 pbrule 的关系.
+        norm_observation_L = np.concatenate(
+            [norm_observation, [pw_tru / 10.0], [applied_action_H[-1]]])
         prPurple('--L-- obs = {}.'.format(round_list(norm_observation_L,3)))
         # 下层每一个5-step都是一个episode
         if episode_steps % 5 == 0:
@@ -176,7 +180,8 @@ def train(num_iterations_H,
         action_rbb[6:] = action_L
         prGreen('Applied action = {}.'.format(round_list(action_rbb, 3)))
         norm_observation2 = Normalize(observation2)
-        norm_observation2_L = np.append(norm_observation2, applied_action_H[-1])
+        norm_observation2_L = np.concatenate(
+            [norm_observation2, [pw_tru2 / 10.0], [applied_action_H[-1]]])
 
         # ================================================================
         # PRRBB Segmented Reward Computation (机会/风险分离版)
@@ -716,7 +721,8 @@ if __name__ == "__main__":
     agent_H.lam = 5.0
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
     #     lam2 ∈ [10, 100]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
-    agent_L = SP_TD3(nb_states = 5, nb_actions = 1, args = args,
+    #     观测 6 维 = [pr, u, SOC, P_G_last, ptur/10, H影子信号]
+    agent_L = SP_TD3(nb_states = 6, nb_actions = 1, args = args,
                      lam_max=100.0, lam_min=10.0,
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                      policy_delay=args.policy_delay,
