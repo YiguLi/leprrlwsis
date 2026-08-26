@@ -290,7 +290,10 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     # c2: SOC 越界项进入拉格朗日约束（保留原系数 700/MWh）
     shadow_profit = -shadow_price * pbrule
     soc_dev = Cal_soc_deviation(SOC_new, wind_level)
-    r2 = 10.0 * shadow_profit - 100.0 * clip_amount
+    # 可行性门控: 套利奖励仅在动作落在 pbrule 可行域内时发放 ——
+    # 先学"在范围内动作"(范围外只有裁剪惩罚), 再学范围内最优(套利).
+    in_range = 1.0 if clip_amount <= 1e-6 else 0.0
+    r2 = 10.0 * shadow_profit * in_range - 100.0 * clip_amount
     c2 = 700.0 * soc_dev
 
     # ==== Details ====
@@ -392,6 +395,26 @@ def Original(obs, max_E=6.):
     return np.array([obs[0] * 1000, obs[1] * 10, obs[2] * 10, obs[3] * 10])
 
 
+def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
+    """TD3PRRBB 蒸馏 L 观测: [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10,
+    soc_safe_min/10, soc_safe_max/10] (6维).
+
+    只保留 L 决策所需: 当前可行域 (RBB, 与 pb 无关) + H 影子价格信号 + SOC
+    + 当前风速档的 c2 SOC 安全带 (wind-segmented, 供 c2 成本通道观测)。
+    """
+    shadow_price = float(applied_action_H[-1]) * 2.0  # (-0.5,0.5) → (-1,1)
+    wind_level = get_wind_level(float(observation[1]))
+    soc_safe_min, soc_safe_max = SOC_SAFE_RANGES[wind_level]
+    return np.array([
+        rbb_info['pbrulemin'] / 10.0,
+        rbb_info['pbrulemax'] / 10.0,
+        shadow_price,
+        float(observation[2]) / 10.0,
+        soc_safe_min / 10.0,
+        soc_safe_max / 10.0,
+    ])
+
+
 # =============================================================================
 # 9. Test Function
 # =============================================================================
@@ -423,11 +446,12 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
             sum_r1 = 0.0
             sum_c1 = 0.0
 
-        # L 层观测自适应: TD3 系 (nb_states=6) 拼入 ptur/10, 基线 (5) 保持原样
-        if agent_L.nb_states == 6:
-            norm_obs_L = np.concatenate([norm_obs, [pw_tru / 10.0], [action_H[-1]]])
-        else:
-            norm_obs_L = np.append(norm_obs, action_H[-1])
+        # L 层观测蒸馏: [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10,
+        #                soc_safe_min/10, soc_safe_max/10] (6维)
+        _, rbb_info_obs = rbb_system.compute_pbrule(
+            pb_original=0.0, ptur=float(pw_tru),
+            pg_prev=float(obs[-1]), E=float(obs[2]))
+        norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs)
         action_L = agent_L.select_action(norm_obs_L)
         action_L, penalty_NN_L = CheckAction(action_L)
 
@@ -585,11 +609,12 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             action_H, penalty_NN_H = CheckAction(action_H)
             pw_tru = env_test.PowerOutput(obs[1], action_H)
 
-        # L 层观测自适应: TD3 系 (nb_states=6) 拼入 ptur/10, 基线 (5) 保持原样
-        if agent_L.nb_states == 6:
-            norm_obs_L = np.concatenate([norm_obs, [pw_tru / 10.0], [action_H[-1]]])
-        else:
-            norm_obs_L = np.append(norm_obs, action_H[-1])
+        # L 层观测蒸馏: [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10,
+        #                soc_safe_min/10, soc_safe_max/10] (6维)
+        _, rbb_info_obs = rbb_system.compute_pbrule(
+            pb_original=0.0, ptur=float(pw_tru),
+            pg_prev=float(obs[-1]), E=float(obs[2]))
+        norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs)
         action_L = agent_L.select_action(norm_obs_L)
         action_L, penalty_NN_L = CheckAction(action_L)
 

@@ -40,7 +40,7 @@ class SP_TD3(object):
                  ema_lam=False, ema_alpha=0.02, ema_lam_lr=0.01,
                  record_update_stats=False,
                  policy_delay=2, policy_noise=0.1, noise_clip=0.3,
-                 cost_critic_mode='max'):
+                 cost_critic_mode='max', output_bound=None):
 
         # Determine device first
         self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -173,6 +173,11 @@ class SP_TD3(object):
         else:
             amp = np.ones(self.nb_actions)
         self.action_amp = np.asarray(amp, dtype=np.float32)
+        # L 层: tanh 收缩输出到 ±output_bound (有界动作, 修复裁剪区零梯度);
+        # H 层 output_bound=None 保持原始无界输出 (由 CheckAction 裁剪) 不变.
+        self.output_bound = output_bound
+        self.action_amp_t = torch.tensor(self.action_amp, dtype=torch.float32,
+                                         device=self.device)
 
     # ---- TD3 helper: aggregate a critic pair (min or max) ----
     def _pair_min(self, q1, q2):
@@ -209,11 +214,16 @@ class SP_TD3(object):
 
         # ---- TD3: target policy smoothing (clipped Gaussian noise,
         #      scaled per dimension by action amplitude) ----
-        amp_t = torch.tensor(self.action_amp, dtype=torch.float32, device=self.device)
+        amp_t = self.action_amp_t
         a_next = self.actor_target(next_state_batch)
+        # L 层: target 动作同样 tanh 收缩, 与 actor 输出同分布
+        if self.output_bound is not None:
+            a_next = torch.tanh(a_next) * amp_t
         noise = torch.randn_like(a_next) * (self.policy_noise * amp_t)
         noise = noise.clamp(-self.noise_clip * amp_t, self.noise_clip * amp_t)
         a_smoothed = a_next + noise
+        if self.output_bound is not None:
+            a_smoothed = a_smoothed.clamp(-amp_t, amp_t)
 
         # ---- TD3: twin targets, take min of the pair (clipped double Q) ----
         q_p1_next = self.critic_target_p([next_state_batch, a_smoothed])
@@ -273,14 +283,18 @@ class SP_TD3(object):
         if self.update_count % self.policy_delay == 0:
             self.actor.zero_grad()
             # Fresh forward through the (just updated) critics: min of twins.
+            # L 层: actor 输出 tanh 收缩后再进 critic, 梯度经 tanh 回传.
+            a_cur = self.actor(state_batch)
+            if self.output_bound is not None:
+                a_cur = torch.tanh(a_cur) * amp_t
             min_p_cur = self._pair_min(
-                self.critic_p([state_batch, self.actor(state_batch)]),
-                self.critic_p2([state_batch, self.actor(state_batch)]))
+                self.critic_p([state_batch, a_cur]),
+                self.critic_p2([state_batch, a_cur]))
             # clamp(min=0) on cost: prevents the actor from exploiting a
             # (pathological) negative cost Q inside the Lagrangian objective.
             min_c_cur = self._aggregate_pair(
-                self.critic_c([state_batch, self.actor(state_batch)]),
-                self.critic_c2([state_batch, self.actor(state_batch)])).clamp(min=0.0)
+                self.critic_c([state_batch, a_cur]),
+                self.critic_c2([state_batch, a_cur])).clamp(min=0.0)
 
             # cost 为 +
             policy_loss = -(min_p_cur - self.lam * min_c_cur)  # TODO
@@ -410,7 +424,12 @@ class SP_TD3(object):
 
     def select_action(self, s_t, decay_epsilon=True):
         action = to_numpy(self.actor(to_tensor(np.array([s_t])))).squeeze(0)
+        # L 层: tanh 收缩输出 → 动作天然有界 ∈ (-bound, +bound)
+        if self.output_bound is not None:
+            action = np.tanh(action) * self.output_bound
         action += self.is_training * max(self.epsilon,0) * ((np.random.random(self.nb_actions)-0.5)/10)[0] # noise [0.0, 1.0)
+        if self.output_bound is not None:
+            action = np.clip(action, -self.output_bound, self.output_bound)
 
         if decay_epsilon:
             self.epsilon -= self.depsilon
