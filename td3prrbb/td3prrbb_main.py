@@ -242,9 +242,7 @@ def train(num_iterations_H,
             if step > args.warmup:
                 agent_L.update_ema_cost(sum_c2)
                 agent_L.update_lam_ema(d_block_L)
-            # L 层视野与 H 层一致: bootstrap 跨块累积, 仅整日末 (done) 切断.
-            # (原每 5 步块末 done_L=True 使 L 层 Q 视界只有 5 步)
-            done_L = done
+            done_L = True
         agent_L.observe_jump(norm_observation_L, original_action_L, r2, c2, norm_observation2_L, done_L)
 
         if step > args.warmup:
