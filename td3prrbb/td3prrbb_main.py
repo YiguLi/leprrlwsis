@@ -50,6 +50,7 @@ from util import *
 from td3prrbb.td3prrbb_myfunc import (
     CheckAction, Normalize, Original,
     Cal_Rew_PRRBB, nine_case_test,
+    build_L_obs_distilled,
     get_price_level,
 )
 from td3prrbb.td3prrbb_rule_bess import RuleBasedBESS
@@ -138,11 +139,16 @@ def train(num_iterations_H,
             pw_tru = env.PowerOutput(observation[1], applied_action_H)
         prGreen('--H-- ori a_t = {}'.format(round_list(original_action_H, 3)))
 
-        # L 层观测: [pr, u, SOC, P_G_last, ptur/10, H影子信号] (6维)
-        # ptur = 风机实时出力: pbrule 完全由 P_G, ptur 与固定参数决定,
-        # 让 L 层直接看到 ptur, 自行学习 pb 与执行值 pbrule 的关系.
-        norm_observation_L = np.concatenate(
-            [norm_observation, [pw_tru / 10.0], [applied_action_H[-1]]])
+        # L 层观测蒸馏 (4维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10]
+        # 可行域 (RBB, 与 pb 无关, 预计算) + H 影子价格信号 + 自身 SOC;
+        # 不再直接看 pr/u/P_G/ptur —— 分层: H 给信号, L 在约束内执行.
+        ptur = float(pw_tru)
+        pg_prev = float(observation[-1])
+        E_current = float(observation[2])
+        _, rbb_info_obs = rbb_system.compute_pbrule(
+            pb_original=0.0, ptur=ptur, pg_prev=pg_prev, E=E_current)
+        norm_observation_L = build_L_obs_distilled(
+            observation, pw_tru, applied_action_H, rbb_info_obs)
         prPurple('--L-- obs = {}.'.format(round_list(norm_observation_L,3)))
         # 下层每一个5-step都是一个episode
         if episode_steps % 5 == 0:
@@ -165,9 +171,6 @@ def train(num_iterations_H,
         # RBB: Rule-Based BESS Clipping (hard clipping before env.step)
         # ================================================================
         pb_original = float(action[-1])
-        ptur = float(pw_tru)
-        pg_prev = float(observation[-1])
-        E_current = float(observation[2])
 
         pbrule, rbb_info = rbb_system.compute_pbrule(
             pb_original=pb_original,
@@ -186,8 +189,12 @@ def train(num_iterations_H,
         action_rbb[6:] = action_L
         prGreen('Applied action = {}.'.format(round_list(action_rbb, 3)))
         norm_observation2 = Normalize(observation2)
-        norm_observation2_L = np.concatenate(
-            [norm_observation2, [pw_tru2 / 10.0], [applied_action_H[-1]]])
+        # 下一状态 L 观测: 用下一状态重算可行域 (pb 无关)
+        _, rbb_info_obs2 = rbb_system.compute_pbrule(
+            pb_original=0.0, ptur=float(pw_tru2),
+            pg_prev=float(observation2[-1]), E=float(observation2[2]))
+        norm_observation2_L = build_L_obs_distilled(
+            observation2, pw_tru2, applied_action_H, rbb_info_obs2)
 
         # ================================================================
         # PRRBB Segmented Reward Computation (机会/风险分离版)
@@ -728,8 +735,8 @@ if __name__ == "__main__":
     agent_H.lam = 5.0
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
     #     lam2 ∈ [10, 100]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
-    #     观测 6 维 = [pr, u, SOC, P_G_last, ptur/10, H影子信号]
-    agent_L = SP_TD3(nb_states = 6, nb_actions = 1, args = args,
+    #     蒸馏观测 4 维 = [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10]
+    agent_L = SP_TD3(nb_states = 4, nb_actions = 1, args = args,
                      lam_max=100.0, lam_min=10.0,
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                      policy_delay=args.policy_delay,
