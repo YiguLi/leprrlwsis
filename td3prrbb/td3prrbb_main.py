@@ -87,6 +87,7 @@ def train(num_iterations_H,
     episode_reward = episode_cost = episode_cost2 = episode_profit = 0.
     episode_bess_profit = 0.
     observation = None
+    prev_soc = None   # 上一 episode 末 SOC，跨 episode 继承（None = 首个 episode，用默认重置值）
     time = 1/60
     # Curriculum learning: consecutive steps where EMA cost <= d_block
     consecutive_satisfied_H = 0
@@ -114,6 +115,11 @@ def train(num_iterations_H,
         prYellow('########### step:{} ###########'.format(step))
         if observation is None:
             observation = deepcopy(env.reset())  # [Pr,U,E,P_last]
+            # SOC 继承前一 episode：env.reset() 默认把 E 重置为 3.0，
+            # 此处恢复为上一 episode 末的 SOC（首个 episode 无前值，保持默认）。
+            if prev_soc is not None:
+                env.E = prev_soc
+                observation[2] = prev_soc
             norm_observation = Normalize(observation)
             agent_H.reset(norm_observation)
 
@@ -529,6 +535,7 @@ def train(num_iterations_H,
 
             # end of episode
             # reset
+            prev_soc = float(observation[2])  # 保存本 episode 末 SOC，供下一 episode 继承
             observation = None
             episode_steps = 0
             episode_reward = episode_cost = episode_profit = 0.
