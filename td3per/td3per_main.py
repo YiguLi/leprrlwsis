@@ -121,16 +121,11 @@ def train(num_iterations_H,
         prGreen('--H-- ori a_t = {}'.format(round_list(original_action_H, 3)))
         
         
-        # L 层观测蒸馏: [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10] (4维)
-        # 只保留 L 决策所需: 可行域 (RBB, 与 pb 无关, 预计算) + H 影子价格信号
-        # + 自身 SOC。不再直接看 pr/u/P_G/ptur —— 分层: H 给信号, L 在约束内执行。
-        ptur = float(pw_tru)
-        pg_prev = float(observation[-1])
-        E_current = float(observation[2])
-        _, rbb_info_obs = rbb_system.compute_pbrule(
-            pb_original=0.0, ptur=ptur, pg_prev=pg_prev, E=E_current)
-        norm_observation_L = build_L_obs_distilled(
-            observation, pw_tru, applied_action_H, rbb_info_obs)
+        # L 层观测: [pr, u, SOC, P_G_last, ptur/10, H影子信号] (6维)
+        # ptur = 风机实时出力: pbrule 完全由 P_G, ptur 与固定参数决定,
+        # 让 L 层直接看到 ptur, 自行学习 pb 与执行值 pbrule 的关系.
+        norm_observation_L = np.concatenate(
+            [norm_observation, [pw_tru / 10.0], [applied_action_H[-1]]])
         prPurple('--L-- obs = {}.'.format(round_list(norm_observation_L,3)))
         # 下层每一个5-step都是一个episode
         if episode_steps % 5 == 0:    
@@ -152,7 +147,10 @@ def train(num_iterations_H,
         # ================================================================
         # RBB: Rule-Based BESS Clipping (hard clipping before env.step)
         # ================================================================
-        pb_original = float(action[-1])  # applied (CheckAction 后)
+        pb_original = float(action[-1])
+        ptur = float(pw_tru)
+        pg_prev = float(observation[-1])
+        E_current = float(observation[2])
 
         pbrule, rbb_info = rbb_system.compute_pbrule(
             pb_original=pb_original,
@@ -172,12 +170,8 @@ def train(num_iterations_H,
         action_rbb[6:] = action_L
         prGreen('Applied action = {}.'.format(round_list(action_rbb, 3)))
         norm_observation2 = Normalize(observation2)
-        # 下一状态 L 观测: 用下一状态重算可行域 (pb 无关)
-        _, rbb_info_obs2 = rbb_system.compute_pbrule(
-            pb_original=0.0, ptur=float(pw_tru2),
-            pg_prev=float(observation2[-1]), E=float(observation2[2]))
-        norm_observation2_L = build_L_obs_distilled(
-            observation2, pw_tru2, applied_action_H, rbb_info_obs2)
+        norm_observation2_L = np.concatenate(
+            [norm_observation2, [pw_tru2 / 10.0], [applied_action_H[-1]]])
         
         r, c = Cal_Rew(observation, observation2, action_rbb)
         r1 = observation[0] * observation2[-1] * time - penalty_NN_H - 490.0 * max(-float(pbrule), 0) * time
@@ -222,10 +216,7 @@ def train(num_iterations_H,
         else:
             shadow_profit = 0.0
 
-        # 可行性门控: 套利奖励仅在动作落在 pbrule 可行域内时发放 ——
-        # 先学"在范围内动作"(范围外只有裁剪惩罚), 再学范围内最优(套利).
-        in_range = 1.0 if clip_amount <= 1e-6 else 0.0
-        r2 = 10.0 * shadow_profit * in_range - 100.0 * clip_amount
+        r2 = 10.0 * shadow_profit - 100.0 * clip_amount
 
         # c2: SOC 越界项进入拉格朗日约束（保留原系数 1000/MWh）
         c2 = 1000.0 * soc_deviation
@@ -248,8 +239,7 @@ def train(num_iterations_H,
                 agent_L.update_lam_ema(d_block_L)
             done_L = True
             # c2 = 0.01 * abs(sum(pb_l)-action[5]) + c2 # todo 是否要*0.1， 有关 signal 的 terminal reward 
-        # 存裁剪后动作 applied_action_L —— 与奖励/执行一致 (修复动作-奖励错配)
-        agent_L.observe_jump(norm_observation_L, applied_action_L, r2, c2, norm_observation2_L, done_L)
+        agent_L.observe_jump(norm_observation_L, original_action_L, r2, c2, norm_observation2_L, done_L)
         
         if step > args.warmup:
             #--------------------Update----------------------
@@ -682,16 +672,14 @@ if __name__ == "__main__":
     agent_H.lam = 5.0
     # B1: L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
     #     lam2 ∈ [10, 100]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
-    #     蒸馏观测 4 维 = [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10]
-    #     output_bound=10: L actor 输出 tanh 收缩到 ±10 (有界, 修复裁剪区零梯度)
-    agent_L = SP_TD3(nb_states = 4, nb_actions = 1, args = args,
+    #     观测 6 维 = [pr, u, SOC, P_G_last, ptur/10, H影子信号]
+    agent_L = SP_TD3(nb_states = 6, nb_actions = 1, args = args,
                      lam_max=100.0, lam_min=10.0,
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                      policy_delay=args.policy_delay,
                      policy_noise=args.policy_noise,
                      noise_clip=args.noise_clip,
-                     cost_critic_mode=args.cost_critic_mode,
-                     output_bound=10.0)
+                     cost_critic_mode=args.cost_critic_mode)
     agent_L.cost_limit = 10.0  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
     #TODO 是否预训练
     # agent_H.load_weights('output/1_2310S-run18')

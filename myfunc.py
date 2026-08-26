@@ -126,19 +126,6 @@ def Original(obs, max_E = 6.):
     p = obs[3] * 10 # park
     return np.array([pr, u, e, p])
 
-def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
-    """TD3PER 蒸馏 L 观测: [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10] (4维).
-
-    只保留 L 决策所需: 当前可行域 (RBB, 与 pb 无关) + H 影子价格信号 + 自身 SOC。
-    """
-    shadow_price = float(applied_action_H[-1]) * 2.0  # (-0.5,0.5) → (-1,1)
-    return np.array([
-        rbb_info['pbrulemin'] / 10.0,
-        rbb_info['pbrulemax'] / 10.0,
-        shadow_price,
-        float(observation[2]) / 10.0,
-    ])
-
 def S_test(agent_H, agent_L, env_test, rbb_system, num_iterations = 5, test_csv = False, output = None, day = 0):
     obs = env_test.TestReset(day)
     norm_obs = Normalize(obs)
@@ -163,14 +150,8 @@ def S_test(agent_H, agent_L, env_test, rbb_system, num_iterations = 5, test_csv 
             sum_r1 = 0
             sum_c1 = 0
 
-        # L 层观测: TD3PER 蒸馏 4 维 [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10]
-        #           / TD3 旧 6 维 / 基线 5 维
-        if agent_L.nb_states == 4:
-            _, rbb_info_obs = rbb_system.compute_pbrule(
-                pb_original=0.0, ptur=float(pw_tru),
-                pg_prev=float(obs[-1]), E=float(obs[2]))
-            norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs)
-        elif agent_L.nb_states == 6:
+        # L 层观测自适应: TD3 系 (nb_states=6) 拼入 ptur/10, 基线 (5) 保持原样
+        if agent_L.nb_states == 6:
             norm_obs_L = np.concatenate([norm_obs, [pw_tru / 10.0], [action_H[-1]]])
         else:
             norm_obs_L = np.append(norm_obs, action_H[-1])
@@ -333,14 +314,8 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             pw_tru = env_test.PowerOutput(obs[1], action_H)
             pb_l = list()
 
-        # L 层观测: TD3PER 蒸馏 4 维 [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10]
-        #           / TD3 旧 6 维 / 基线 5 维
-        if agent_L.nb_states == 4:
-            _, rbb_info_obs = rbb_system.compute_pbrule(
-                pb_original=0.0, ptur=float(pw_tru),
-                pg_prev=float(obs[-1]), E=float(obs[2]))
-            norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs)
-        elif agent_L.nb_states == 6:
+        # L 层观测自适应: TD3 系 (nb_states=6) 拼入 ptur/10, 基线 (5) 保持原样
+        if agent_L.nb_states == 6:
             norm_obs_L = np.concatenate([norm_obs, [pw_tru / 10.0], [action_H[-1]]])
         else:
             norm_obs_L = np.append(norm_obs, action_H[-1])
@@ -473,14 +448,8 @@ def H_test(agent_H, agent_L, env_test, num_iterations = 5, test_csv = False, out
             pb_l = list()
             sum_r1 = 0
 
-        # L 层观测: TD3PER 蒸馏 4 维 [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10]
-        #           / TD3 旧 6 维 / 基线 5 维
-        if agent_L.nb_states == 4:
-            _, rbb_info_obs = rbb_system.compute_pbrule(
-                pb_original=0.0, ptur=float(pw_tru),
-                pg_prev=float(obs[-1]), E=float(obs[2]))
-            norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs)
-        elif agent_L.nb_states == 6:
+        # L 层观测自适应: TD3 系 (nb_states=6) 拼入 ptur/10, 基线 (5) 保持原样
+        if agent_L.nb_states == 6:
             norm_obs_L = np.concatenate([norm_obs, [pw_tru / 10.0], [action_H[-1]]])
         else:
             norm_obs_L = np.append(norm_obs, action_H[-1])
