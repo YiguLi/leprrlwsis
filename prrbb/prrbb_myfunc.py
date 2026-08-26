@@ -26,9 +26,7 @@ Upper (H) c1（风险侧）:
 
 Lower (L):
   r2 = 10.0 * shadow_profit - 100.0 * clip_amount
-       + R2_REAL_PROFIT_SCALE * real_profit
-    real_profit = (-pr * pbrule - 490.0 * max(-pbrule, 0.0)) * time
-    R2_REAL_PROFIT_SCALE = 0.5  (真实套利利润项, 量级约为 10*shadow_profit 的一半)
+    shadow_profit = -shadow_price * pbrule  (影子电价引导套利)
   c2 = 700.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束, 保留原系数)
 """
 
@@ -97,10 +95,6 @@ WB_SOC_OUTSIDE = 0.7
 C1_RISK = {'LOW': 0.8, 'MEDIUM': 1.0, 'HIGH': 1.2}
 # unfeasible_gap（平抑可行性缺口, MW）进入 c1 的系数
 W_GAP = 50.0
-
-# r2 真实利润项（real price - deg）的缩放系数：
-# 量级约为上层引导项 10*shadow_profit 的一半
-R2_REAL_PROFIT_SCALE = 0.5
 
 
 def get_wT(wind_level, price_level):
@@ -236,7 +230,6 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
              （wT/wB 乘法分解: wT=wT_u×wT_p, wB=wB_p×wB_soc）
     Upper c1 = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
     Lower r2 = 10*shadow_profit - 100*clip_amount
-               + R2_REAL_PROFIT_SCALE*(-pr*pbrule-490*max(-pb,0))*dt
     Lower c2 = 700*soc_deviation
 
     Parameters
@@ -293,12 +286,11 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     c1 = c1 + W_GAP * unfeasible_gap
 
     # ==== Lower Level (L) ====
-    # r2: 影子套利利润 - 100*clip_amount + 0.5*真实套利利润(real price - deg)
+    # r2: 影子套利利润 - 100*clip_amount (纯信号跟随, 无真实利润项)
     # c2: SOC 越界项进入拉格朗日约束（保留原系数 700/MWh）
     shadow_profit = -shadow_price * pbrule
-    real_profit = (-pr_old * pbrule - 490.0 * max(-pbrule, 0.0)) * time
     soc_dev = Cal_soc_deviation(SOC_new, wind_level)
-    r2 = 10.0 * shadow_profit - 100.0 * clip_amount + R2_REAL_PROFIT_SCALE * real_profit
+    r2 = 10.0 * shadow_profit - 100.0 * clip_amount
     c2 = 700.0 * soc_dev
 
     # ==== Details ====
@@ -320,7 +312,6 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
         'revenue': turbine_profit + bess_profit,
         'degradation': 490.0 * max(-pbrule, 0.0) * time,
         'shadow_profit': shadow_profit,
-        'real_profit': real_profit,
         'shadow_price': shadow_price,
         'soc_deviation': soc_dev,
         # Power

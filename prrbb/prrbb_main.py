@@ -75,7 +75,7 @@ def train_prrbb(num_iterations_H,
                       - 490*max(-pbrule,0)*time - penalty_NN_H
                       wT=wT_u(u)*wT_p(pr), wB=wB_p(pr)*wB_soc(SOC,wind)
                  c1 = r_u(u)*(10*max(0,P_F-3) + 0.1*P_F) + 50*unfeasible_gap
-      Lower (L): r2 = 10*shadow_profit - 100*clip_amount + 0.5*real_profit
+      Lower (L): r2 = 10*shadow_profit - 100*clip_amount
                  c2 = 700*soc_deviation  (SOC-safe 项, 拉格朗日约束)
 
     Lagrange multiplier updates:
