@@ -54,17 +54,9 @@ class WindBattery:
         # 上一步电网功率，用于计算波动
         self.P_G_prev = 0.0
 
-        # 初始 SOC（仅首次）。reset() 不再重置 SOC —— SOC 跨日延续:
-        # 配合 L 层整天视界, 电池可为未来多天的套利/平抑需求蓄能或放电.
-        self.E = 3.
-
     def reset(self):
         # 1. reset电池
-        # 2026-08-24: 取消 SOC 每日重置方案 —— 原代码 self.E = 3. (每日回正 3.0)
-        # 已注释保留。SOC 现在跨日延续（保留上一日结束值），首次值由 __init__ 初始化。
-        # 意图: L 层视界已拉长到整天, SOC 跨日延续让电池可为未来多天蓄能/放电,
-        #       不再每天被硬回 3.0 打断长期策略。
-        # self.E = 3.
+        self.E = 3.
         
         # 2. reset风速（固定随机序列，保证跨项目可比较）
         idx = self.episode_count % len(FIXED_DAY_SEQUENCE)
