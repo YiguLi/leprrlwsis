@@ -213,7 +213,7 @@ def train(num_iterations_H,
                 # Curriculum convergence: halve cost_limit when
                 # critic_c < cost_limit for 100 consecutive policy updates
                 update_num = 0
-                while update_num < 10:
+                while update_num < 5:
                     agent_H.update_policy()
                     agent_L.update_policy()
                     update_num += 1

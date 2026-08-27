@@ -264,7 +264,7 @@ def train_prrbb(num_iterations_H,
         if step > args.warmup:
             if episode_steps % 5 == 4:
                 update_num = 0
-                while update_num < 10:
+                while update_num < 5:
                     agent_H.update_policy()
                     agent_L.update_policy()
                     update_num += 1
