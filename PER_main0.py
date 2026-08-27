@@ -29,6 +29,9 @@ import matlab
 import matlab.engine
 engine = matlab.engine.start_matlab()
 
+# H 层 c1 中 unfeasible_gap 的惩罚权重 (MW→成本系数, 与 PRRBB W_GAP 一致)
+W_GAP = 50.0
+
 # FIXME: 最基础的版本：PER+CL
 def train(num_iterations_H,
           agent_H,
@@ -153,8 +156,9 @@ def train(num_iterations_H,
         elif soc > soc_safe_max:
             soc_deviation = soc - soc_safe_max
 
-        # c1: 拉格朗日惩罚 = 越限惩罚(c) + 平滑项 0.1*P_F（P_F 为波动值，不仅限于越限值）
-        c1 = c + 0.1 * P_F
+        # c1: 拉格朗日惩罚 = 越限惩罚(c) + 平滑项 0.1*P_F + W_GAP*unfeasible_gap
+        #     （unfeasible_gap: 波动约束∩物理约束为空时的不可行缺口, 硬裁剪无法消除）
+        c1 = c + 0.1 * P_F + W_GAP * rbb_info['unfeasible_gap']
         sum_r1 += r1
         sum_c1 += c1
         prGreen('r1 = {}'.format(round(r1, 3)))
