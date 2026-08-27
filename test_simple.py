@@ -14,9 +14,14 @@ sys.path.insert(0, _SCRIPT_DIR)
 
 from env import WindBattery
 from util import *
-from myfunc import Normalize, CheckAction
+from myfunc import Normalize, CheckAction, build_L_obs_distilled
 from PER_ddpg import SP_DDPG
 from prle.prle_ddpg import PRLE_DDPG
+from prle.prle_myfunc import Cal_Rew_PRRBB as Cal_Rew_PRLE
+from td3per.td3per_ddpg import SP_TD3 as SP_TD3_PER
+from td3prrbb.td3prrbb_ddpg import SP_TD3 as SP_TD3_PRRBB
+from td3prle.td3prle_ddpg import SP_TD3_PRLE
+from td3prle.td3prle_myfunc import Cal_Rew_PRRBB as Cal_Rew_TD3PRLE
 from prrbb.prrbb_rule_bess import RuleBasedBESS
 from prrbb.prrbb_myfunc import Cal_Rew_PRRBB
 from torch.utils.tensorboard import SummaryWriter
@@ -36,7 +41,7 @@ def main():
     # ---- 参数 ----
     print()
     model_path = input("  模型路径: ").strip().strip('"')
-    proj_type = input("  项目类型 (PER/PRRBB/PRLE, 默认 PER): ").strip() or "PER"
+    proj_type = input("  项目类型 (PER/PRRBB/PRLE/TD3PER/TD3PRRBB/TD3PRLE, 默认 PER): ").strip() or "PER"
     run_str = input("  测试序号 (run-x, 默认 1): ").strip()
     run_number = int(run_str) if run_str else 1
     n_str = input("  测试天数 (默认 5): ").strip()
@@ -81,6 +86,18 @@ def main():
     if proj_type == 'PRLE':
         agent_H = PRLE_DDPG(nb_states=4, nb_actions=6, args=ns)
         agent_L = PRLE_DDPG(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
+        agent_L.cost_limit = 10.0
+    elif proj_type == 'TD3PRLE':
+        agent_H = SP_TD3_PRLE(nb_states=4, nb_actions=6, args=ns)
+        agent_L = SP_TD3_PRLE(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
+        agent_L.cost_limit = 10.0
+    elif proj_type == 'TD3PER':
+        agent_H = SP_TD3_PER(nb_states=4, nb_actions=6, args=ns)
+        agent_L = SP_TD3_PER(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
+        agent_L.cost_limit = 10.0
+    elif proj_type == 'TD3PRRBB':
+        agent_H = SP_TD3_PRRBB(nb_states=4, nb_actions=6, args=ns)
+        agent_L = SP_TD3_PRRBB(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
         agent_L.cost_limit = 10.0
     else:
         agent_H = SP_DDPG(nb_states=4, nb_actions=6, args=ns)
@@ -132,7 +149,14 @@ def main():
                 action_H, penalty_NN_H = CheckAction(action_H)
                 pw_tru = env.PowerOutput(obs[1], action_H)
 
-            norm_obs_L = np.append(norm_obs, action_H[-1])
+            if proj_type.startswith('TD3'):
+                # TD3 系列: 蒸馏 L 观测 — 先预计算与 pb 无关的可行域
+                _, rbb_info_obs = rbb.compute_pbrule(
+                    pb_original=0.0, ptur=float(pw_tru),
+                    pg_prev=float(obs[-1]), E=float(obs[2]))
+                norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs)
+            else:
+                norm_obs_L = np.append(norm_obs, action_H[-1])
             action_L = agent_L.select_action(norm_obs_L)
             action_L, penalty_NN_L = CheckAction(action_L)
 
@@ -148,16 +172,28 @@ def main():
                 env.step(action_env[:6], action_env[6:], pw_tru)
             norm_obs2 = Normalize(obs2)
 
+            P_F = info['P_F']  # 提前提取: reward 分支与 cvm 统计共用
             profit_step = (obs2[-1] * obs[0] - 490.0 * max(-float(pbrule), 0.0)) * TIME
 
-            if proj_type in ('PRRBB', 'PRLE'):
+            if proj_type in ('PRRBB', 'TD3PRRBB'):
+                # PRRBB 与 TD3PRRBB 公式一致 (td3prrbb_myfunc 为 prrbb_myfunc 拷贝)
                 r1, c1, r2, c2, _ = Cal_Rew_PRRBB(
                     obs, obs2, action_env, rbb_info,
                     penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru))
-            else:
+            elif proj_type == 'PRLE':
+                r1, c1, r2, c2, _ = Cal_Rew_PRLE(
+                    obs, obs2, action_env, rbb_info,
+                    penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru))
+            elif proj_type == 'TD3PRLE':
+                # TD3PRLE: 动态阈值 + W_GAP*unfeasible_gap 版
+                r1, c1, r2, c2, _ = Cal_Rew_TD3PRLE(
+                    obs, obs2, action_env, rbb_info,
+                    penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru))
+            else:  # PER / TD3PER
                 _, c = Cal_Rew(obs, obs2, action_env)
                 r1 = obs2[-1] * obs[0] * TIME - penalty_NN_H - 490.0 * max(-float(pbrule), 0.0) * TIME
-                c1 = c
+                # c1 与训练口径一致: 越限惩罚 + 平滑项 + 50*unfeasible_gap (PER/TD3PER 相同)
+                c1 = c + 0.1 * P_F + 50.0 * float(rbb_info['unfeasible_gap'])
                 signal = action[5]
                 shadow_profit = -signal * 2.0 * float(pbrule)
                 soc = float(obs2[2])
@@ -168,7 +204,6 @@ def main():
             ep_profit += profit_step
             ep_reward += (r1 + r2)
 
-            P_F = info['P_F']
             if P_F > 3.0:
                 cvm += 1
                 cpf += (P_F - 3.0)
