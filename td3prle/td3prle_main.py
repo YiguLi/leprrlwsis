@@ -110,8 +110,8 @@ def train(num_iterations_H,
     consecutive_satisfied_H = 0
     consecutive_satisfied_L = 0
     # H 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_H (与 sum_c1 同口径)
-    # PRLE 标定: c1 = c1_risk_coeff*[10*(P_F-3)+ + 0.1*P_F]
-    #            (HIGH 风速 ×1.2, LOW/MEDIUM ×0.8, 无 unfeasible_gap 项)
+    # PRLE 标定: c1 = c1_risk_coeff*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
+    #            (HIGH 风速 ×1.2, LOW/MEDIUM ×0.8; W_GAP=50 对齐 PER/PRRBB)
     d_block_H = 1.2         # 初值: 每块 sum_c1 预算
     d_block_H_min = 0.3     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
@@ -294,6 +294,7 @@ def train(num_iterations_H,
             'degradation': float(490.0 * max(-pbrule, 0.0) * time),
             'penalty_NN_H': float(penalty_NN_H),
             'P_F': float(reward_details['P_F']),
+            'unfeasible_gap': float(rbb_info['unfeasible_gap']),  # relabel 原样带入
         }
         block_ctx_H.append(sub_step_ctx)
 

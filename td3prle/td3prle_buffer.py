@@ -96,8 +96,9 @@ class PRLEBuffer(PrioritizedReplayBuffer):
             Typically prle_myfunc.relabel_r1_substep.
         relabel_c_fn : callable or None
             Function with signature:
-                relabel_c_fn(u, P_F) → c1
-            Typically prle_myfunc.relabel_c1_substep. None leaves cost unchanged.
+                relabel_c_fn(u, P_F, unfeasible_gap=0.0) → c1
+            Typically td3prle_myfunc.relabel_c1_substep. None leaves cost
+            unchanged.
 
         Returns
         -------
@@ -127,7 +128,9 @@ class PRLEBuffer(PrioritizedReplayBuffer):
             if relabel_c_fn is not None:
                 new_cost = 0.0
                 for sub in ctx:
-                    new_cost += relabel_c_fn(sub['u'], sub['P_F'])
+                    new_cost += relabel_c_fn(
+                        sub['u'], sub['P_F'],
+                        sub.get('unfeasible_gap', 0.0))
 
             # Replace reward and (optionally) cost; tuple is immutable so recreate
             self._storage[i] = (obs_t, action, new_reward, new_cost, obs_tp1, done)

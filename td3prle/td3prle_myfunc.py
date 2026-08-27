@@ -195,21 +195,28 @@ def relabel_r1_substep(u, pr, turbine_raw, bess_raw, degradation, penalty_NN_H):
     return w_wind * turbine_raw + w_bess * bess_raw - degradation - penalty_NN_H
 
 
+# c1 中 unfeasible_gap 的惩罚权重 (MW→成本系数, 与 PER/PRRBB 的 W_GAP 一致)
+W_GAP = 50.0
+
+
 def get_c1_risk_coeff(wind_level):
     """Risk-level coefficient on c1: HIGH wind ×1.2, LOW/MEDIUM wind ×0.8."""
     return 1.2 if wind_level == 'HIGH' else 0.8
 
 
-def relabel_c1_substep(u, P_F):
+def relabel_c1_substep(u, P_F, unfeasible_gap=0.0):
     """
     Recompute c1 for a single sub-step using CURRENT wind thresholds.
 
     c1 = c1_risk_coeff * (10.0 * max(0, P_F - 3.0) + 0.1 * P_F)
+       + W_GAP * unfeasible_gap
 
     The base fluctuation penalty is threshold-independent (the 3.0 MW limit
     is hardcoded); only the risk coefficient depends on the wind threshold
-    through get_wind_level(u). Relabeling keeps stored costs consistent with
-    the cost signal under the current thresholds.
+    through get_wind_level(u). unfeasible_gap is also threshold-independent,
+    so it is carried verbatim from the stored sub-step context. Relabeling
+    keeps stored costs consistent with the cost signal under the current
+    thresholds.
 
     Parameters
     ----------
@@ -217,6 +224,10 @@ def relabel_c1_substep(u, P_F):
         Wind speed at this sub-step (m/s).
     P_F : float
         Grid power fluctuation |P_G(t) - P_G(t-1)| (MW).
+    unfeasible_gap : float
+        Infeasibility gap max(0, pbrulemin - pbrulemax) (MW), threshold-
+        independent; read from the sub-step context (default 0.0 for
+        contexts stored before the gap penalty was introduced).
 
     Returns
     -------
@@ -225,8 +236,8 @@ def relabel_c1_substep(u, P_F):
     """
     coeff = get_c1_risk_coeff(get_wind_level(u))
     if P_F > 3.0 + 1e-4:
-        return coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F)
-    return coeff * (0.1 * P_F)
+        return coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F) + W_GAP * unfeasible_gap
+    return coeff * (0.1 * P_F) + W_GAP * unfeasible_gap
 
 
 # =============================================================================
@@ -335,13 +346,14 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 
     # c1: fluctuation penalty
     #   越限部分 10.0*(P_F-3.0) 仅在 P_F > 3.0 时生效；
-    #   平滑项 0.1*P_F 对任意波动值 P_F（不仅限于越限值）都生效。
+    #   平滑项 0.1*P_F 对任意波动值 P_F（不仅限于越限值）都生效；
+    #   W_GAP*unfeasible_gap: 波动∩物理约束不可行缺口 (阈值无关, 硬裁剪无法消除).
     # Risk-level coefficient on c1: HIGH wind ×1.2, LOW/MEDIUM wind ×0.8.
     c1_risk_coeff = get_c1_risk_coeff(wind_level)
     if P_F > 3.0 + 1e-4:
-        c1 = c1_risk_coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F)
+        c1 = c1_risk_coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F) + W_GAP * unfeasible_gap
     else:
-        c1 = c1_risk_coeff * (0.1 * P_F)
+        c1 = c1_risk_coeff * (0.1 * P_F) + W_GAP * unfeasible_gap
 
     # ==== Lower Level (L) ====
     # r2: 影子套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
