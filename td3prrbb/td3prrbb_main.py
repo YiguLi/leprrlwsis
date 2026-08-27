@@ -723,9 +723,9 @@ if __name__ == "__main__":
     )
 
     # H 层对偶改 EMA 实际成本更新 —— lam1 不再读 critic (Q_c)；
-    #     lam1 ∈ [3, 20] 初始 5.0 (与 PRRBB H 层同配置, c1 公式同量级)
+    #     lam1 ∈ [3, 50] 初始 5.0 (与 PRRBB H 层同配置, c1 公式同量级)
     agent_H = SP_TD3(nb_states = 4, nb_actions = 6, args = args,
-                     lam_max=20.0, lam_min=3.0,
+                     lam_max=50.0, lam_min=3.0,
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                      record_update_stats=True,
                      policy_delay=args.policy_delay,
