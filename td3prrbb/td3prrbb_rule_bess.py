@@ -8,6 +8,9 @@ After WT agent and BESS agent output actions, and wfsim returns ptur and pb,
 this module computes the rule-based feasible power pbrule by combining:
   1. Fluctuation smoothing range: keeps |pg(t) - pg(t-1)| <= 3 MW
   2. Physical feasible range: SOC limits + rated power limits
+  3. SOC recovery override: when SOC leaves [soc_safe_min, soc_safe_max],
+     the executed power is FORCED to the band edge that pushes SOC back into
+     the safe range at full power (no freedom left for the NN).
 
 The final pbrule replaces pb as the actual BESS power fed to the environment
 (hard clipping before env.step).
@@ -37,10 +40,17 @@ class RuleBasedBESS:
         Time step duration in hours (default 1/60 = 1 minute).
     fluctuation_limit : float
         Maximum allowed grid power fluctuation between steps (MW).
+    soc_safe_min : float
+        Lower bound of the SOC safe band (MWh). When E < soc_safe_min the
+        executed power is forced to the maximum feasible charge (recovery).
+    soc_safe_max : float
+        Upper bound of the SOC safe band (MWh). When E > soc_safe_max the
+        executed power is forced to the maximum feasible discharge (recovery).
     """
 
     def __init__(self, max_E=6.0, min_E_factor=0.2, rated_power=10.0,
-                 eta_c=0.98, eta_d=0.98, time=1.0 / 60, fluctuation_limit=3.0):
+                 eta_c=0.98, eta_d=0.98, time=1.0 / 60, fluctuation_limit=3.0,
+                 soc_safe_min=1.0, soc_safe_max=5.0):
         self.max_E = max_E
         self.min_E = min_E_factor * max_E
         self.rated_power = rated_power
@@ -48,6 +58,8 @@ class RuleBasedBESS:
         self.eta_d = eta_d
         self.time = time
         self.fluctuation_limit = fluctuation_limit
+        self.soc_safe_min = soc_safe_min
+        self.soc_safe_max = soc_safe_max
 
     def compute_pbrule(self, pb_original, ptur, pg_prev, E):
         """
@@ -139,15 +151,56 @@ class RuleBasedBESS:
             # P_F = |ptur - pbrule - pg_prev|, limit = fluctuation_limit
             inevitable_violation = max(0.0,
                 abs(ptur - pbrule - pg_prev) - self.fluctuation_limit)
+            # Recovery is overridden by the infeasible branch (physics and
+            # fluctuation constraints take priority over SOC recovery).
+            recovery_mode = False
         else:
-            # Feasible case: intersection exists, clip pb into it.
-            # This guarantees P_F ≤ fluctuation_limit.
-            pbrule = float(np.clip(pb, pbrulemin, pbrulemax))
+            # ============================================================
+            # SOC RECOVERY OVERRIDE (pbrule 回正机制)
+            # ------------------------------------------------------------
+            # When SOC leaves [soc_safe_min, soc_safe_max], the executed
+            # power is forced to the band edge that pushes SOC back into the
+            # safe range at FULL power — no freedom left for the NN.
+            #
+            # Priority: physics > fluctuation > recovery. The recovery point
+            # is ALWAYS inside the combined band [pbrulemin, pbrulemax], so
+            # physical and fluctuation constraints hold by construction and
+            # recovery never enters the infeasible branch above.
+            #
+            # Edge semantics (pb > 0 = charge):
+            #   SOC < soc_safe_min → pbrule = pbrulemax (max feasible charge);
+            #                        if the band only allows discharge, this is
+            #                        still the point CLOSEST to charging.
+            #   SOC > soc_safe_max → pbrule = pbrulemin (max feasible discharge);
+            #                        if the band only allows charge, this is
+            #                        still the point CLOSEST to discharging.
+            # ============================================================
+            if E < self.soc_safe_min:
+                recovery_mode = True
+                pbrule = float(pbrulemax)
+            elif E > self.soc_safe_max:
+                recovery_mode = True
+                pbrule = float(pbrulemin)
+            else:
+                # Feasible case: intersection exists, clip pb into it.
+                # This guarantees P_F ≤ fluctuation_limit.
+                recovery_mode = False
+                pbrule = float(np.clip(pb, pbrulemin, pbrulemax))
             inevitable_violation = 0.0
 
         # ---- 5. Collect Info ----
         clip_amount = abs(pb - pbrule)
         unfeasible_gap = max(0.0, pbrulemin - pbrulemax)
+
+        # During recovery the NN has NO freedom: report the executed point as
+        # both pbmin and pbmax so the agent's observation is self-consistent
+        # (pbrulemin == pbrulemax == pbrule → the agent sees no choice).
+        if recovery_mode:
+            pbrulemin_reported = pbrule
+            pbrulemax_reported = pbrule
+        else:
+            pbrulemin_reported = pbrulemin
+            pbrulemax_reported = pbrulemax
 
         info = {
             'pb_original': pb,
@@ -156,12 +209,13 @@ class RuleBasedBESS:
             'pbfluctmax': pbfluctmax,
             'pbphysicsmin': pbphysicsmin,
             'pbphysicsmax': pbphysicsmax,
-            'pbrulemin': pbrulemin,
-            'pbrulemax': pbrulemax,
+            'pbrulemin': pbrulemin_reported,
+            'pbrulemax': pbrulemax_reported,
             'clip_amount': clip_amount,
             'unfeasible_gap': unfeasible_gap,
             'inevitable_violation': inevitable_violation,
             'is_infeasible': pbrulemin > pbrulemax,
+            'recovery': recovery_mode,
             'soc': E,
         }
 
