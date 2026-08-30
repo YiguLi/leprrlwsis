@@ -13,7 +13,7 @@ Modified from PER_main0.py. Key changes:
      learned shadow price: L observation dim 3 = price/100, and
      r2 = real_profit - bessdeg - 100*clip_amount with
      real_profit = -pbrule*price/20 (低谷充电/高峰放电为正),
-     bessdeg = 490*放电/2 (退化成本, 与利润项同量级).
+     bessdeg = 490*放电/20 (退化成本, 与利润项同分母 /20, 盈亏平衡≈490).
   4. Lower-level episode length for Q-value bootstrapping is the full
      day (1440 steps); done_L is True only at the episode end.
 
@@ -227,9 +227,10 @@ def train(num_iterations_H,
         # 低谷 300 充电 / 高峰 980 放电 → real_profit > 0; 不再乘 10 放大)
         price = float(observation[0])
         real_profit = -float(pbrule) * price / 20.0
-        # bessdeg: BESS 退化成本 = 490*放电/2 (放电 D → 245D;
-        # 注意: 去掉 *10 后利润项仅 D*price/20∈[15D,49D], 退化 245D 全面主导 → 各电价下放电均亏损)
-        bessdeg = 490.0 * max(-float(pbrule), 0.0) / 2.0
+        # bessdeg: BESS 退化成本 = 490*放电/20 (放电 D → 24.5D;
+        # 与利润项 real_profit 同分母 /20: 盈亏平衡电价 = 20*24.5 = 490,
+        # 与 H 层 r1 的退化系数 490 口径一致 → 低谷亏、平峰微利、高峰赚)
+        bessdeg = 490.0 * max(-float(pbrule), 0.0) / 20.0
 
         # clip_amount 惩罚系数恢复 100 (real_profit 去掉 *10 后, 500 相对利润项过强)
         r2 = real_profit - bessdeg - 100.0 * clip_amount
