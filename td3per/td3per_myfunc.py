@@ -212,8 +212,8 @@ def S_test(agent_H, agent_L, env_test, rbb_system, num_iterations = 5, test_csv 
         # r2: 真实套利利润 - bess 退化成本 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
         # real_profit = -pbrule*price/20 (price=obs[0] 真实电价 RMB/MWh; 低谷充电/高峰放电为正; 不乘 10)
         real_profit_test = -float(obs[0]) * pbrule_test / 20.0
-        # bessdeg: BESS 退化成本 = 490*放电/20 (与利润项同分母 /20, 盈亏平衡≈490)
-        bessdeg_test = 490.0 * max(-float(pbrule_test), 0.0) / 20.0
+        # bessdeg: BESS 退化成本 = 490*放电/2 (与利润项同量级)
+        bessdeg_test = 490.0 * max(-float(pbrule_test), 0.0) / 2.0
         r2 = real_profit_test - bessdeg_test - 100.0 * clip_amount_test
         # c2: SOC 越界项进入拉格朗日约束（原系数 1000/MWh，安全带 [1.5, 4.5]）
         soc_test = float(obs2[2])
@@ -380,8 +380,8 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         # r2: 真实套利利润 - bess 退化成本 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
         # real_profit = -pbrule*price/20 (price=obs[0] 真实电价 RMB/MWh; 低谷充电/高峰放电为正; 不乘 10)
         real_profit_test = -float(obs[0]) * pbrule_test / 20.0
-        # bessdeg: BESS 退化成本 = 490*放电/20 (与利润项同分母 /20, 盈亏平衡≈490)
-        bessdeg_test = 490.0 * max(-float(pbrule_test), 0.0) / 20.0
+        # bessdeg: BESS 退化成本 = 490*放电/2 (与利润项同量级)
+        bessdeg_test = 490.0 * max(-float(pbrule_test), 0.0) / 2.0
         r2 = real_profit_test - bessdeg_test - 100.0 * clip_amount_test
         # c2: SOC 越界项进入拉格朗日约束（原系数 1000/MWh，安全带 [1.5, 4.5]）
         soc_test = float(obs2[2])
