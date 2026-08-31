@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-TD3PER (TD3 + PER) — Main Training Loop — real-profit variant
-=============================================================
+TD3PER (TD3 + PER) — Main Training Loop
+=======================================
 Modified from PER_main0.py. Key changes:
 
   1. Uses SP_TD3 agent (TD3: twin critics with min aggregation,
@@ -9,12 +9,6 @@ Modified from PER_main0.py. Key changes:
      PER and the Lagrangian cost constraint.
   2. New hyper-parameters: --policy_delay, --policy_noise, --noise_clip,
      --cost_critic_mode.
-  3. Lower level (BESS) uses REAL electricity price instead of the
-     learned shadow price: L observation dim 3 = price/100, and
-     r2 = 10*real_profit - 100*clip_amount with
-     real_profit = -pbrule*price/20 (低谷充电/高峰放电为正).
-  4. Lower-level episode length for Q-value bootstrapping is the full
-     day (1440 steps); done_L is True only at the episode end.
 
 Preserved from PER:
   - 5-step block structure for upper/lower level interaction
@@ -40,7 +34,7 @@ sys.path.insert(0, _HSRL_DIR)
 from env import WindBattery
 from td3per.td3per_ddpg import SP_TD3
 from util import *
-from td3per_myfunc import *
+from myfunc import *
 from rbb.rbb_rule_bess import RuleBasedBESS
 
 import pandas as pd
@@ -130,9 +124,9 @@ def train(num_iterations_H,
         prGreen('--H-- ori a_t = {}'.format(round_list(original_action_H, 3)))
         
         
-        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, price/100, SOC/10, u/10]
-        # 可行域 (RBB, 与 pb 无关, 预计算) + 真实电价 (300/580/980 → 3.0/5.8/9.8)
-        # + 自身 SOC + 风速; 不再直接看 pr/P_G/ptur —— 分层: L 在约束内按真实电价套利.
+        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
+        # 可行域 (RBB, 与 pb 无关, 预计算) + H 影子价格信号 + 自身 SOC + 风速;
+        # 不再直接看 pr/P_G/ptur —— 分层: H 给信号, L 在约束内执行.
         ptur = float(pw_tru)
         pg_prev = float(observation[-1])
         E_current = float(observation[2])
@@ -215,19 +209,24 @@ def train(num_iterations_H,
             window_violation_count += 1
         window_power_sum += observation2[-1]  # cumulative P_G
         
+        signal = action[5]
         pb_l.append(pb_original)  # track original intent
 
         clip_amount = rbb_info['clip_amount']
         is_infeasible = rbb_info['is_infeasible']
         inevitable_violation = rbb_info['inevitable_violation']
 
-        # r2: 真实套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
-        # real_profit = -pbrule*price/20 (price=observation[0] 真实电价 RMB/MWh;
-        # 低谷 300 充电 / 高峰 980 放电 → real_profit > 0)
-        price = float(observation[0])
-        real_profit = -float(pbrule) * price / 20.0
+        # r2: 影子套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
+        # signal(影子价格) * 2 映射到(-1, 1), 再乘以 -pbrule 得利润
+        shadow_price = signal * 2  # (-0.5,0.5) → (-1,1)
+        # TODO: 对比试验 —— 暂时禁用影子电价奖励项
+        SHADOW_PRICE_ENABLED = True
+        if SHADOW_PRICE_ENABLED:
+            shadow_profit = -shadow_price * float(pbrule)  # 取消*time，放大套利信号
+        else:
+            shadow_profit = 0.0
 
-        r2 = 10.0 * real_profit - 100.0 * clip_amount
+        r2 = 10.0 * shadow_profit - 100.0 * clip_amount
 
         # c2: SOC 越界项进入拉格朗日约束（保留原系数 1000/MWh）
         c2 = 1000.0 * soc_deviation
@@ -248,9 +247,8 @@ def train(num_iterations_H,
             if step > args.warmup:
                 agent_L.update_ema_cost(sum_c2)
                 agent_L.update_lam_ema(d_block_L)
+            done_L = True
             # c2 = 0.01 * abs(sum(pb_l)-action[5]) + c2 # todo 是否要*0.1， 有关 signal 的 terminal reward 
-        # L 层 episode 长度 = 1440 步（整日）：仅当日结束时 done_L=True，Q 值跨 5 步块引导
-        done_L = done
         agent_L.observe_jump(norm_observation_L, original_action_L, r2, c2, norm_observation2_L, done_L)
         
         if step > args.warmup:
@@ -372,8 +370,7 @@ def train(num_iterations_H,
                 'cost': c,
                 'lam1': agent_H.lam,
                 'lam2': agent_L.lam,
-                'price': price,
-                'real_profit': real_profit,
+                'shadow_price': shadow_price,
                 'clip_amount': clip_amount,
                 'pb_original': pb_original,
                 'pbrule': float(pbrule),
@@ -410,8 +407,8 @@ def train(num_iterations_H,
             writer.add_scalar('soc', float(observation[2]), step)
             writer.add_scalar('soc_deviation', soc_deviation, step)
             writer.add_scalar('P_F', P_F, step)  # 电网功率波动
-            # Real price (observation 栏)
-            writer.add_scalar('action/price', price, step)
+            # Shadow price (action栏)
+            writer.add_scalar('action/shadow_price', shadow_price, step)
             # RBB-specific metrics
             writer.add_scalar('rbb/clip_amount', clip_amount, step)
             writer.add_scalar('rbb/pbrule', float(pbrule), step)
@@ -454,8 +451,8 @@ def train(num_iterations_H,
         episode_cost2 += c2
         # 上层利润: pg * 实际电价 * dt - 4.9 * pb * dt
         episode_profit += observation2[-1] * observation[0] * time - 4.9 * max(-float(pbrule), 0) * time
-        # BESS盈亏: 真实套利 - 退化成本
-        episode_bess_profit += real_profit - 4.9 * max(-float(pbrule), 0) * time
+        # BESS盈亏: 影子套利 - 退化成本
+        episode_bess_profit += shadow_profit - 4.9 * max(-float(pbrule), 0) * time
         # update env
         # Oh_observation = deepcopy(Oh_observation2)
         norm_observation = deepcopy(norm_observation2)
@@ -685,7 +682,7 @@ if __name__ == "__main__":
     agent_H.lam = 5.0
     # B1: L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
     #     lam2 ∈ [10, 100]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
-    #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, price/100, SOC/10, u/10]
+    #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
     agent_L = SP_TD3(nb_states = 5, nb_actions = 1, args = args,
                      lam_max=100.0, lam_min=10.0,
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
