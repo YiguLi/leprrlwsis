@@ -271,6 +271,12 @@ def train(num_iterations_H,
                     agent_L.update_policy()
                     update_num += 1
 
+                # L 层智能体更简单 (1 维动作), 提高其更新频率至每块 10 次 (UTD 2:1),
+                # H 层维持每块 5 次 (UTD 1:1)。额外更新不重复累计 curriculum 计数
+                # (EMA 成本每块只更新一次, 与块末判据一致)。
+                for _ in range(5):
+                    agent_L.update_policy()
+
                     # Track consecutive satisfaction for H (EMA 实际成本判据)
                     if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
                         consecutive_satisfied_H += 1
