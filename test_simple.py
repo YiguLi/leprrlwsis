@@ -1,10 +1,6 @@
 """
 简单测试脚本：随机风速日 × 单模型
 
-支持项目类型:
-    PER / PRRBB / PRLE / TD3PER / TD3PRRBB / TD3PRLE  — 加载 RL 模型测试
-    RBARB — 纯规则法 (无 RL): 上层轴向因子固定 0.33, 下层 RBB + 电价套利
-
 Usage:
     python test_simple.py
 """
@@ -44,10 +40,8 @@ def main():
 
     # ---- 参数 ----
     print()
-    proj_type = input("  项目类型 (PER/PRRBB/PRLE/TD3PER/TD3PRRBB/TD3PRLE/RBARB, 默认 PER): ").strip() or "PER"
-    model_path = None
-    if proj_type != 'RBARB':
-        model_path = input("  模型路径: ").strip().strip('"')
+    model_path = input("  模型路径: ").strip().strip('"')
+    proj_type = input("  项目类型 (PER/PRRBB/PRLE/TD3PER/TD3PRRBB/TD3PRLE, 默认 PER): ").strip() or "PER"
     run_str = input("  测试序号 (run-x, 默认 1): ").strip()
     run_number = int(run_str) if run_str else 1
     n_str = input("  测试天数 (默认 5): ").strip()
@@ -77,43 +71,42 @@ def main():
     if device.type == 'cuda':
         print(f"\n使用 GPU: {torch.cuda.get_device_name(device)}")
 
-    # ---- Agent (RBARB 为纯规则法, 无 RL agent) ----
-    if proj_type != 'RBARB':
-        ns = argparse.Namespace(
-            hidden1=16, hidden2=100, init_w=0.003, rate=0.01, prate=0.0001,
-            warmup=200, epsilon=50000,
-            discount=0.98, bsize=32, rmsize=20000, window_length=1, tau=0.001,
-            ou_theta=0.15, ou_sigma=0.2, ou_mu=0.0,
-            nb_turbine=NB_TURBINE, lam=3.0, lr_lam=0.01, cost_single_limit=1000.0,
-            PER_alpha=0.6, PER_beta=0.4, PER_epsilon=0.01,
-            beta_increment_per_sampling=0.0, seed=seed, cuda=(device.type == 'cuda'),
-            device=device,
-        )
+    # ---- Agent ----
+    ns = argparse.Namespace(
+        hidden1=16, hidden2=100, init_w=0.003, rate=0.01, prate=0.0001,
+        warmup=200, epsilon=50000,
+        discount=0.98, bsize=32, rmsize=20000, window_length=1, tau=0.001,
+        ou_theta=0.15, ou_sigma=0.2, ou_mu=0.0,
+        nb_turbine=NB_TURBINE, lam=3.0, lr_lam=0.01, cost_single_limit=1000.0,
+        PER_alpha=0.6, PER_beta=0.4, PER_epsilon=0.01,
+        beta_increment_per_sampling=0.0, seed=seed, cuda=(device.type == 'cuda'),
+        device=device,
+    )
 
-        if proj_type == 'PRLE':
-            agent_H = PRLE_DDPG(nb_states=4, nb_actions=6, args=ns)
-            agent_L = PRLE_DDPG(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
-            agent_L.cost_limit = 10.0
-        elif proj_type == 'TD3PRLE':
-            agent_H = SP_TD3_PRLE(nb_states=4, nb_actions=6, args=ns)
-            agent_L = SP_TD3_PRLE(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
-            agent_L.cost_limit = 10.0
-        elif proj_type == 'TD3PER':
-            agent_H = SP_TD3_PER(nb_states=4, nb_actions=6, args=ns)
-            agent_L = SP_TD3_PER(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
-            agent_L.cost_limit = 10.0
-        elif proj_type == 'TD3PRRBB':
-            agent_H = SP_TD3_PRRBB(nb_states=4, nb_actions=6, args=ns)
-            agent_L = SP_TD3_PRRBB(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
-            agent_L.cost_limit = 10.0
-        else:
-            agent_H = SP_DDPG(nb_states=4, nb_actions=6, args=ns)
-            agent_L = SP_DDPG(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
-            agent_L.cost_limit = 10.0
+    if proj_type == 'PRLE':
+        agent_H = PRLE_DDPG(nb_states=4, nb_actions=6, args=ns)
+        agent_L = PRLE_DDPG(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
+        agent_L.cost_limit = 10.0
+    elif proj_type == 'TD3PRLE':
+        agent_H = SP_TD3_PRLE(nb_states=4, nb_actions=6, args=ns)
+        agent_L = SP_TD3_PRLE(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
+        agent_L.cost_limit = 10.0
+    elif proj_type == 'TD3PER':
+        agent_H = SP_TD3_PER(nb_states=4, nb_actions=6, args=ns)
+        agent_L = SP_TD3_PER(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
+        agent_L.cost_limit = 10.0
+    elif proj_type == 'TD3PRRBB':
+        agent_H = SP_TD3_PRRBB(nb_states=4, nb_actions=6, args=ns)
+        agent_L = SP_TD3_PRRBB(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
+        agent_L.cost_limit = 10.0
+    else:
+        agent_H = SP_DDPG(nb_states=4, nb_actions=6, args=ns)
+        agent_L = SP_DDPG(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
+        agent_L.cost_limit = 10.0
 
-        agent_H.load_weights(model_path)
-        agent_L.load_weights(model_path)
-        print(f"模型加载完成: {model_path}")
+    agent_H.load_weights(model_path)
+    agent_L.load_weights(model_path)
+    print(f"模型加载完成: {model_path}")
 
     # ---- Env & RBB ----
     engine = matlab.engine.start_matlab()
@@ -123,14 +116,6 @@ def main():
 
     # ---- 测试 ----
     writer = SummaryWriter(os.path.join(output_dir, 'tensorboard'))
-
-    if proj_type == 'RBARB':
-        # 纯规则法: 无 RL agent, 直接规则仿真 (上层 0.33 固定 + 下层 RBB 套利)
-        run_rule_arbitrage(env, rbb, writer, wind_df, day_positions, output_dir)
-        writer.close()
-        engine.quit()
-        return
-
     all_rows, all_steps = [], []
 
     for ep in range(n_days):
@@ -259,108 +244,6 @@ def main():
     print(f"  均值: profit={np.mean([r['episode_profit'] for r in all_rows]):.2f}  "
           f"cvm={np.mean([r['cvm'] for r in all_rows]):.1f}  "
           f"cpf={np.mean([r['cpf'] for r in all_rows]):.2f}")
-    print(f"  CSV → {output_dir}/test_simple.csv")
-    print(f"  TB  → tensorboard --logdir={output_dir}/tensorboard")
-
-
-def run_rule_arbitrage(env, rbb, writer, wind_df, day_positions, output_dir):
-    """RBARB 纯规则法: 抛弃一切强化学习方法。
-
-    上层: 风机轴向因子统一固定 0.33, 不做任何调整。
-    下层: 完全 rulebase —— 在现有 RBB 规则 (波动/物理/SOC 回正裁剪,
-          rbb.compute_pbrule) 基础之上做电价套利:
-        - 电价 300 / 580  → 充电 (pb = +10 MW, 额定功率)
-        - 电价 980       → 放电 (pb = -10 MW)
-        - SOC 触及上限 5.5 时停止充电, 触及下限 0.5 时停止放电 (停止套利)
-    训练记录 (TensorBoard) 仅保留 4 项:
-        env/window_violation_count, episode_profit, soc, action/pb_original
-    """
-    SOC_ARB_MAX, SOC_ARB_MIN = 5.5, 0.5      # 套利 SOC 界限
-    P_CHARGE, P_DISCHARGE = 10.0, -10.0      # 额定功率 ±10 MW
-    a_fixed = np.ones(NB_TURBINE) * 0.33     # 上层轴向因子固定 0.33
-    all_rows, all_steps = [], []
-
-    for ep in range(len(day_positions)):
-        wind_series = wind_df.iloc[:, day_positions[ep]]
-
-        obs = deepcopy(env.reset())
-        env.wind_day = wind_series.copy()
-        env.count_wind = 0
-        env.u = float(env.wind_day.iloc[0])
-        obs[1] = env.u
-        env.P_G_prev = env.PowerOutput(env.u, a_fixed)
-        obs[-1] = env.P_G_prev
-
-        ep_profit = 0.0
-        window_violation_count = 0
-        episode_steps = 0
-
-        while episode_steps < EPISODE_LENGTH:
-            if episode_steps % 10 == 0:
-                prCyan(f"step {episode_steps}")
-
-            # ---- 上层: 轴向因子固定 0.33, 风机出力不变 ----
-            pw_tru = env.PowerOutput(obs[1], a_fixed)
-
-            # ---- 下层: 电价套利规则 ----
-            price = float(obs[0])
-            soc = float(obs[2])
-            pb_original = 0.0
-            if price <= 580.0:            # 300 / 580 → 充电
-                if soc < SOC_ARB_MAX:     # SOC 未触及上限 5.5
-                    pb_original = P_CHARGE
-            else:                          # 980 → 放电
-                if soc > SOC_ARB_MIN:     # SOC 未触及下限 0.5
-                    pb_original = P_DISCHARGE
-
-            # ---- 现有 RBB 规则裁剪 (波动/物理/SOC 回正) ----
-            pbrule, rbb_info = rbb.compute_pbrule(
-                pb_original=pb_original, ptur=float(pw_tru),
-                pg_prev=float(obs[-1]), E=float(obs[2]))
-
-            action_env = np.concatenate((a_fixed, [0.0, pb_original]))
-            action_env[-1] = pbrule
-
-            pw_tru2, obs2, _, penalty_L, _, _, info = \
-                env.step(action_env[:6], action_env[6:], pw_tru)
-            P_F = info['P_F']
-
-            profit_step = (obs2[-1] * obs[0] - 490.0 * max(-float(pbrule), 0.0)) * TIME
-            ep_profit += profit_step
-            if P_F > 3.0:
-                window_violation_count += 1
-
-            # ---- 训练记录 (仅 4 项) ----
-            gs = ep * EPISODE_LENGTH + episode_steps
-            writer.add_scalar('soc', float(obs2[2]), gs)
-            writer.add_scalar('action/pb_original', pb_original, gs)
-
-            all_steps.append({
-                'episode': ep + 1, 'step': episode_steps,
-                'soc': float(obs2[2]), 'pf': float(P_F),
-                'pb_original': pb_original,
-            })
-
-            obs, pw_tru = obs2, pw_tru2
-            episode_steps += 1
-
-        writer.add_scalar('env/window_violation_count', window_violation_count, ep)
-        writer.add_scalar('episode_profit', ep_profit, ep)
-
-        print(f"  Day {ep+1:>3d}: profit={ep_profit:>10.2f}  "
-              f"cvm={window_violation_count:>5d}")
-
-        all_rows.append({
-            'episode': ep + 1, 'wind_iloc': day_positions[ep],
-            'episode_profit': ep_profit, 'cvm': window_violation_count,
-        })
-
-    pd.DataFrame(all_rows).to_csv(os.path.join(output_dir, 'test_simple.csv'), index=False)
-    pd.DataFrame(all_steps).to_csv(os.path.join(output_dir, 'test_simple_steps.csv'), index=False)
-
-    print(f"\n{'='*55}")
-    print(f"  均值: profit={np.mean([r['episode_profit'] for r in all_rows]):.2f}  "
-          f"cvm={np.mean([r['cvm'] for r in all_rows]):.1f}")
     print(f"  CSV → {output_dir}/test_simple.csv")
     print(f"  TB  → tensorboard --logdir={output_dir}/tensorboard")
 
