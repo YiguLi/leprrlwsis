@@ -11,7 +11,7 @@ Modified from PER_main0.py. Key changes:
      --cost_critic_mode.
   3. Lower level (BESS) uses REAL electricity price instead of the
      learned shadow price: L observation dim 3 = price/100, and
-     r2 = 10*real_profit - bessdeg - 500*clip_amount with
+     r2 = 10*real_profit - bessdeg - 100*clip_amount with
      real_profit = -pbrule*price/20 (低谷充电/高峰放电为正),
      bessdeg = 490*放电/2 (退化成本, 与利润项同量级).
   4. Lower-level episode length for Q-value bootstrapping is the full
@@ -222,7 +222,7 @@ def train(num_iterations_H,
         is_infeasible = rbb_info['is_infeasible']
         inevitable_violation = rbb_info['inevitable_violation']
 
-        # r2: 真实套利利润 - bess 退化成本 - 500*clip_amount（pbrule 裁剪惩罚进入 r2）
+        # r2: 真实套利利润 - bess 退化成本 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
         # real_profit = -pbrule*price/20 (price=observation[0] 真实电价 RMB/MWh;
         # 低谷 300 充电 / 高峰 980 放电 → real_profit > 0)
         price = float(observation[0])
@@ -231,8 +231,7 @@ def train(num_iterations_H,
         # 放电 D → 利润项 D*price/2∈[150D,490D], 退化 245D → 高峰放电仍盈利、低谷放电转亏)
         bessdeg = 490.0 * max(-float(pbrule), 0.0) / 2.0
 
-        # clip_amount 惩罚系数 100 → 500 (×5): 强化规则裁剪约束，压住 L 的越界请求
-        r2 = 10.0 * real_profit - bessdeg - 500.0 * clip_amount
+        r2 = 10.0 * real_profit - bessdeg - 100.0 * clip_amount
 
         # c2: SOC 越界项进入拉格朗日约束（保留原系数 1000/MWh）
         c2 = 1000.0 * soc_deviation
