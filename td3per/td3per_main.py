@@ -11,9 +11,8 @@ Modified from PER_main0.py. Key changes:
      --cost_critic_mode.
   3. Lower level (BESS) uses REAL electricity price instead of the
      learned shadow price: L observation dim 3 = price/100, and
-     r2 = 10*real_profit - bessdeg - 100*clip_amount with
-     real_profit = -pbrule*price/20 (低谷充电/高峰放电为正),
-     bessdeg = 490*放电/2 (退化成本, 与利润项同量级).
+     r2 = 10*real_profit - 100*clip_amount with
+     real_profit = -pbrule*price/20 (低谷充电/高峰放电为正).
   4. Lower-level episode length for Q-value bootstrapping is the full
      day (1440 steps); done_L is True only at the episode end.
 
@@ -222,16 +221,13 @@ def train(num_iterations_H,
         is_infeasible = rbb_info['is_infeasible']
         inevitable_violation = rbb_info['inevitable_violation']
 
-        # r2: 真实套利利润 - bess 退化成本 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
+        # r2: 真实套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
         # real_profit = -pbrule*price/20 (price=observation[0] 真实电价 RMB/MWh;
         # 低谷 300 充电 / 高峰 980 放电 → real_profit > 0)
         price = float(observation[0])
         real_profit = -float(pbrule) * price / 20.0
-        # bessdeg: BESS 退化成本 = 490*放电/2 (与利润项同量级:
-        # 放电 D → 利润项 D*price/2∈[150D,490D], 退化 245D → 高峰放电仍盈利、低谷放电转亏)
-        bessdeg = 490.0 * max(-float(pbrule), 0.0) / 2.0
 
-        r2 = 10.0 * real_profit - bessdeg - 100.0 * clip_amount
+        r2 = 10.0 * real_profit - 100.0 * clip_amount
 
         # c2: SOC 越界项进入拉格朗日约束（保留原系数 1000/MWh）
         c2 = 1000.0 * soc_deviation
@@ -378,7 +374,6 @@ def train(num_iterations_H,
                 'lam2': agent_L.lam,
                 'price': price,
                 'real_profit': real_profit,
-                'bessdeg': bessdeg,
                 'clip_amount': clip_amount,
                 'pb_original': pb_original,
                 'pbrule': float(pbrule),
@@ -417,9 +412,6 @@ def train(num_iterations_H,
             writer.add_scalar('P_F', P_F, step)  # 电网功率波动
             # Real price (observation 栏)
             writer.add_scalar('action/price', price, step)
-            # Lower reward components
-            writer.add_scalar('reward_lower/real_profit', real_profit, step)
-            writer.add_scalar('reward_lower/bessdeg', bessdeg, step)
             # RBB-specific metrics
             writer.add_scalar('rbb/clip_amount', clip_amount, step)
             writer.add_scalar('rbb/pbrule', float(pbrule), step)
@@ -462,8 +454,8 @@ def train(num_iterations_H,
         episode_cost2 += c2
         # 上层利润: pg * 实际电价 * dt - 4.9 * pb * dt
         episode_profit += observation2[-1] * observation[0] * time - 4.9 * max(-float(pbrule), 0) * time
-        # BESS盈亏: 真实套利 - 退化成本（与 r2 中 bessdeg 同口径）
-        episode_bess_profit += real_profit - bessdeg
+        # BESS盈亏: 真实套利 - 退化成本
+        episode_bess_profit += real_profit - 4.9 * max(-float(pbrule), 0) * time
         # update env
         # Oh_observation = deepcopy(Oh_observation2)
         norm_observation = deepcopy(norm_observation2)

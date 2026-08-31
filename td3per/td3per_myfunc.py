@@ -209,12 +209,10 @@ def S_test(agent_H, agent_L, env_test, rbb_system, num_iterations = 5, test_csv 
         )
         clip_amount_test = rbb_info_test['clip_amount']
         pbclip_test = clip_amount_test  # distance from pboriginal to [pbrulemin, pbrulemax]; PER does NOT clip pb
-        # r2: 真实套利利润 - bess 退化成本 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
+        # r2: 真实套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
         # real_profit = -pbrule*price/20 (price=obs[0] 真实电价 RMB/MWh; 低谷充电/高峰放电为正)
         real_profit_test = -float(obs[0]) * pbrule_test / 20.0
-        # bessdeg: BESS 退化成本 = 490*放电/2 (与利润项同量级)
-        bessdeg_test = 490.0 * max(-float(pbrule_test), 0.0) / 2.0
-        r2 = 10.0 * real_profit_test - bessdeg_test - 100.0 * clip_amount_test
+        r2 = 10.0 * real_profit_test - 100.0 * clip_amount_test
         # c2: SOC 越界项进入拉格朗日约束（原系数 1000/MWh，安全带 [1.5, 4.5]）
         soc_test = float(obs2[2])
         soc_dev_test = 0.0
@@ -377,12 +375,10 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             E=float(obs[2]),
         )
         clip_amount_test = rbb_info_test['clip_amount']
-        # r2: 真实套利利润 - bess 退化成本 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
+        # r2: 真实套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
         # real_profit = -pbrule*price/20 (price=obs[0] 真实电价 RMB/MWh; 低谷充电/高峰放电为正)
         real_profit_test = -float(obs[0]) * pbrule_test / 20.0
-        # bessdeg: BESS 退化成本 = 490*放电/2 (与利润项同量级)
-        bessdeg_test = 490.0 * max(-float(pbrule_test), 0.0) / 2.0
-        r2 = 10.0 * real_profit_test - bessdeg_test - 100.0 * clip_amount_test
+        r2 = 10.0 * real_profit_test - 100.0 * clip_amount_test
         # c2: SOC 越界项进入拉格朗日约束（原系数 1000/MWh，安全带 [1.5, 4.5]）
         soc_test = float(obs2[2])
         soc_dev_test = 0.0
