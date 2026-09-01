@@ -57,18 +57,46 @@ def get_price_level(pr):
 
 
 # =============================================================================
-# 2. Wind Speed Classification
+# 2. Wind Speed Classification (thresholds selectable at startup)
 # =============================================================================
+# 默认固定阈值 7.0/11.0；main 启动时可按 --seg 用 set_wind_thresholds()
+# 切换为 percentile / kmeans / expert 三种分段边界（见 data_piecewise/boundaries.py）。
 
-WIND_LOW_MAX  = 7.0   # u < 7.0   → LOW wind
-WIND_HIGH_MIN = 11.0  # u >= 11.0 → HIGH wind, else MEDIUM
+WIND_LOW_MAX  = 7.0   # 默认: u < WIND_LOW_MAX  → LOW wind
+WIND_HIGH_MIN = 11.0  # 默认: u >= WIND_HIGH_MIN → HIGH wind, else MEDIUM
+
+_wind_low_max  = WIND_LOW_MAX
+_wind_high_min = WIND_HIGH_MIN
+
+
+def get_wind_thresholds():
+    """Return current (wind_low_max, wind_high_min)."""
+    return _wind_low_max, _wind_high_min
+
+
+def set_wind_thresholds(low_max, high_min):
+    """Set wind thresholds with validity clamping (same constraints as PRLE).
+
+    Constraints enforced:
+      - low_max ∈ [3.0, high_min - 1.0]
+      - high_min ∈ [low_max + 1.0, 22.0]
+      - Always: low_max < high_min (at least 1.0 m/s gap)
+
+    Returns (actual_low_max, actual_high_min) after clamping.
+    """
+    global _wind_low_max, _wind_high_min
+    low_max = float(np.clip(low_max, 3.0, high_min - 1.0))
+    high_min = float(np.clip(high_min, low_max + 1.0, 22.0))
+    _wind_low_max = low_max
+    _wind_high_min = high_min
+    return _wind_low_max, _wind_high_min
 
 
 def get_wind_level(u):
-    """Classify wind speed into LOW / MEDIUM / HIGH."""
-    if u < WIND_LOW_MAX:
+    """Classify wind speed into LOW / MEDIUM / HIGH using current thresholds."""
+    if u < _wind_low_max:
         return 'LOW'
-    elif u >= WIND_HIGH_MIN:
+    elif u >= _wind_high_min:
         return 'HIGH'
     else:
         return 'MEDIUM'

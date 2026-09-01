@@ -755,10 +755,20 @@ if __name__ == "__main__":
                         help='Path to LLM config JSON file. '
                              'Default: prle/llm_config.json')
 
+    # 风速分段起点分岔: percentile(33/66分位) / kmeans(簇中心中点) / expert(专家锚点 8.5/12.0)
+    parser.add_argument('--seg', default='expert',
+                        choices=['percentile', 'kmeans', 'expert'],
+                        help='风速分段起点方法: percentile | kmeans | expert (默认 expert); '
+                             '启动后由 LLM 元控制器在此基础上在线调整')
+
     args = parser.parse_args()
     args.output = get_output_folder(args.output, args.env)
     if args.resume == 'default':
         args.resume = 'output/{}-run0'.format(args.env)
+
+    # ---- 风速分段起点: 按 --seg 应用（percentile / kmeans / expert），LLM 在此基础上微调 ----
+    from data_piecewise.boundaries import apply_segmentation
+    apply_segmentation(args.seg, set_wind_thresholds)
 
     max_E = 6.0
     upload = True

@@ -27,8 +27,9 @@ Lower (L):
   r2 = 10.0 * shadow_profit - 100.0 * clip_amount
   c2 = 700.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束, 保留原系数)
 
-Wind boundaries: dynamic (default LOW < 7.0 m/s, HIGH >= 11.0 m/s),
-由 LLM 元控制器在 1440 步窗口边界处调整。
+Wind boundaries: dynamic (default LOW < 8.5 m/s, HIGH >= 12.0 m/s, 专家起点),
+由 LLM 元控制器在 1440 步窗口边界处调整；启动时可用 --seg 选择 percentile /
+kmeans / expert 三种起点。
 """
 
 import numpy as np
@@ -42,8 +43,11 @@ from util import *
 # 0. Dynamic Wind Thresholds (mutable module-level state)
 # =============================================================================
 
-_wind_low_max  = 7.0   # u < _wind_low_max    → LOW wind
-_wind_high_min = 11.0  # u >= _wind_high_min  → HIGH wind, else MEDIUM
+# 专家起点（默认）：低风 < 8.5 m/s，高风 >= 12.0 m/s；
+# main 启动时也可用 --seg 选择 percentile / kmeans 起点（见 data_piecewise/boundaries.py），
+# 之后由 LLM 元控制器在 1440 步窗口边界处在线调整。
+_wind_low_max  = 8.5   # u < _wind_low_max    → LOW wind
+_wind_high_min = 12.0  # u >= _wind_high_min  → HIGH wind, else MEDIUM
 
 
 def get_wind_thresholds():

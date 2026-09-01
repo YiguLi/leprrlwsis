@@ -40,6 +40,7 @@ from prrbb_myfunc import (
     CheckAction, Normalize, Original,
     Cal_Rew_PRRBB, nine_case_test,
     get_price_level,
+    get_wind_thresholds, set_wind_thresholds,
 )
 from prrbb_rule_bess import RuleBasedBESS
 
@@ -634,10 +635,19 @@ if __name__ == "__main__":
     parser.add_argument('--rbb_rated_power', default=10.0, type=float,
                         help='BESS rated charge/discharge power (MW)')
 
+    # 风速分段方法分岔: percentile(33/66分位) / kmeans(簇中心中点) / expert(专家锚点 8.5/12.0)
+    parser.add_argument('--seg', default='expert',
+                        choices=['percentile', 'kmeans', 'expert'],
+                        help='风速分段方法: percentile | kmeans | expert (默认 expert)')
+
     args = parser.parse_args()
     args.output = get_output_folder(args.output, args.env)
     if args.resume == 'default':
         args.resume = 'output/{}-run0'.format(args.env)
+
+    # ---- 风速分段边界: 按 --seg 应用（percentile / kmeans / expert）----
+    from data_piecewise.boundaries import apply_segmentation
+    apply_segmentation(args.seg, set_wind_thresholds)
 
     max_E = 6.0
     upload = True
