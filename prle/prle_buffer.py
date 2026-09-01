@@ -8,7 +8,10 @@ thresholds (relabel_all), without changing the sample path.
 
 Context storage:
   - H-agent transitions: list of 5 sub-step dicts
-    {'u', 'pr', 'turbine_raw', 'bess_raw', 'degradation', 'penalty_NN_H', 'P_F'}
+    {'u', 'pr', 'turbine_raw', 'bess_raw', 'degradation', 'penalty_NN_H',
+     'P_F', 'soc', 'unfeasible_gap'}
+    ('soc' = decision-time SOC for the PRRBB wB_soc margin check,
+     'unfeasible_gap' = RBB feasibility gap entering c1 via W_GAP)
   - L-agent transitions: None (no relabeling context stored for L)
 
 Base class: PER_buffer.PrioritizedReplayBuffer
@@ -57,7 +60,8 @@ class PRLEBuffer(PrioritizedReplayBuffer):
         obs_t, action, reward, cost, obs_tp1, done : standard transition
         context : list of dicts or None
             H-agent: list of sub-step dicts with keys:
-                'u', 'pr', 'turbine_raw', 'bess_raw', 'degradation', 'penalty_NN_H'
+                'u', 'pr', 'turbine_raw', 'bess_raw', 'degradation',
+                'penalty_NN_H', 'P_F', 'soc', 'unfeasible_gap'
             L-agent: None (r2/c2 have no wind dependency)
         """
         idx = self._next_idx
@@ -92,11 +96,12 @@ class PRLEBuffer(PrioritizedReplayBuffer):
         ----------
         relabel_r_fn : callable
             Function with signature:
-                relabel_r_fn(u, pr, turbine_raw, bess_raw, degradation, penalty_NN_H) → r1
+                relabel_r_fn(u, pr, turbine_raw, bess_raw, degradation,
+                             penalty_NN_H, SOC) → r1
             Typically prle_myfunc.relabel_r1_substep.
         relabel_c_fn : callable or None
             Function with signature:
-                relabel_c_fn(u, P_F) → c1
+                relabel_c_fn(u, P_F, unfeasible_gap) → c1
             Typically prle_myfunc.relabel_c1_substep. None leaves cost unchanged.
 
         Returns
@@ -121,13 +126,15 @@ class PRLEBuffer(PrioritizedReplayBuffer):
                     sub['bess_raw'],
                     sub['degradation'],
                     sub['penalty_NN_H'],
+                    sub.get('soc', 3.0),  # 旧 context 无 soc 时按默认值 3.0
                 )
 
             new_cost = cost
             if relabel_c_fn is not None:
                 new_cost = 0.0
                 for sub in ctx:
-                    new_cost += relabel_c_fn(sub['u'], sub['P_F'])
+                    new_cost += relabel_c_fn(sub['u'], sub['P_F'],
+                                             sub.get('unfeasible_gap', 0.0))
 
             # Replace reward and (optionally) cost; tuple is immutable so recreate
             self._storage[i] = (obs_t, action, new_reward, new_cost, obs_tp1, done)

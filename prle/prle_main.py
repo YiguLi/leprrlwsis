@@ -13,6 +13,8 @@ Modified from prrbb_main.py. Key changes:
 
 Preserved from PRRBB:
   - 5-step block structure for upper/lower level interaction
+  - PRRBB 机会/风险分离分段奖励（乘法分解 wT/wB、三档 C1_RISK、
+    W_GAP×unfeasible_gap、SOC 安全带双通道）
   - RBB hard clipping before env.step
   - Curriculum learning with cost_limit halving
   - Lambda adjustment
@@ -262,6 +264,9 @@ def train_prle(num_iterations_H,
             'degradation': float(490.0 * max(-pbrule, 0.0) * time),
             'penalty_NN_H': float(penalty_NN_H),
             'P_F': float(reward_details['P_F']),
+            # PRRBB 分段结构新增的重标记上下文：
+            'soc': float(observation[2]),                 # 决策时刻 SOC（wB_soc 贴边判断）
+            'unfeasible_gap': float(rbb_info['unfeasible_gap']),  # c1 不可行付费项
         }
         block_ctx_H.append(sub_step_ctx)
 
