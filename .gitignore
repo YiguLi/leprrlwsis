@@ -39,4 +39,7 @@ $RECYCLE.BIN/
 /FFC_speed_1.csv
 /FFC_speed_noise_1.csv
 
+# Whole-project archive (137 MB), not versioned
+/HSRL.zip
+
 # data_LES/ and documentation/ manage themselves via their own .gitignore
