@@ -34,7 +34,7 @@ Upper (H) r1:
 
 Lower (L):
   r2 = 10.0 * shadow_profit - 100.0 * clip_amount
-  c2 = 700.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束, 保留原系数)
+  c2 = 1000.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束; 系数 700→1000 与 TD3PER 对齐)
 """
 
 import numpy as np
@@ -258,6 +258,13 @@ SOC_SAFE_RANGES = {
 }
 
 
+# c2 系数: SOC 越界成本 (RMB/MWh 越界量), 进入 L 层拉格朗日约束。
+# 700 → 1000 (与 TD3PER 同系数): 相同物理越界下成本信号强 43%,
+# 缓解 TD3 下成本通道失效导致的 SOC 顶格; 预算 d_block_L 已同步按
+# 0.02×coeff / 0.0025×coeff 重标定为 20 / 2.5 (物理允许越界量不变)。
+C2_SOC_COEFF = 1000.0
+
+
 def Cal_soc_deviation(SOC, wind_level='MEDIUM'):
     """
     Wind-segmented SOC deviation.
@@ -272,6 +279,34 @@ def Cal_soc_deviation(SOC, wind_level='MEDIUM'):
     elif SOC > soc_max:
         dev = SOC - soc_max
     return dev
+
+
+def relabel_c2_substep(u, SOC_new):
+    """
+    Recompute c2 for a single L sub-step using CURRENT wind thresholds.
+
+    c2 = C2_SOC_COEFF * soc_deviation, where the wind-segmented SOC safe band
+    (SOC_SAFE_RANGES[wind_level(u)]) depends on the wind level at the
+    decision step. When dynamic wind thresholds change, L-transition costs
+    stored under the old classification are stale, so the training loop
+    relabels them with this function. Inputs mirror the forward reward:
+    u = wind speed at t, SOC_new = SOC at t+1.
+
+    Parameters
+    ----------
+    u : float
+        Wind speed at the decision step (m/s); selects the SOC band.
+    SOC_new : float
+        SOC at the next step (MWh); the deviation is measured on it.
+
+    Returns
+    -------
+    c2 : float
+        Recomputed SOC-deviation cost under current wind thresholds.
+    """
+    wind_level = get_wind_level(u)
+    soc_dev = Cal_soc_deviation(SOC_new, wind_level)
+    return C2_SOC_COEFF * soc_dev
 
 
 def Cal_r2_PER_baseline(pbrule, shadow_price, SOC, wind_level='MEDIUM'):
@@ -307,7 +342,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
                    penalty_NN_H=0.0, time=1.0 / 60, ptur=None):
     """
     PRRBB reward: wind × price joint segmentation (upper);
-    lower r2 = 10*shadow_profit - 100*clip_amount, c2 = 700*soc_deviation.
+    lower r2 = 10*shadow_profit - 100*clip_amount, c2 = 1000*soc_deviation.
 
     Parameters
     ----------
@@ -360,11 +395,11 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 
     # ==== Lower Level (L) ====
     # r2: 影子套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
-    # c2: SOC 越界项进入拉格朗日约束（保留原系数 700/MWh）
+    # c2: SOC 越界项进入拉格朗日约束（系数 C2_SOC_COEFF = 1000/MWh, 700→1000 与 TD3PER 对齐）
     shadow_profit = -shadow_price * pbrule
     soc_dev = Cal_soc_deviation(SOC_new, wind_level)
     r2 = 10.0 * shadow_profit - 100.0 * clip_amount
-    c2 = 700.0 * soc_dev
+    c2 = C2_SOC_COEFF * soc_dev
 
     # ==== Details ====
     turbine_profit = w_wind * pr_old * ptur * time

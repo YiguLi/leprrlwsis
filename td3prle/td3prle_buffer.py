@@ -9,7 +9,9 @@ thresholds (relabel_all), without changing the sample path.
 Context storage:
   - H-agent transitions: list of 5 sub-step dicts
     {'u', 'pr', 'turbine_raw', 'bess_raw', 'degradation', 'penalty_NN_H', 'P_F'}
-  - L-agent transitions: None (no relabeling context stored for L)
+  - L-agent transitions: list of 1 sub-step dict {'u', 'SOC_new'}
+    (c2 = coeff*soc_deviation 的 SOC 安全带分档依赖 wind_level(u);
+     relabel_c2_all() 用该上下文在动态阈值变化时重算 c2)
 
 Base class: PER_buffer.PrioritizedReplayBuffer
 """
@@ -58,7 +60,7 @@ class PRLEBuffer(PrioritizedReplayBuffer):
         context : list of dicts or None
             H-agent: list of sub-step dicts with keys:
                 'u', 'pr', 'turbine_raw', 'bess_raw', 'degradation', 'penalty_NN_H'
-            L-agent: None (r2/c2 have no wind dependency)
+            L-agent: list of 1 dict with keys 'u', 'SOC_new' (c2 relabel 用)
         """
         idx = self._next_idx
         # Call parent's append for the base transition storage + PER tree update
@@ -140,6 +142,53 @@ class PRLEBuffer(PrioritizedReplayBuffer):
         # TD errors stored in the PER tree are stale (computed under old rewards).
         # Setting all priorities to max ensures uniform re-sampling until
         # TD errors naturally re-converge under the new reward function.
+        for idx in range(len(self._storage)):
+            self._it_sum[idx] = self._max_priority ** self._alpha
+            self._it_min[idx] = self._max_priority ** self._alpha
+
+        return n_relabeled
+
+    def relabel_c2_all(self, relabel_c2_fn):
+        """
+        Recompute only the stored L-agent costs (c2) using CURRENT wind
+        thresholds; rewards (r2) are left untouched.
+
+        r2 has no wind dependency, but c2 = coeff * soc_deviation uses the
+        wind-segmented SOC band SOC_SAFE_RANGES[wind_level(u)]. When the
+        dynamic wind thresholds change, old c2 labels are stale and each
+        stored L sub-step cost is recomputed from its saved context.
+
+        Parameters
+        ----------
+        relabel_c2_fn : callable
+            Function with signature relabel_c2_fn(u, SOC_new) → c2.
+            Typically td3prle_myfunc.relabel_c2_substep.
+
+        Returns
+        -------
+        n_relabeled : int
+            Number of L transitions whose cost was relabeled.
+        """
+        n_relabeled = 0
+        for i in range(len(self._storage)):
+            ctx = self._contexts[i]
+            if ctx is None:
+                continue
+            # Unpack current storage tuple; reward (r2) is threshold-independent
+            obs_t, action, reward, _old_cost, obs_tp1, done = self._storage[i]
+
+            new_cost = 0.0
+            for sub in ctx:
+                new_cost += relabel_c2_fn(
+                    sub['u'],
+                    sub['SOC_new'],
+                )
+
+            # Tuple is immutable so recreate with the new cost only
+            self._storage[i] = (obs_t, action, reward, new_cost, obs_tp1, done)
+            n_relabeled += 1
+
+        # Reset ALL priorities to max_priority after relabeling (see relabel_all)
         for idx in range(len(self._storage)):
             self._it_sum[idx] = self._max_priority ** self._alpha
             self._it_min[idx] = self._max_priority ** self._alpha

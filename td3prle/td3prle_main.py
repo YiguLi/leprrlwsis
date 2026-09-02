@@ -27,14 +27,14 @@ Reward structure (td3prle_myfunc.Cal_Rew_PRRBB):
                   wind level from CURRENT dynamic thresholds
              c1 = c1_risk_coeff*[10*(P_F-3)+ + 0.1*P_F]
   Lower (L): r2 = 10*shadow_profit - 100*clip_amount
-             c2 = 700*soc_deviation   (wind-segmented SOC 安全带)
+             c2 = 1000*soc_deviation   (wind-segmented SOC 安全带; 系数 700→1000 与 TD3PER 对齐)
 
 Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
      lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 3, 50), 初始 5.0
      d_block_H 初始 1.2, curriculum 连续 100 次满足则减半, 地板 0.3
-  L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 10, 100)
-     d_block_L 初始 14.0, curriculum 减半地板 1.75
+  L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 10, 500)
+     d_block_L 初始 20.0, curriculum 减半地板 2.5 (随 c2 系数 1000 重标定)
 
 LLM meta-controller (from prle):
   - 每 1440 步（1 天）窗口边界, episode >= 3 后调用 LLM 分析窗口统计
@@ -65,6 +65,7 @@ from td3prle.td3prle_myfunc import (
     get_price_level,
     get_wind_thresholds, set_wind_thresholds,
     relabel_r1_substep, relabel_c1_substep,
+    relabel_c2_substep,
 )
 from td3prle.td3prle_llm import (
     WindowStats, llm_analyze_thresholds, create_llm_call_fn,
@@ -115,9 +116,11 @@ def train(num_iterations_H,
     d_block_H = 1.2         # 初值: 每块 sum_c1 预算
     d_block_H_min = 0.3     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    # PRRBB 标定: c2 = 700*soc_deviation
-    d_block_L = 14.0        # 初值: 每块 sum_c2 预算
-    d_block_L_min = 1.75    # curriculum 收紧地板
+    # c2 = C2_SOC_COEFF(1000)*soc_deviation (700→1000 与 TD3PER 对齐);
+    # d_block 按 0.02×coeff / 0.0025×coeff 同步重标定 → 20 / 2.5
+    # (物理允许越界量保持不变, 仅放大成本信号强度)
+    d_block_L = 20.0        # 初值: 每块 sum_c2 预算 (1000×0.02, 与 TD3PER 同口径)
+    d_block_L_min = 2.5     # curriculum 收紧地板 (1000×0.0025)
 
     # ---- TD3PRLE: Window statistics for LLM analysis ----
     window_stats = WindowStats()
@@ -320,8 +323,13 @@ def train(num_iterations_H,
                 agent_L.update_ema_cost(sum_c2)
                 agent_L.update_lam_ema(d_block_L)
             done_L = True
-        agent_L.observe_jump(norm_observation_L, original_action_L, r2, c2, norm_observation2_L, done_L,
-                             context=None)  # L: no relabeling context stored
+        # L 层每步过渡也存上下文 {u_t, SOC_new}: c2 的 SOC 安全带分档
+        # (SOC_SAFE_RANGES[wind_level(u_t)]) 依赖风速, 动态阈值变化时
+        # relabel_c2_substep 依此重算 L 缓冲中的 c2 (r2 与阈值无关, 不改)
+        agent_L.observe_jump(norm_observation_L, original_action_L, r2, c2,
+                             norm_observation2_L, done_L,
+                             context=[{'u': float(observation[1]),
+                                       'SOC_new': float(observation2[2])}])
 
         if step > args.warmup:
             #--------------------Update----------------------
@@ -619,7 +627,11 @@ def train(num_iterations_H,
                     n_relabeled = agent_H.memory.relabel_all(
                         relabel_r1_substep, relabel_c1_substep)
                     prGreen('TD3PRLE: Relabeled {} H-agent transitions'.format(n_relabeled))
-                    # L-agent buffer: no relabeling needed (r2 has no wind dependency)
+                    # L-agent buffer: r2 与阈值无关, 但 c2 = coeff*soc_deviation 的
+                    # SOC 安全带分档依赖 wind_level(u), 阈值变化后旧 c2 标签失效,
+                    # 需对 L 缓冲做 cost-only relabel (重算 c2, 保留 r2)。
+                    n_relabeled_L = agent_L.memory.relabel_c2_all(relabel_c2_substep)
+                    prGreen('TD3PRLE: Relabeled {} L-agent costs'.format(n_relabeled_L))
 
                     # Record this adjustment in history
                     threshold_history.append({
