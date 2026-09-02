@@ -577,7 +577,7 @@ if __name__ == "__main__":
 
     # Create agents
     agent_H = SP_DDPG(nb_states=4, nb_actions=6, args=args, lam_max=100.0)
-    agent_L = SP_DDPG(nb_states=6, nb_actions=1, args=args, lam_max=100.0)
+    agent_L = SP_DDPG(nb_states=6, nb_actions=1, args=args, lam_max=500.0)
 
     if args.mode == 'train':
         train_rbb(args.train_iter_H,

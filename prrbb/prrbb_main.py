@@ -709,7 +709,7 @@ if __name__ == "__main__":
     agent_H.lam = 5.0  # lam1 初始值
     # L 层对偶改 EMA 实际成本更新 (与 H 层同方案, 与 PER L 同边界)
     agent_L = SP_DDPG(nb_states=5, nb_actions=1, args=args,
-                      lam_max=100.0, lam_min=10.0,
+                      lam_max=500.0, lam_min=10.0,
                       ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01)
     agent_L.cost_limit = 10.0  # L-layer c2 dedicated initial value (EMA 模式下不使用)
 

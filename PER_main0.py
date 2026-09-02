@@ -627,9 +627,9 @@ if __name__ == "__main__":
                       record_update_stats=True)
     agent_H.lam = 5.0
     # B1: L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
-    #     lam2 ∈ [10, 100]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
+    #     lam2 ∈ [10, 500]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
     agent_L = SP_DDPG(nb_states = 5, nb_actions = 1, args = args,
-                      lam_max=100.0, lam_min=10.0,
+                      lam_max=500.0, lam_min=10.0,
                       ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01)
     agent_L.cost_limit = 10.0  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
     #TODO 是否预训练

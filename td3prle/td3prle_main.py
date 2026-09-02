@@ -902,10 +902,10 @@ if __name__ == "__main__":
                           cost_critic_mode=args.cost_critic_mode)
     agent_H.lam = 5.0
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
-    #     lam2 ∈ [10, 100]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
+    #     lam2 ∈ [10, 500]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
     #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
     agent_L = SP_TD3_PRLE(nb_states = 5, nb_actions = 1, args = args,
-                          lam_max=100.0, lam_min=10.0,
+                          lam_max=500.0, lam_min=10.0,
                           ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                           policy_delay=args.policy_delay,
                           policy_noise=args.policy_noise,
