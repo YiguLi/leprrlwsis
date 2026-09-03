@@ -33,7 +33,7 @@ Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
      lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 3, 50), 初始 5.0
      d_block_H 初始 1.2, curriculum 连续 100 次满足则减半, 地板 0.3
-  L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 10, 500)
+  L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 10, 200)
      d_block_L 初始 20.0, curriculum 减半地板 2.5 (随 c2 系数 1000 重标定)
 
 LLM meta-controller (from prle):
@@ -914,10 +914,12 @@ if __name__ == "__main__":
                           cost_critic_mode=args.cost_critic_mode)
     agent_H.lam = 5.0
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
-    #     lam2 ∈ [10, 500]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
+    #     lam2 ∈ [10, 200] (500→200: 抑制对偶顶格; run148 中 lam2 长期顶 500
+    #     而 SOC 仍塌缩, 说明成本通道在 λ 顶格时反而失效), ema_alpha=0.02
+    #     (时间常数~50块=250步), ema_lam_lr=0.01
     #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
     agent_L = SP_TD3_PRLE(nb_states = 5, nb_actions = 1, args = args,
-                          lam_max=500.0, lam_min=10.0,
+                          lam_max=200.0, lam_min=10.0,
                           ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                           policy_delay=args.policy_delay,
                           policy_noise=args.policy_noise,
