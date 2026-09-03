@@ -73,7 +73,7 @@ def train_prrbb(num_iterations_H,
 
     Reward structure (机会/风险分离版, prrbb_myfunc.py):
       Upper (H): r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
-                      - 490*max(-pbrule,0)*time - penalty_NN_H
+                      - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                       wT=wT_u(u)*wT_p(pr), wB=wB_p(pr)*wB_soc(SOC,wind)
                  c1 = r_u(u)*(10*max(0,P_F-3) + 0.1*P_F) + 50*unfeasible_gap
       Lower (L): r2 = 10*shadow_profit - 100*clip_amount
@@ -517,9 +517,9 @@ def train_prrbb(num_iterations_H,
         episode_cost += c
         episode_cost2 += c2
         episode_profit += observation2[-1] * observation[0] * time \
-            - 4.9 * max(-float(pbrule), 0) * time
+            - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
         episode_bess_profit += reward_details['shadow_profit'] \
-            - 4.9 * max(-float(pbrule), 0) * time
+            - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
 
         norm_observation = deepcopy(norm_observation2)
         observation = deepcopy(observation2)

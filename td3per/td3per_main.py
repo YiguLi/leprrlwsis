@@ -183,7 +183,7 @@ def train(num_iterations_H,
             observation2, pw_tru2, applied_action_H, rbb_info_obs2)
         
         r, c = Cal_Rew(observation, observation2, action_rbb)
-        r1 = observation[0] * observation2[-1] * time - penalty_NN_H - 490.0 * max(-float(pbrule), 0) * time
+        r1 = observation[0] * observation2[-1] * time - penalty_NN_H - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
 
         # SOC safe: [1.5, 4.5] (conservative, equivalent to HIGH wind in segmented schemes)
         # —— c2 拉格朗日约束项的 SOC 越界计算
@@ -455,10 +455,10 @@ def train(num_iterations_H,
         episode_reward += r
         episode_cost += c
         episode_cost2 += c2
-        # 上层利润: pg * 实际电价 * dt - 4.9 * pb * dt
-        episode_profit += observation2[-1] * observation[0] * time - 4.9 * max(-float(pbrule), 0) * time
+        # 上层利润: pg * 实际电价 * dt - BESS_DEG_RMB_PER_MWH * pb * dt
+        episode_profit += observation2[-1] * observation[0] * time - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
         # BESS盈亏: 影子套利 - 退化成本
-        episode_bess_profit += shadow_profit - 4.9 * max(-float(pbrule), 0) * time
+        episode_bess_profit += shadow_profit - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
         # update env
         # Oh_observation = deepcopy(Oh_observation2)
         norm_observation = deepcopy(norm_observation2)

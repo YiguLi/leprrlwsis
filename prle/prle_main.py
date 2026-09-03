@@ -76,7 +76,7 @@ def train_prle(num_iterations_H,
 
     Reward structure (same as PRRBB):
       Upper (H): r1 = w_wind*pr*ptur*time + w_bess*(-pr*pbrule*time)
-                      - 490*max(-pbrule,0)*time - penalty_NN_H
+                      - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                  c1 = risk_coeff * (10*max(0,P_F-3) + 0.1*P_F)
       Lower (L): r2 = 10*shadow_profit - 100*clip_amount
                  c2 = 700*soc_deviation  (SOC-safe 项, 拉格朗日约束)
@@ -261,7 +261,7 @@ def train_prle(num_iterations_H,
             'pr': float(observation[0]),
             'turbine_raw': float(reward_details['pr'] * ptur * time),
             'bess_raw': float(-reward_details['pr'] * pbrule * time),
-            'degradation': float(490.0 * max(-pbrule, 0.0) * time),
+            'degradation': float(BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time),
             'penalty_NN_H': float(penalty_NN_H),
             'P_F': float(reward_details['P_F']),
             # PRRBB 分段结构新增的重标记上下文：
@@ -621,9 +621,9 @@ def train_prle(num_iterations_H,
         episode_cost += c
         episode_cost2 += c2
         episode_profit += observation2[-1] * observation[0] * time \
-            - 4.9 * max(-float(pbrule), 0) * time
+            - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
         episode_bess_profit += reward_details['shadow_profit'] \
-            - 4.9 * max(-float(pbrule), 0) * time
+            - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
 
         norm_observation = deepcopy(norm_observation2)
         observation = deepcopy(observation2)

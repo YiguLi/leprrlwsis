@@ -106,7 +106,7 @@ def Cal_Rew(observation, observation2, action_all, cost_single_cons=3.0):
     p_g = observation2[-1]
     p_g_last = observation[-1]
     P_B = action_all[-1]
-    r = (p_g * pr - 4.9 * max(-P_B, 0)) * TIME
+    r = (p_g * pr - BESS_DEG_RMB_PER_MWH * max(-P_B, 0)) * TIME
     P_F = abs(p_g_last - p_g)
     if P_F > cost_single_cons:
         c = 10.0 * (P_F - cost_single_cons)
@@ -219,7 +219,7 @@ def test_one_episode(env, agent_H, agent_L, rbb_system,
             )
             # Common metric
             profit_step = (obs2[-1] * obs[0]
-                           - 490.0 * max(-float(pbrule), 0.0)) * TIME
+                           - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0.0)) * TIME
 
         else:
             # ---- PER: flat revenue reward ----
@@ -228,7 +228,7 @@ def test_one_episode(env, agent_H, agent_L, rbb_system,
             # r1 = revenue - penalty_NN_H - degradation
             r1 = (obs2[-1] * obs[0] * TIME
                   - penalty_NN_H
-                  - 490.0 * max(-float(pbrule), 0.0) * TIME)
+                  - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0.0) * TIME)
             c1 = c
 
             # r2 = shadow_profit - 100*clip_amount (pbrule 裁剪惩罚)
@@ -251,7 +251,7 @@ def test_one_episode(env, agent_H, agent_L, rbb_system,
 
             # Common metric
             profit_step = (obs2[-1] * obs[0]
-                           - 490.0 * max(-float(pbrule), 0.0)) * TIME
+                           - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0.0)) * TIME
 
         r = r1 + r2
         c = c1

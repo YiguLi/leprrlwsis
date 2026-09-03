@@ -173,7 +173,7 @@ def main():
             norm_obs2 = Normalize(obs2)
 
             P_F = info['P_F']  # 提前提取: reward 分支与 cvm 统计共用
-            profit_step = (obs2[-1] * obs[0] - 490.0 * max(-float(pbrule), 0.0)) * TIME
+            profit_step = (obs2[-1] * obs[0] - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0.0)) * TIME
 
             if proj_type in ('PRRBB', 'TD3PRRBB'):
                 # PRRBB 与 TD3PRRBB 公式一致 (td3prrbb_myfunc 为 prrbb_myfunc 拷贝)
@@ -191,7 +191,7 @@ def main():
                     penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru))
             else:  # PER / TD3PER
                 _, c = Cal_Rew(obs, obs2, action_env)
-                r1 = obs2[-1] * obs[0] * TIME - penalty_NN_H - 490.0 * max(-float(pbrule), 0.0) * TIME
+                r1 = obs2[-1] * obs[0] * TIME - penalty_NN_H - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0.0) * TIME
                 # c1 与训练口径一致: 越限惩罚 + 平滑项 + 50*unfeasible_gap (PER/TD3PER 相同)
                 c1 = c + 0.1 * P_F + 50.0 * float(rbb_info['unfeasible_gap'])
                 signal = action[5]
@@ -251,7 +251,7 @@ def main():
 def Cal_Rew(observation, observation2, action_all, cost_single_cons=3.0):
     pr, p_g, p_g_last = observation[0], observation2[-1], observation[-1]
     P_B = action_all[-1]
-    r = (p_g * pr - 4.9 * max(-P_B, 0)) * TIME
+    r = (p_g * pr - BESS_DEG_RMB_PER_MWH * max(-P_B, 0)) * TIME
     P_F = abs(p_g_last - p_g)
     c = 10.0 * (P_F - cost_single_cons) if P_F > cost_single_cons else 0.0
     return r, c

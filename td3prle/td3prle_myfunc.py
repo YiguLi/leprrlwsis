@@ -18,7 +18,7 @@ TD3PRLE addition over prle_myfunc.py:
 Upper (H) r1:
   r1 = w_wind * (pr * ptur * time)     ← turbine profit, segmented
      + w_bess * (-pr * pbrule * time)   ← BESS profit, segmented
-     - 490.0 * max(-pbrule, 0) * time   ← degradation, NO coefficient
+     - BESS_DEG_RMB_PER_MWH * max(-pbrule, 0) * time   ← degradation, NO coefficient
      - penalty_NN_H
 
   Coefficients by (wind_level, price_level):
@@ -148,14 +148,14 @@ def Cal_r1_PRRBB(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
 
     r1 = w_wind * (pr * ptur * time)       ← turbine's grid contribution
        + w_bess * (-pr * pbrule * time)    ← BESS revenue (discharge → positive)
-       - 490.0 * max(-pbrule, 0.0) * time  ← degradation (NO seg coefficient)
+       - BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time  ← degradation (NO seg coefficient)
        - penalty_NN_H
     """
     w_wind, w_bess = get_seg_coeffs(wind_level, price_level)
 
     turbine_profit = w_wind * pr * ptur * time
     bess_profit    = w_bess * (-pr * pbrule * time)
-    degradation    = 490.0 * max(-pbrule, 0.0) * time
+    degradation    = BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time
 
     return turbine_profit + bess_profit - degradation - penalty_NN_H
 
@@ -183,7 +183,7 @@ def relabel_r1_substep(u, pr, turbine_raw, bess_raw, degradation, penalty_NN_H):
     bess_raw : float
         -pr * pbrule * time  (threshold-independent BESS contribution).
     degradation : float
-        490.0 * max(-pbrule, 0.0) * time  (threshold-independent).
+        BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time  (threshold-independent).
     penalty_NN_H : float
         Action boundary penalty (threshold-independent).
 
@@ -418,7 +418,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
         'turbine_profit': turbine_profit,
         'bess_profit': bess_profit,
         'revenue': turbine_profit + bess_profit,
-        'degradation': 490.0 * max(-pbrule, 0.0) * time,
+        'degradation': BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time,
         'shadow_profit': shadow_profit,
         'shadow_price': shadow_price,
         'soc_deviation': soc_dev,
@@ -681,7 +681,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
     case_metrics : list of dict (length 9)
         Per-case 5-step mean metrics + cvm + project_wind_levels;
         'profit' = the case's 5-step profit sum
-        (profit_step = P_G*pr*dt - 4.9*max(-pbrule,0)*dt).
+        (profit_step = P_G*pr*dt - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*dt).
     overall : dict
         Mean over the 9 case means, plus current wind_low_max/wind_high_min;
         'profit' = the 45-step total profit sum.
@@ -759,8 +759,8 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             pc['cvm'] += 1
         pc['project_winds'].add(details['wind_level'])
 
-        # profit: 上层利润 = P_G * pr * dt - 4.9*max(-pb,0)*dt（与训练 episode_profit 同口径）
-        profit_step = obs2[-1] * obs[0] * time - 4.9 * max(-float(pbrule), 0.0) * time
+        # profit: 上层利润 = P_G * pr * dt - BESS_DEG_RMB_PER_MWH*max(-pb,0)*dt（与训练 episode_profit 同口径）
+        profit_step = obs2[-1] * obs[0] * time - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0.0) * time
         pc['profit'] += profit_step
 
         if test_csv:

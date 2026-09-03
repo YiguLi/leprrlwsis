@@ -8,7 +8,7 @@ Decomposes PG revenue into turbine (ptur) and BESS (pb) components.
 Upper (H) r1（机会侧，乘法分解）:
   r1 = wT * (pr * ptur * time)           ← 风机收益, wT = wT_u(u) × wT_p(pr)
      + wB * (-pr * pbrule * time)         ← BESS 收益, wB = wB_p(pr) × wB_soc(SOC,wind)
-      - 490.0 * max(-pbrule, 0) * time    ← 退化 (H 看 BESS 净收益)
+      - BESS_DEG_RMB_PER_MWH * max(-pbrule, 0) * time    ← 退化 (H 看 BESS 净收益)
       - penalty_NN_H
 
   Weight tables:
@@ -152,7 +152,7 @@ def Cal_r1_PRRBB(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
 
     r1 = wT * (pr * ptur * time)           ← 风机收益, wT = wT_u(u)×wT_p(pr)
        + wB * (-pr * pbrule * time)        ← BESS 收益, wB = wB_p(pr)×wB_soc(SOC,wind)
-       - 490.0 * max(-pbrule, 0.0) * time  ← 退化 (H 看 BESS 净收益)
+       - BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time  ← 退化 (H 看 BESS 净收益)
        - penalty_NN_H
 
     风险（波动/平抑可行性/SOC 越界）由 c1/c2 编码，不再混入收益权重。
@@ -185,7 +185,7 @@ def Cal_r1_PRRBB(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
 
     turbine_profit = w_wind * pr * ptur * time
     bess_profit    = w_bess * (-pr * pbrule * time)
-    degradation    = 490.0 * max(-pbrule, 0.0) * time
+    degradation    = BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time
 
     return turbine_profit + bess_profit - degradation - penalty_NN_H
 
@@ -338,7 +338,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
         'turbine_profit': turbine_profit,
         'bess_profit': bess_profit,
         'revenue': turbine_profit + bess_profit,
-        'degradation': 490.0 * max(-pbrule, 0.0) * time,
+        'degradation': BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time,
         'shadow_profit': shadow_profit,
         'shadow_price': shadow_price,
         'soc_deviation': soc_dev,
@@ -579,7 +579,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
     case_metrics : list of dict (length 9)
         Per-case 5-step mean r1/c1/r2/c2/r/c plus violation count cvm;
         'profit' = the case's 5-step profit sum
-        (profit_step = P_G*pr*dt - 4.9*max(-pbrule,0)*dt).
+        (profit_step = P_G*pr*dt - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*dt).
     overall : dict
         Mean over the 9 case means (cvm = total count);
         'profit' = the 45-step total profit sum.
@@ -651,8 +651,8 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         if c1 > 0:
             pc['cvm'] += 1
 
-        # profit: 上层利润 = P_G * pr * dt - 4.9*max(-pb,0)*dt（与训练 episode_profit 同口径）
-        profit_step = obs2[-1] * obs[0] * time - 4.9 * max(-float(pbrule), 0.0) * time
+        # profit: 上层利润 = P_G * pr * dt - BESS_DEG_RMB_PER_MWH*max(-pb,0)*dt（与训练 episode_profit 同口径）
+        profit_step = obs2[-1] * obs[0] * time - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0.0) * time
         pc['profit'] += profit_step
 
         if test_csv:

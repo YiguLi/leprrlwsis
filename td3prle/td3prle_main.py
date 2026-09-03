@@ -22,7 +22,7 @@ Parent packages:
 
 Reward structure (td3prle_myfunc.Cal_Rew_PRRBB):
   Upper (H): r1 = w_wind*(pr*ptur*time) + w_bess*(-pr*pbrule*time)
-                  - 490*max(-pbrule,0)*time - penalty_NN_H
+                  - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                   (w_wind, w_bess) from SEG_COEFFS by (wind, price) level,
                   wind level from CURRENT dynamic thresholds
              c1 = c1_risk_coeff*[10*(P_F-3)+ + 0.1*P_F]
@@ -294,7 +294,7 @@ def train(num_iterations_H,
             'pr': float(observation[0]),
             'turbine_raw': float(reward_details['pr'] * ptur * time),
             'bess_raw': float(-reward_details['pr'] * pbrule * time),
-            'degradation': float(490.0 * max(-pbrule, 0.0) * time),
+            'degradation': float(BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time),
             'penalty_NN_H': float(penalty_NN_H),
             'P_F': float(reward_details['P_F']),
             'unfeasible_gap': float(rbb_info['unfeasible_gap']),  # relabel 原样带入
@@ -658,10 +658,10 @@ def train(num_iterations_H,
         episode_reward += r
         episode_cost += c
         episode_cost2 += c2
-        # 上层利润: pg * 实际电价 * dt - 4.9 * pb * dt
-        episode_profit += observation2[-1] * observation[0] * time - 4.9 * max(-float(pbrule), 0) * time
+        # 上层利润: pg * 实际电价 * dt - BESS_DEG_RMB_PER_MWH * pb * dt
+        episode_profit += observation2[-1] * observation[0] * time - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
         # BESS盈亏: 影子套利 - 退化成本
-        episode_bess_profit += reward_details['shadow_profit'] - 4.9 * max(-float(pbrule), 0) * time
+        episode_bess_profit += reward_details['shadow_profit'] - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
         # update env
         norm_observation = deepcopy(norm_observation2)
         observation = deepcopy(observation2)

@@ -5,6 +5,14 @@ from torch.autograd import Variable
 USE_CUDA = torch.cuda.is_available()
 FLOAT = torch.cuda.FloatTensor if USE_CUDA else torch.FloatTensor
 
+# BESS 放电退化成本 (RMB/MWh 放电量) —— 全项目统一口径，任何退化成本计算
+# 必须引用本常量，禁止写裸数字。
+# 经济含义: 放电盈亏平衡电价 ≈ 490 RMB/MWh（低谷 300 充电、平/峰 580/980 放电
+# 才有利可图），与 r1/训练奖励口径一致。
+# 历史修正: 训练奖励 r1 一直用 490，但报告口径 episode_profit / test9 profit
+# 曾误用 4.9（×100 低估放电退化），两套账不一致；现统一为 490。
+BESS_DEG_RMB_PER_MWH = 490.0
+
 def round_list(array,n):
     ans = array
     for i in range(len(array)):

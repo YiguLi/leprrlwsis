@@ -18,7 +18,7 @@ def Cal_Rew(observation, observation2, action_all, cost_single_cons = 3.):
     p_g_last = observation[-1]
     
     P_B = action_all[-1]
-    r = (p_g * pr - 4.9 * max(-P_B,0)) * time  # 4.90 # deg:unit：RMB/Mwh
+    r = (p_g * pr - BESS_DEG_RMB_PER_MWH * max(-P_B,0)) * time  # deg: BESS_DEG_RMB_PER_MWH RMB/MWh (放电 1 MWh 退化成本)
     
     P_F = abs(p_g_last - p_g)
     if P_F > cost_single_cons:
@@ -34,7 +34,7 @@ def Eval_Rew(observation, observation2, action_all, cost_single_cons = 3.):
     p_g_last = observation[-1]
     
     P_B = action_all[-1]
-    r = (p_g * pr - 4.9 * max(-P_B,0)) * time  # 4.90 # deg:unit：RMB/Mwh
+    r = (p_g * pr - BESS_DEG_RMB_PER_MWH * max(-P_B,0)) * time  # deg: BESS_DEG_RMB_PER_MWH RMB/MWh (放电 1 MWh 退化成本)
     
     P_F = abs(p_g_last - p_g)
     if P_F > cost_single_cons:
@@ -305,7 +305,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
     case_metrics : list of dict (length 9)
         Per-case 5-step mean r1/c1/r2/c2/r/c plus violation count cvm;
         'profit' = the case's 5-step profit sum
-        (profit_step = P_G*pr*dt - 4.9*max(-pbrule,0)*dt).
+        (profit_step = P_G*pr*dt - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*dt).
     overall : dict
         Mean over the 9 case means (cvm = total count);
         'profit' = the 45-step total profit sum.
@@ -395,8 +395,8 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         if c > 0:
             pc['cvm'] += 1
 
-        # profit: 上层利润 = P_G * pr * dt - 4.9*max(-pb,0)*dt（与训练 episode_profit 同口径）
-        profit_step = obs2[-1] * obs[0] * time - 4.9 * max(-float(pbrule_test), 0.0) * time
+        # profit: 上层利润 = P_G * pr * dt - BESS_DEG_RMB_PER_MWH*max(-pb,0)*dt（与训练 episode_profit 同口径）
+        profit_step = obs2[-1] * obs[0] * time - BESS_DEG_RMB_PER_MWH * max(-float(pbrule_test), 0.0) * time
         pc['profit'] += profit_step
 
         if test_csv:

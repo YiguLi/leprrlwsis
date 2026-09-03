@@ -18,7 +18,7 @@ Parent packages:
 
 Reward structure (td3prrbb_myfunc.Cal_Rew_PRRBB):
   Upper (H): r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
-                  - 490*max(-pbrule,0)*time - penalty_NN_H
+                  - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                   wT = wT_u(u)×wT_p(pr), wB = wB_p(pr)×wB_soc(SOC,wind)
              c1 = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + 50*unfeasible_gap
   Lower (L): r2 = 10*shadow_profit - 100*clip_amount
@@ -510,10 +510,10 @@ def train(num_iterations_H,
         episode_reward += r
         episode_cost += c
         episode_cost2 += c2
-        # 上层利润: pg * 实际电价 * dt - 4.9 * pb * dt
-        episode_profit += observation2[-1] * observation[0] * time - 4.9 * max(-float(pbrule), 0) * time
+        # 上层利润: pg * 实际电价 * dt - BESS_DEG_RMB_PER_MWH * pb * dt
+        episode_profit += observation2[-1] * observation[0] * time - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
         # BESS盈亏: 影子套利 - 退化成本
-        episode_bess_profit += reward_details['shadow_profit'] - 4.9 * max(-float(pbrule), 0) * time
+        episode_bess_profit += reward_details['shadow_profit'] - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
         # update env
         norm_observation = deepcopy(norm_observation2)
         observation = deepcopy(observation2)
