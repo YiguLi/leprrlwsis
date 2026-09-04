@@ -17,7 +17,7 @@ Parent packages:
   - Reward layer (prle/prle_main.py):
       Cal_Rew_PRRBB 机会/风险分离的分段奖励 with DYNAMIC wind thresholds,
       RBB hard clipping before env.step, sub-step context accumulation,
-      WindowStats + LLM threshold adjustment at 1440-step boundaries,
+      WindowStats + LLM threshold adjustment at 7200-step (5-day) boundaries,
       buffer relabeling when thresholds change.
 
 Reward structure (td3prle_myfunc.Cal_Rew_PRRBB):
@@ -37,7 +37,7 @@ Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
      d_block_L 初始 20.0, curriculum 减半地板 2.5 (随 c2 系数 1000 重标定)
 
 LLM meta-controller (from prle):
-  - 每 1440 步（1 天）窗口边界, episode >= 3 后调用 LLM 分析窗口统计
+  - 每 7200 步（5 天）窗口边界, episode >= 3 后调用 LLM 分析窗口统计
     并给出 (adjust_low_max, adjust_high_min) 阈值调整建议;
   - 阈值实际变化后, 对 H 层回放缓冲 relabel_all() 重算奖励/成本;
   - LLM 调用失败时回退占位模式 (返回 (0.0, 0.0)), 训练继续。
@@ -593,10 +593,10 @@ def train(num_iterations_H,
                 window_power_sum = 0.0
 
         # ================================================================
-        # TD3PRLE: LLM Threshold Adjustment at 1440-step boundaries
+        # TD3PRLE: LLM Threshold Adjustment at 7200-step (5-day) boundaries
         # ================================================================
-        if step > 0 and step % 1440 == 0:
-            prCyan('--- TD3PRLE: 1440-step window boundary (step {}) ---'.format(step))
+        if step > 0 and step % 7200 == 0:
+            prCyan('--- TD3PRLE: 7200-step window boundary (step {}) ---'.format(step))
 
             if episode >= min_episodes_before_llm:
                 current_low_max, current_high_min = get_wind_thresholds()

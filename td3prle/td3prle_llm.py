@@ -3,7 +3,7 @@ TD3PRLE LLM Analysis Module
 ============================
 Copy of prle/prle_llm.py (TD3PRLE = TD3 + PRLE LLM meta-controller).
 Two components:
-  1. WindowStats — accumulates per-step metrics over a 1440-step window
+  1. WindowStats — accumulates per-step metrics over a 7200-step adjustment window
   2. llm_analyze_thresholds — calls LLM to suggest threshold adjustments
 
 The LLM call is a placeholder that returns (0.0, 0.0) when no provider is
@@ -16,7 +16,7 @@ import os
 
 class WindowStats:
     """
-    Accumulates per-step training metrics over a 1440-step window.
+    Accumulates per-step training metrics over a 7200-step adjustment window.
 
     Tracks reward totals, violation counts, and per-wind-level statistics
     to provide the LLM with a comprehensive view of the agent's performance
@@ -145,7 +145,7 @@ LOW             WT:1.0~1.2, BESS:0.8~1.2   ← 鼓励多发
   - 调低LOW_MAX → 更少样本归入LOW → 中等风速趋于保守
 
 ═══════════════════════════════════════════
-当前窗口统计数据（1440步 = 1天）
+当前窗口统计数据（7200步 = 5天）
 ═══════════════════════════════════════════
 总步数：{total_steps}
 平均r1（盈利代理）：{r1_avg}
