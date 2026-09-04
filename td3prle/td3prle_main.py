@@ -20,21 +20,21 @@ Parent packages:
       WindowStats + LLM threshold adjustment at 7200-step (5-day) boundaries,
       buffer relabeling when thresholds change.
 
-Reward structure (td3prle_myfunc.Cal_Rew_PRRBB):
-  Upper (H): r1 = w_wind*(pr*ptur*time) + w_bess*(-pr*pbrule*time)
+Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
+  Upper (H): r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
                   - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
-                  (w_wind, w_bess) from SEG_COEFFS by (wind, price) level,
-                  wind level from CURRENT dynamic thresholds
-             c1 = c1_risk_coeff*[10*(P_F-3)+ + 0.1*P_F]
+                  (wT = wT_u(u)×wT_p(pr), wB = wB_p(pr)×wB_soc(SOC,wind),
+                   SOC 贴边 → BESS 收益 ×0.7; 与 td3prrbb 一致)
+             c1 = C1_RISK[wind]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
   Lower (L): r2 = 10*shadow_profit - 100*clip_amount
-             c2 = 1000*soc_deviation   (wind-segmented SOC 安全带; 系数 700→1000 与 TD3PER 对齐)
+             c2 = 700*soc_deviation   (wind-segmented SOC 安全带; 与 td3prrbb 原系数一致)
 
 Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
      lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 3, 50), 初始 5.0
      d_block_H 初始 1.2, curriculum 连续 100 次满足则减半, 地板 0.3
-  L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 10, 200)
-     d_block_L 初始 20.0, curriculum 减半地板 2.5 (随 c2 系数 1000 重标定)
+  L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 10, 500)
+     d_block_L 初始 14.0, curriculum 减半地板 1.75 (与 td3prrbb 同口径)
 
 LLM meta-controller (from prle):
   - 每 7200 步（5 天）窗口边界, episode >= 3 后调用 LLM 分析窗口统计
@@ -118,11 +118,9 @@ def train(num_iterations_H,
     d_block_H = 1.2         # 初值: 每块 sum_c1 预算
     d_block_H_min = 0.3     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    # c2 = C2_SOC_COEFF(1000)*soc_deviation (700→1000 与 TD3PER 对齐);
-    # d_block 按 0.02×coeff / 0.0025×coeff 同步重标定 → 20 / 2.5
-    # (物理允许越界量保持不变, 仅放大成本信号强度)
-    d_block_L = 20.0        # 初值: 每块 sum_c2 预算 (1000×0.02, 与 TD3PER 同口径)
-    d_block_L_min = 2.5     # curriculum 收紧地板 (1000×0.0025)
+    # c2 = C2_SOC_COEFF(700)*soc_deviation, 与 td3prrbb 原系数/预算一致
+    d_block_L = 14.0        # 初值: 每块 sum_c2 预算 (与 td3prrbb 同口径)
+    d_block_L_min = 1.75    # curriculum 收紧地板
 
     # ---- TD3PRLE: Window statistics for LLM analysis ----
     window_stats = WindowStats()
@@ -942,13 +940,11 @@ if __name__ == "__main__":
                           noise_clip=args.noise_clip,
                           cost_critic_mode=args.cost_critic_mode)
     agent_H.lam = 5.0
-    # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
-    #     lam2 ∈ [10, 200] (500→200: 抑制对偶顶格; run148 中 lam2 长期顶 500
-    #     而 SOC 仍塌缩, 说明成本通道在 λ 顶格时反而失效), ema_alpha=0.02
-    #     (时间常数~50块=250步), ema_lam_lr=0.01
+    # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c), 与 td3prrbb 同配置;
+    #     lam2 ∈ [10, 500], ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
     #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
     agent_L = SP_TD3_PRLE(nb_states = 5, nb_actions = 1, args = args,
-                          lam_max=200.0, lam_min=10.0,
+                          lam_max=500.0, lam_min=10.0,
                           ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                           policy_delay=args.policy_delay,
                           policy_noise=args.policy_noise,

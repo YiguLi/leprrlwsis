@@ -15,26 +15,26 @@ TD3PRLE addition over prle_myfunc.py:
     [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10] (from
     td3prrbb_myfunc.py); prrbb_S_test() and nine_case_test() use it.
 
-Upper (H) r1:
-  r1 = w_wind * (pr * ptur * time)     ← turbine profit, segmented
-     + w_bess * (-pr * pbrule * time)   ← BESS profit, segmented
-     - BESS_DEG_RMB_PER_MWH * max(-pbrule, 0) * time   ← degradation, NO coefficient
-     - penalty_NN_H
+奖励函数结构严格对照 td3prrbb (PRRBB 乘法分解), 仅叠加 PRLE 动态阈值层:
 
-  Coefficients by (wind_level, price_level):
-  ┌──────────┬───────────────┬───────────────┬───────────────┐
-  │  Wind ↓  │  Price LOW    │  Price MEDIUM │  Price HIGH   │
-  ├──────────┼───────────────┼───────────────┼───────────────┤
-  │  LOW     │  WT:1.2 B:0.8 │  WT:1.2 B:1.0 │  WT:1.2 B:1.2 │
-  │  MEDIUM  │  WT:1.0 B:0.8 │  WT:1.0 B:1.0 │  WT:1.2 B:1.2 │
-  │  HIGH    │  WT:0.75 B:0.8│  WT:0.85 B:1.0│  WT:0.95 B:1.2│
-  └──────────┴───────────────┴───────────────┴───────────────┘
+Upper (H) r1 (机会侧, 乘法分解, 与 td3prrbb 一致):
+  r1 = wT * (pr * ptur * time)            ← 风机收益, wT = wT_u(u) × wT_p(pr)
+     + wB * (-pr * pbrule * time)         ← BESS 收益, wB = wB_p(pr) × wB_soc(SOC,wind)
+      - BESS_DEG_RMB_PER_MWH * max(-pbrule, 0) * time   ← 退化 (H 看 BESS 净收益)
+      - penalty_NN_H
 
-  Wind boundaries: dynamic (default LOW < 8.5 m/s, HIGH >= 12.0 m/s, 专家起点)
+  wT_u: LOW=1.2 MEDIUM=1.0 HIGH=0.9 | wT_p: LOW=1.0 MEDIUM=1.0 HIGH=1.05
+  wB_p: LOW=0.8 MEDIUM=1.0 HIGH=1.2 | wB_soc: 带内=1.0, 带外(SOC 贴边)=0.7
+
+Upper (H) c1 (风险侧):
+  c1 = C1_RISK[wind] × [10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
+  C1_RISK: LOW=0.8 MEDIUM=1.0 HIGH=1.2, W_GAP=50 (与 td3prrbb 一致)
+
+Wind boundaries: 动态 (main 按 --seg 定起点, LLM 每 7200 步在 原设定±1 m/s 内调整)
 
 Lower (L):
   r2 = 10.0 * shadow_profit - 100.0 * clip_amount
-  c2 = 1000.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束; 系数 700→1000 与 TD3PER 对齐)
+  c2 = 700.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束, 与 td3prrbb 原系数一致)
 """
 
 import numpy as np
@@ -48,11 +48,14 @@ from util import *
 # 0. Dynamic Wind Thresholds (mutable module-level state)
 # =============================================================================
 
-# 专家起点（默认）：低风 < 8.5 m/s，高风 >= 12.0 m/s；
-# main 启动时也可用 --seg 选择 percentile / kmeans 起点（见 data_piecewise/boundaries.py），
-# 之后由 LLM 元控制器在 1440 步窗口边界处在线调整。
-_wind_low_max  = 8.5   # u < _wind_low_max    → LOW wind
-_wind_high_min = 12.0  # u >= _wind_high_min  → HIGH wind, else MEDIUM
+# 模块默认固定阈值 7.0/11.0 (与 td3prrbb 一致); main 启动时按 --seg
+# (percentile / kmeans / expert) 用 set_wind_thresholds() 设定起点,
+# 之后由 LLM 元控制器每 7200 步在 原设定 ±1 m/s 内在线调整。
+WIND_LOW_MAX  = 7.0   # u < WIND_LOW_MAX   → LOW wind
+WIND_HIGH_MIN = 11.0  # u >= WIND_HIGH_MIN → HIGH wind, else MEDIUM
+
+_wind_low_max  = WIND_LOW_MAX
+_wind_high_min = WIND_HIGH_MIN
 
 
 def get_wind_thresholds():
@@ -113,28 +116,40 @@ def get_wind_level(u):
 
 
 # =============================================================================
-# 3. Joint Segmentation Coefficient Lookup
+# 3. Segmented Weight Lookup (multiplicative decomposition, 与 td3prrbb 一致)
 # =============================================================================
-# HIGH wind (risk zone): ptur profit callback applied.
-#   Low price → 0.75, Medium price → 0.85, High price → 0.95
+# 机会侧（利润）与风险侧（c1/c2）分离：
+#   wT = wT_u(u) × wT_p(pr)                 — 风机发电收益权重
+#   wB = wB_p(pr) × wB_soc(SOC, wind_level) — BESS 套利收益权重 (SOC 贴边 ×0.7)
+# 风险全部进入 c1（波动+不可行缺口）与 c2（SOC 安全带），不再混入收益权重。
 
-# (wind_level, price_level) → (w_wind, w_bess)
-SEG_COEFFS = {
-    ('LOW',    'LOW'):    (1.2, 0.8),
-    ('LOW',    'MEDIUM'): (1.2, 1.0),
-    ('LOW',    'HIGH'):   (1.2, 1.2),
-    ('MEDIUM', 'LOW'):    (1.0, 0.8),
-    ('MEDIUM', 'MEDIUM'): (1.0, 1.0),
-    ('MEDIUM', 'HIGH'):   (1.2, 1.2),
-    ('HIGH',   'LOW'):    (0.75, 0.8),
-    ('HIGH',   'MEDIUM'): (0.85, 1.0),
-    ('HIGH',   'HIGH'):   (0.95, 1.2),
-}
+# 风机收益：低风鼓励多发（机会大、风险小），高风轻度降载倾向
+WT_WIND = {'LOW': 1.2, 'MEDIUM': 1.0, 'HIGH': 0.9}
+# 风机收益：高价时段轻微加码（降载的机会成本更大）
+WT_PRICE = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.05}
+# BESS 收益：电价分档沿用原设计（低价时少罚充电→鼓励低谷充电）
+WB_PRICE = {'LOW': 0.8, 'MEDIUM': 1.0, 'HIGH': 1.2}
+# BESS 收益：SOC 贴边（超出当前风速档安全带）时压低套利权重
+WB_SOC_OUTSIDE = 0.7
+
+# c1 风险系数：三档（LOW≠MEDIUM≠HIGH, 与 td3prrbb 一致）
+C1_RISK = {'LOW': 0.8, 'MEDIUM': 1.0, 'HIGH': 1.2}
 
 
-def get_seg_coeffs(wind_level, price_level):
-    """Return (w_wind, w_bess) segmentation coefficients."""
-    return SEG_COEFFS[(wind_level, price_level)]
+def get_wT(wind_level, price_level):
+    """Turbine revenue weight: multiplicative wind × price decomposition."""
+    return WT_WIND[wind_level] * WT_PRICE[price_level]
+
+
+def get_wB(price_level, wind_level, SOC):
+    """BESS revenue weight: price × SOC-margin decomposition.
+
+    SOC-margin: 1.0 inside the wind-level safe band (SOC_SAFE_RANGES),
+    WB_SOC_OUTSIDE otherwise (SOC 贴边时套利动作大概率被裁剪/不可行).
+    """
+    soc_min, soc_max = SOC_SAFE_RANGES[wind_level]
+    w_soc = 1.0 if soc_min <= SOC <= soc_max else WB_SOC_OUTSIDE
+    return WB_PRICE[price_level] * w_soc
 
 
 # =============================================================================
@@ -142,16 +157,19 @@ def get_seg_coeffs(wind_level, price_level):
 # =============================================================================
 
 def Cal_r1_PRRBB(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
-                 time=1.0 / 60):
+                 SOC=3.0, time=1.0 / 60):
     """
-    PRRBB upper-level r1 — decomposed PG profit with wind×price segmentation.
+    PRRBB upper-level r1 — 机会/风险分离的分段收益分解 (与 td3prrbb 一致).
 
-    r1 = w_wind * (pr * ptur * time)       ← turbine's grid contribution
-       + w_bess * (-pr * pbrule * time)    ← BESS revenue (discharge → positive)
-       - BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time  ← degradation (NO seg coefficient)
+    r1 = wT * (pr * ptur * time)           ← 风机收益, wT = wT_u(u)×wT_p(pr)
+       + wB * (-pr * pbrule * time)        ← BESS 收益, wB = wB_p(pr)×wB_soc(SOC,wind)
+       - BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time  ← 退化 (H 看 BESS 净收益)
        - penalty_NN_H
+
+    风险（波动/平抑可行性/SOC 越界）由 c1/c2 编码，不再混入收益权重。
     """
-    w_wind, w_bess = get_seg_coeffs(wind_level, price_level)
+    w_wind = get_wT(wind_level, price_level)
+    w_bess = get_wB(price_level, wind_level, SOC)
 
     turbine_profit = w_wind * pr * ptur * time
     bess_profit    = w_bess * (-pr * pbrule * time)
@@ -164,9 +182,11 @@ def Cal_r1_PRRBB(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
 # 4b. Reward Relabeling Helper (NEW for PRLE)
 # =============================================================================
 
-def relabel_r1_substep(u, pr, turbine_raw, bess_raw, degradation, penalty_NN_H):
+def relabel_r1_substep(u, pr, turbine_raw, bess_raw, degradation, penalty_NN_H,
+                       SOC=3.0):
     """
-    Recompute r1 for a single sub-step using CURRENT wind thresholds.
+    Recompute r1 for a single sub-step using CURRENT wind thresholds
+    (PRRBB multiplicative decomposition, 与 prle 一致).
 
     This is the core of reward relabeling: when wind thresholds change,
     this function reclassifies the wind level and recomputes the reward
@@ -186,6 +206,9 @@ def relabel_r1_substep(u, pr, turbine_raw, bess_raw, degradation, penalty_NN_H):
         BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time  (threshold-independent).
     penalty_NN_H : float
         Action boundary penalty (threshold-independent).
+    SOC : float
+        Battery SOC at decision time (MWh), used by wB_soc margin check.
+        (缓冲 relabel_all 以位置参数调用时取默认 3.0, 与 prle 行为一致)
 
     Returns
     -------
@@ -194,7 +217,8 @@ def relabel_r1_substep(u, pr, turbine_raw, bess_raw, degradation, penalty_NN_H):
     """
     wind_level = get_wind_level(u)
     price_level = get_price_level(pr)
-    w_wind, w_bess = get_seg_coeffs(wind_level, price_level)
+    w_wind = get_wT(wind_level, price_level)
+    w_bess = get_wB(price_level, wind_level, SOC)
     return w_wind * turbine_raw + w_bess * bess_raw - degradation - penalty_NN_H
 
 
@@ -203,8 +227,8 @@ W_GAP = 50.0
 
 
 def get_c1_risk_coeff(wind_level):
-    """Risk-level coefficient on c1: HIGH wind ×1.2, LOW/MEDIUM wind ×0.8."""
-    return 1.2 if wind_level == 'HIGH' else 0.8
+    """c1 风险系数三档 (与 td3prrbb 一致): LOW=0.8, MEDIUM=1.0, HIGH=1.2."""
+    return C1_RISK[wind_level]
 
 
 def relabel_c1_substep(u, P_F, unfeasible_gap=0.0):
@@ -259,10 +283,8 @@ SOC_SAFE_RANGES = {
 
 
 # c2 系数: SOC 越界成本 (RMB/MWh 越界量), 进入 L 层拉格朗日约束。
-# 700 → 1000 (与 TD3PER 同系数): 相同物理越界下成本信号强 43%,
-# 缓解 TD3 下成本通道失效导致的 SOC 顶格; 预算 d_block_L 已同步按
-# 0.02×coeff / 0.0025×coeff 重标定为 20 / 2.5 (物理允许越界量不变)。
-C2_SOC_COEFF = 1000.0
+# 与 td3prrbb 原系数一致 = 700 (预算 d_block_L 同步按 14 / 1.75 标定)。
+C2_SOC_COEFF = 700.0
 
 
 def Cal_soc_deviation(SOC, wind_level='MEDIUM'):
@@ -341,8 +363,12 @@ def Cal_r2_PER_baseline(pbrule, shadow_price, SOC, wind_level='MEDIUM'):
 def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
                    penalty_NN_H=0.0, time=1.0 / 60, ptur=None):
     """
-    PRRBB reward: wind × price joint segmentation (upper);
-    lower r2 = 10*shadow_profit - 100*clip_amount, c2 = 1000*soc_deviation.
+    PRRBB reward: 机会/风险分离 (与 td3prrbb 一致);
+    Upper r1 = wT*pr*ptur*dt + wB*(-pr*pbrule*dt) - 退化 - penalty_NN_H
+             （wT/wB 乘法分解: wT=wT_u×wT_p, wB=wB_p×wB_soc, SOC 贴边 ×0.7）
+    Upper c1 = C1_RISK[wind档]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
+    Lower r2 = 10*shadow_profit - 100*clip_amount
+    Lower c2 = 700*soc_deviation
 
     Parameters
     ----------
@@ -376,17 +402,19 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 
     wind_level = get_wind_level(u)
     price_level = get_price_level(pr_old)
-    w_wind, w_bess = get_seg_coeffs(wind_level, price_level)
+    SOC_decision = float(observation[2])  # 决策时刻 SOC, 用于 wB_soc 贴边判断
+    w_wind = get_wT(wind_level, price_level)
+    w_bess = get_wB(price_level, wind_level, SOC_decision)
 
     # ==== Upper Level (H) ====
     r1 = Cal_r1_PRRBB(pr_old, ptur, pbrule, penalty_NN_H,
-                       wind_level, price_level, time)
+                       wind_level, price_level, SOC=SOC_decision, time=time)
 
     # c1: fluctuation penalty
     #   越限部分 10.0*(P_F-3.0) 仅在 P_F > 3.0 时生效；
-    #   平滑项 0.1*P_F 对任意波动值 P_F（不仅限于越限值）都生效；
-    #   W_GAP*unfeasible_gap: 波动∩物理约束不可行缺口 (阈值无关, 硬裁剪无法消除).
-    # Risk-level coefficient on c1: HIGH wind ×1.2, LOW/MEDIUM wind ×0.8.
+    #   平滑项 0.1*P_F 对任意波动值 P_F（不仅限于越限值）都生效。
+    #   风险系数三档 (与 td3prrbb 一致): LOW×0.8, MEDIUM×1.0, HIGH×1.2;
+    #   unfeasible_gap（平抑可行性缺口, MW）直接付费。
     c1_risk_coeff = get_c1_risk_coeff(wind_level)
     if P_F > 3.0 + 1e-4:
         c1 = c1_risk_coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F) + W_GAP * unfeasible_gap
@@ -395,7 +423,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 
     # ==== Lower Level (L) ====
     # r2: 影子套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
-    # c2: SOC 越界项进入拉格朗日约束（系数 C2_SOC_COEFF = 1000/MWh, 700→1000 与 TD3PER 对齐）
+    # c2: SOC 越界项进入拉格朗日约束（系数 C2_SOC_COEFF = 700/MWh, 与 td3prrbb 一致）
     shadow_profit = -shadow_price * pbrule
     soc_dev = Cal_soc_deviation(SOC_new, wind_level)
     r2 = 10.0 * shadow_profit - 100.0 * clip_amount
