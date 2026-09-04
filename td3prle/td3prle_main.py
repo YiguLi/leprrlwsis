@@ -39,6 +39,7 @@ Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
 LLM meta-controller (from prle):
   - 每 7200 步（5 天）窗口边界, episode >= 3 后调用 LLM 分析窗口统计
     并给出 (adjust_low_max, adjust_high_min) 阈值调整建议;
+  - 调整范围硬约束: 阈值只能在 原设定 ±1 m/s 内变化 (整个训练过程);
   - 阈值实际变化后, 对 H 层回放缓冲 relabel_all() 重算奖励/成本;
   - LLM 调用失败时回退占位模式 (返回 (0.0, 0.0)), 训练继续。
 """
@@ -97,7 +98,8 @@ def train(num_iterations_H,
           max_episode_length=None,
           debug=False,
           upload=False,
-          use_csv=False):
+          use_csv=False,
+          adj_bounds=None):
 
     agent_H.is_training = True
     agent_L.is_training = True
@@ -613,8 +615,17 @@ def train(num_iterations_H,
                     llm_call_fn=llm_call_fn
                 )
 
-                new_low_max = current_low_max + adjust_low
-                new_high_min = current_high_min + adjust_high
+                # 阈值只能在 原设定 ±1 m/s 范围内调整 (整个训练过程硬约束)
+                if adj_bounds is not None:
+                    (low_min, low_max), (high_min, high_max) = adj_bounds
+                    new_low_max = float(np.clip(current_low_max + adjust_low,
+                                                low_min, low_max))
+                    new_high_min = float(np.clip(current_high_min + adjust_high,
+                                                 high_min, high_max))
+                else:
+                    new_low_max = current_low_max + adjust_low
+                    new_high_min = current_high_min + adjust_high
+                # set_wind_thresholds 内部仍有物理钳制兜底 (low ∈ [3, high-1] 等)
                 actual_low, actual_high = set_wind_thresholds(new_low_max, new_high_min)
 
                 if actual_low != current_low_max or actual_high != current_high_min:
@@ -853,6 +864,16 @@ if __name__ == "__main__":
     from data_piecewise.boundaries import apply_segmentation
     apply_segmentation(args.seg, set_wind_thresholds)
 
+    # ---- 阈值调整带: 整个训练过程中, LLM 调整不得越出 原设定 ±1 m/s ----
+    orig_low_max, orig_high_min = get_wind_thresholds()
+    adj_bounds = ((orig_low_max - 1.0, orig_low_max + 1.0),
+                  (orig_high_min - 1.0, orig_high_min + 1.0))
+    prCyan('TD3PRLE: 阈值原设定 LOW_MAX={:.1f} HIGH_MIN={:.1f} m/s; '
+           'LLM 调整带 = 原设定 ±1 m/s → LOW∈[{:.1f},{:.1f}] HIGH∈[{:.1f},{:.1f}]'.format(
+               orig_low_max, orig_high_min,
+               orig_low_max - 1.0, orig_low_max + 1.0,
+               orig_high_min - 1.0, orig_high_min + 1.0))
+
     #TODO 修改的命令ppyp
     max_E = 6.
     upload = True
@@ -941,7 +962,8 @@ if __name__ == "__main__":
               max_episode_length=args.max_episode_length,
               debug=args.debug,
               upload=upload,
-              use_csv=use_csv)
+              use_csv=use_csv,
+              adj_bounds=adj_bounds)
     if upload:
         writer.close()
 
