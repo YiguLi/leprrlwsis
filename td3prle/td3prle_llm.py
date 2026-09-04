@@ -129,6 +129,14 @@ _PROMPT_TEMPLATE = """你是一个风储混合发电系统的风险调度专家�
 中风速（MEDIUM）：{current_low_max} ≤ u < {current_high_min} m/s
 高风速（HIGH）：  u ≥ {current_high_min} m/s
 
+【调整范围硬约束（重要）】
+训练开始时的原设定阈值：LOW_MAX = {orig_low_max} m/s，HIGH_MIN = {orig_high_min} m/s。
+整个训练过程中，两个阈值只能在 原设定 ±1 m/s 内变动：
+  LOW_MAX  ∈ [{adj_low_min}, {adj_low_max}] m/s
+  HIGH_MIN ∈ [{adj_high_min}, {adj_high_max}] m/s
+你的建议是“对当前值的增量”；若增量使阈值越出上述范围，系统会将其截断到边界。
+请务必直接给出带内可行的数值，不要建议越出该调整带。
+
 ═══════════════════════════════════════════
 分段奖励系数表（按风速×电价共9档）
 ═══════════════════════════════════════════
@@ -194,6 +202,10 @@ LOW             WT:1.0~1.2, BESS:0.8~1.2   ← 鼓励多发
 6.【幅度约束】单次调整幅度不得超过±0.5 m/s。优先采用小幅渐进策略（±0.1~±0.2），
   仅在越限率显著超标（>8%）时使用较大幅度（±0.3~±0.5）。
 
+7.【全局硬约束】结合上文【调整范围硬约束】：任何建议不得使 LOW_MAX / HIGH_MIN 越出
+  原设定 ±1 m/s 范围（越界部分会被系统截断）。请结合历史调整与当前值在带内渐进寻优，
+  不要提出超出该范围的建议。
+
 ═══════════════════════════════════════════
 输出格式（严格遵守）
 ═══════════════════════════════════════════
@@ -205,7 +217,8 @@ JSON格式如下：
 {{"adjust_low_max": 0.0, "adjust_high_min": -0.3, "reasoning": "HIGH风速越限率达7.2%，超过5%安全线，下调HIGH_MIN以扩大高风速保守区，降低违规风险"}}"""
 
 
-def _build_prompt(window_summary, history, current_low_max, current_high_min):
+def _build_prompt(window_summary, history, current_low_max, current_high_min,
+                  orig_low_max=None, orig_high_min=None):
     """
     Build the LLM prompt for threshold adjustment analysis.
 
@@ -217,11 +230,23 @@ def _build_prompt(window_summary, history, current_low_max, current_high_min):
         Previous threshold adjustment records (last 5).
     current_low_max : float
     current_high_min : float
+    orig_low_max : float or None
+        训练开始时的原设定 LOW_MAX，用于在提示词中说明 ±1 m/s 调整带。
+        None 时退化为按当前值描述（调用方应尽量传入真实原设定）。
+    orig_high_min : float or None
+        训练开始时的原设定 HIGH_MIN，同上。
 
     Returns
     -------
     prompt : str
     """
+    # 原设定缺失时退化为当前值 (此时提示词中的调整带仅为近似说明)
+    if orig_low_max is None:
+        orig_low_max = current_low_max
+    if orig_high_min is None:
+        orig_high_min = current_high_min
+    adj_low_min, adj_low_max = orig_low_max - 1.0, orig_low_max + 1.0
+    adj_high_min, adj_high_max = orig_high_min - 1.0, orig_high_min + 1.0
     # Build history text
     history_lines = []
     for i, h in enumerate(history[-5:]):
@@ -235,6 +260,12 @@ def _build_prompt(window_summary, history, current_low_max, current_high_min):
     prompt = _PROMPT_TEMPLATE.format(
         current_low_max=f"{current_low_max:.1f}",
         current_high_min=f"{current_high_min:.1f}",
+        orig_low_max=f"{orig_low_max:.1f}",
+        orig_high_min=f"{orig_high_min:.1f}",
+        adj_low_min=f"{adj_low_min:.1f}",
+        adj_low_max=f"{adj_low_max:.1f}",
+        adj_high_min=f"{adj_high_min:.1f}",
+        adj_high_max=f"{adj_high_max:.1f}",
         total_steps=window_summary['total_steps'],
         r1_avg=window_summary['r1_avg'],
         violation_rate=window_summary['violation_rate'],
@@ -256,7 +287,7 @@ def _build_prompt(window_summary, history, current_low_max, current_high_min):
 
 
 def llm_analyze_thresholds(window_summary, history, current_low_max, current_high_min,
-                           llm_call_fn=None):
+                           llm_call_fn=None, orig_low_max=None, orig_high_min=None):
     """
     Analyze window statistics and suggest threshold adjustments.
 
@@ -273,14 +304,20 @@ def llm_analyze_thresholds(window_summary, history, current_low_max, current_hig
     llm_call_fn : callable or None
         Function that takes a prompt string and returns the LLM response string.
         If None (default), returns (0.0, 0.0) — placeholder mode.
+    orig_low_max : float or None
+        训练开始时的原设定 LOW_MAX；写入提示词说明 ±1 m/s 调整带。
+    orig_high_min : float or None
+        训练开始时的原设定 HIGH_MIN；同上。
 
     Returns
     -------
     (adjust_low_max, adjust_high_min) : (float, float)
         Adjustment amounts in [-1.0, 1.0]. These will be ADDED to current thresholds
-        and then validated/clamped by set_wind_thresholds().
+        and then validated/clamped by set_wind_thresholds() (以及主循环中的
+        原设定 ±1 m/s 调整带钳制).
     """
-    prompt = _build_prompt(window_summary, history, current_low_max, current_high_min)
+    prompt = _build_prompt(window_summary, history, current_low_max, current_high_min,
+                           orig_low_max=orig_low_max, orig_high_min=orig_high_min)
 
     if llm_call_fn is None:
         # Placeholder: no LLM connected yet, return zero adjustment

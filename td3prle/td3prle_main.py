@@ -609,10 +609,18 @@ def train(num_iterations_H,
                     summary['high_wind']['pct']))
 
                 # Call LLM for threshold adjustment suggestions
+                # 传入原设定阈值, 使提示词说明 ±1 m/s 调整带 (由 adj_bounds 中点还原)
+                if adj_bounds is not None:
+                    orig_low_max = (adj_bounds[0][0] + adj_bounds[0][1]) / 2.0
+                    orig_high_min = (adj_bounds[1][0] + adj_bounds[1][1]) / 2.0
+                else:
+                    orig_low_max = orig_high_min = None
                 adjust_low, adjust_high = llm_analyze_thresholds(
                     summary, threshold_history,
                     current_low_max, current_high_min,
-                    llm_call_fn=llm_call_fn
+                    llm_call_fn=llm_call_fn,
+                    orig_low_max=orig_low_max,
+                    orig_high_min=orig_high_min
                 )
 
                 # 阈值只能在 原设定 ±1 m/s 范围内调整 (整个训练过程硬约束)
