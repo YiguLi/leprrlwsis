@@ -43,3 +43,14 @@ $RECYCLE.BIN/
 /HSRL.zip
 
 # data_LES/ and documentation/ manage themselves via their own .gitignore
+
+# ===== LaTeX build artifacts (paper/) =====
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.run.xml
+*.synctex.gz
