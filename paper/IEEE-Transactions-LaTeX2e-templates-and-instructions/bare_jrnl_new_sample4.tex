@@ -41,21 +41,13 @@ Article submission, IEEE, IEEEtran, journal, \LaTeX, paper, template, typesettin
 \end{IEEEkeywords}
 
 \section{Introduction}
-\IEEEPARstart{W}{ith} the increasing penetration of wind power, the stochastic, intermittent nature and inherent forecasting errors of wind speed cause frequent power fluctuations at the grid connection point of wind farms. These fluctuations significantly deteriorate power quality, compromise dispatch reliability, and threaten overall grid security. Solely relying on pitch angle adjustments or axial induction factor control for power smoothing often leads to a substantial loss in wind energy utilization and accelerates the fatigue of mechanical components. To address these issues, the Wind-Storage Integrated System (WSIS), which combines wind farms with battery energy storage systems (BESS), has emerged as a pivotal solution for high-penetration wind power integration. By synergizing the regulation capability of wind turbines with the rapid charge/discharge responsiveness of storage, WSIS can effectively suppress grid-connected power fluctuations while simultaneously enhancing overall generation revenue.
+\IEEEPARstart{A}{s} the penetration rate of wind power continues to rise, the randomness and intermittency of wind speeds, as well as forecasting errors, cause frequent fluctuations in the grid-connected power output of wind farms~\cite{ref1}. Such fluctuations affect power quality, dispatch reliability, and grid security~\cite{ref2,ref3}. Power smoothing achieved solely by adjusting the wind turbine's pitch angle or axial induction factor often results in a loss of wind energy utilization efficiency~\cite{ref4} and increases mechanical component fatigue~\cite{ref5}. The Wind-Storage Integrated System (WSIS) combines wind farms with battery energy storage systems. By leveraging the power regulation capabilities of wind turbines and the rapid charging and discharging capabilities of energy storage, it suppresses grid-connected power fluctuations while increasing power generation revenue, making it a key solution for high-penetration wind power grid integration~\cite{ref6}.
 
-The control of WSIS necessitates the coordination of wind turbines and storage devices, which possess fundamentally different dynamic characteristics and control frequencies. Specifically, wind turbines typically operate on a slower timescale to optimize the overall power generation trajectory, whereas energy storage systems act on a faster timescale to track the smoothing target in real time. Although model predictive control (MPC) and rule-based methods are commonly adopted, they rely heavily on accurate wake models, wind speed forecasts, and battery models. In large-scale, highly uncertain environments, these approaches suffer from significant drawbacks, including high modeling complexity, substantial computational overhead, and limited generalization capability across diverse operating conditions. Moreover, there exists an inherent conflict between maximizing economic revenue and enforcing stringent power fluctuation constraints. Fixed penalty coefficients or monolithic continuous reward signals often fail to distinguish among safe, critical, and violation zones, resulting in overly conservative policies or frequent transgressions of safety boundaries.
+WSIS control requires coordinating wind turbines and energy storage devices, which have different dynamic characteristics and control frequencies: wind turbines typically optimize overall power generation on a slower timescale, while energy storage tracks and smooths the target on a faster timescale~\cite{ref7}. Model predictive control and rule-based control rely on accurate wake models~\cite{ref8}, wind speed forecasts, and battery models; however, in large-scale, highly uncertain environments, they face issues such as modeling complexity, high computational overhead~\cite{ref9,ref10}, and limited generalization ability~\cite{ref11}. Furthermore, there is a clear conflict between maximizing economic benefits and power fluctuation constraints~\cite{ref12}; fixed penalty coefficients or a single continuous reward make it difficult to simultaneously distinguish between the safe zone, critical zone, and out-of-bounds zone~\cite{ref13}, which may result in overly conservative strategies or frequent violations of safety constraints.
 
-Reinforcement learning (RL), which enables direct policy learning through environment interaction, offers a promising model-free pathway for complex WSIS control. Hierarchical reinforcement learning (HRL), in particular, can exploit the distinct control timescales by decomposing the upper-level turbine scheduling and lower-level storage smoothing into cooperative decision-making processes. However, existing RL-based approaches for WSIS still face critical challenges. The reward boundaries in current methods are heavily dependent on heuristic human expertise and lack adaptability under changing operating scenarios. Furthermore, the inherent inter-layer coupling and the severe imbalance between constraint-satisfying and constraint-violating samples often induce training oscillations and hinder the convergence of hierarchical policies.
+Reinforcement learning enables the direct learning of control policies through interaction with the environment, providing a new approach to model-free control for complex WSIS systems. Hierarchical reinforcement learning leverages different control time scales to decompose upper-level wind turbine scheduling and lower-level energy storage smoothing into collaborative decision-making processes~\cite{ref14}. However, existing methods still face challenges such as reward boundaries relying on human expertise, difficulty in adapting boundaries to changing operating conditions, and training oscillations caused by inter-layer coupling and constraint sample imbalance.
 
-To tackle the aforementioned challenges, this paper proposes a novel framework termed the Large Language Model (LLM)-guided Segmented Reward Hierarchical Reinforcement Learning (LSR-HRL) framework. The main contributions of this paper are threefold:
-
-\begin{enumerate}
-\item \textbf{C1:} To resolve the trade-off between economic optimization and safety constraints, a segmented reward function is designed. By explicitly characterizing different risk zones, the proposed reward structure significantly improves both control effectiveness and operational safety.
-
-\item \textbf{C2:} To overcome the reliance of segmentation boundaries on manual tuning, an LLM-guided boundary adaptation mechanism is developed. This mechanism dynamically adjusts the reward boundaries based on real-time operational data, thereby enhancing environmental adaptability and overall control performance under varying conditions.
-
-\item \textbf{C3:} To mitigate the training oscillations caused by joint hierarchical policy learning, a dual-timescale target network coupled with delayed policy updates is introduced. This approach effectively decouples the inter-layer dependencies and balances the sample distribution, leading to substantially improved training stability.
-\end{enumerate}
+To address these challenges, this paper proposes an LLM-guided, segmented-reward hierarchical reinforcement learning framework. This framework explicitly characterizes different risk regions through segmented rewards, utilizes an LLM in conjunction with operational data to dynamically adjust segment boundaries, and employs a hierarchical dual-timescale objective network and delayed policy updates to enhance training stability~\cite{ref15}.
 
 \section{The Design, Intent, and \\ Limitations of the Templates}
 The templates are intended to {\bf{approximate the final look and page length of the articles/papers}}. {\bf{They are NOT intended to be the final produced work that is displayed in print or on IEEEXplore\textsuperscript{\textregistered}}}. They will help to give the authors an approximation of the number of pages that will be in the final version. The structure of the \LaTeX\ files, as designed, enable easy conversion to XML for the composition systems used by the IEEE. The XML files are used to produce the final print/IEEEXplore pdf and then converted to HTML for IEEEXplore.
@@ -560,36 +552,76 @@ You can use a bibliography generated by BibTeX as a .bbl file.
 You can manually copy in the resultant .bbl file and set second argument of $\backslash${\tt{begin}} to the number of references
  (used to reserve space for the reference number labels box).
 
-\begin{thebibliography}{1}
+\begin{thebibliography}{15}
 \bibliographystyle{IEEEtran}
 
+% =====================================================================
+% 参考文献占位区（编号 1-15 与 Introduction 中的 [1]-[15] 一一对应）。
+% 真实文献已下载但不在项目目录中，故先建立占位条目。
+% 之后拿到文献信息时，只需把每个 \bibitem 后的占位文本替换成
+% IEEE 格式的真实引用（作者/标题/期刊会议/卷期页码/年份/DOI），
+% 正文中的 \cite{ref1}...\cite{ref15} 无需任何改动。
+% =====================================================================
+
+% 主题：风速随机性、间歇性与预测误差导致风电场并网出力频繁波动
 \bibitem{ref1}
-{\it{Mathematics Into Type}}. American Mathematical Society. [Online]. Available: https://www.ams.org/arc/styleguide/mit-2.pdf
+\textit{[To be replaced: actual reference 1.]}
 
+% 主题：并网功率波动影响电能质量
 \bibitem{ref2}
-T. W. Chaundy, P. R. Barrett and C. Batey, {\it{The Printing of Mathematics}}. London, U.K., Oxford Univ. Press, 1954.
+\textit{[To be replaced: actual reference 2.]}
 
+% 主题：并网功率波动影响调度可靠性与电网安全
 \bibitem{ref3}
-F. Mittelbach and M. Goossens, {\it{The \LaTeX Companion}}, 2nd ed. Boston, MA, USA: Pearson, 2004.
+\textit{[To be replaced: actual reference 3.]}
 
+% 主题：仅靠变桨/轴向诱导因子调节平滑功率会损失风能利用效率
 \bibitem{ref4}
-G. Gr\"atzer, {\it{More Math Into LaTeX}}, New York, NY, USA: Springer, 2007.
+\textit{[To be replaced: actual reference 4.]}
 
-\bibitem{ref5}M. Letourneau and J. W. Sharp, {\it{AMS-StyleGuide-online.pdf,}} American Mathematical Society, Providence, RI, USA, [Online]. Available: http://www.ams.org/arc/styleguide/index.html
+% 主题：仅靠变桨/轴向诱导因子调节会加剧机械部件疲劳
+\bibitem{ref5}
+\textit{[To be replaced: actual reference 5.]}
 
+% 主题：WSIS（风-储联合系统）平抑并网功率波动并提升发电收益的关键方案
 \bibitem{ref6}
-H. Sira-Ramirez, ``On the sliding mode control of nonlinear systems,'' \textit{Syst. Control Lett.}, vol. 19, pp. 303--312, 1992.
+\textit{[To be replaced: actual reference 6.]}
 
+% 主题：风电机组与储能的动态特性/控制频率不同，分属慢/快时间尺度
 \bibitem{ref7}
-A. Levant, ``Exact differentiation of signals with unbounded higher derivatives,''  in \textit{Proc. 45th IEEE Conf. Decis.
-Control}, San Diego, CA, USA, 2006, pp. 5585--5590. DOI: 10.1109/CDC.2006.377165.
+\textit{[To be replaced: actual reference 7.]}
 
+% 主题：MPC/规则控制依赖精确的尾流模型
 \bibitem{ref8}
-M. Fliess, C. Join, and H. Sira-Ramirez, ``Non-linear estimation is easy,'' \textit{Int. J. Model., Ident. Control}, vol. 4, no. 1, pp. 12--27, 2008.
+\textit{[To be replaced: actual reference 8.]}
 
+% 主题：大规模不确定环境下 MPC 等方法的建模复杂度与计算开销
 \bibitem{ref9}
-R. Ortega, A. Astolfi, G. Bastin, and H. Rodriguez, ``Stabilization of food-chain systems using a port-controlled Hamiltonian description,'' in \textit{Proc. Amer. Control Conf.}, Chicago, IL, USA,
-2000, pp. 2245--2249.
+\textit{[To be replaced: actual reference 9.]}
+
+% 主题：模型预测控制计算开销大
+\bibitem{ref10}
+\textit{[To be replaced: actual reference 10.]}
+
+% 主题：现有方法的泛化能力有限
+\bibitem{ref11}
+\textit{[To be replaced: actual reference 11.]}
+
+% 主题：最大化经济效益与功率波动约束之间存在冲突
+\bibitem{ref12}
+\textit{[To be replaced: actual reference 12.]}
+
+% 主题：固定惩罚系数/单一连续奖励难以区分安全区、临界区与越界区
+\bibitem{ref13}
+\textit{[To be replaced: actual reference 13.]}
+
+% 主题：分层强化学习按时间尺度分解上层风机调度与下层储能平抑
+\bibitem{ref14}
+\textit{[To be replaced: actual reference 14.]}
+
+% 主题：分层双时间尺度目标网络与延迟策略更新提升训练稳定性
+\bibitem{ref15}
+\textit{[To be replaced: actual reference 15.]}
 
 \end{thebibliography}
 
