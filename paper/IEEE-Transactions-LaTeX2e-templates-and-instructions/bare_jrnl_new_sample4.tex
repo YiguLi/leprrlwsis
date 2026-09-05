@@ -556,72 +556,77 @@ You can manually copy in the resultant .bbl file and set second argument of $\ba
 \bibliographystyle{IEEEtran}
 
 % =====================================================================
-% 参考文献占位区（编号 1-15 与 Introduction 中的 [1]-[15] 一一对应）。
-% 真实文献已下载但不在项目目录中，故先建立占位条目。
-% 之后拿到文献信息时，只需把每个 \bibitem 后的占位文本替换成
-% IEEE 格式的真实引用（作者/标题/期刊会议/卷期页码/年份/DOI），
-% 正文中的 \cite{ref1}...\cite{ref15} 无需任何改动。
+% 参考文献（编号 1-15 与 Introduction 中的 [1]-[15] 一一对应）。
+% 条目依据下载 PDF 原文（"阅读材料\自找的参考文献\[N]xxx.pdf"）提取。
+% 说明：
+%  - ref4 为会议论文，PDF 未印页码，故只给 DOI；
+%  - ref6 为《中国电力》中文期刊论文，按 IEEE 惯例给英文译题并标注
+%    (in Chinese)，作者按论文英文摘要罗马化；
+%  - ref8 正式期次为 2026 年 1 月（©2025，2025-07-16 early access），
+%    此处按正式期次取 2026 年；
+%  - ref15 页码 1587-1596 为 ICML 2018 (PMLR vol. 80) 正式页码。
 % =====================================================================
 
-% 主题：风速随机性、间歇性与预测误差导致风电场并网出力频繁波动
+% REF1 主题：风速随机性/间歇性及预测误差导致风电场并网出力频繁波动
 \bibitem{ref1}
-\textit{[To be replaced: actual reference 1.]}
+A. Michiorri, J. Lugaro, N. Siebert, R. Girard, and G. Kariniotakis, ``Storage sizing for grid connected hybrid wind and storage power plants taking into account forecast errors autocorrelation,'' \textit{Renewable Energy}, vol. 117, pp. 380--392, 2018, doi: 10.1016/j.renene.2017.10.070.
 
-% 主题：并网功率波动影响电能质量
+% REF2 主题：并网功率波动影响电能质量
 \bibitem{ref2}
-\textit{[To be replaced: actual reference 2.]}
+E. Rahimi, A. Rabiee, J. Aghaei, K. M. Muttaqi, and A. Esmaeel Nezhad, ``On the management of wind power intermittency,'' \textit{Renewable and Sustainable Energy Reviews}, vol. 28, pp. 643--653, 2013, doi: 10.1016/j.rser.2013.08.034.
 
-% 主题：并网功率波动影响调度可靠性与电网安全
+% REF3 主题：风电大规模并网影响调度可靠性与电网安全
 \bibitem{ref3}
-\textit{[To be replaced: actual reference 3.]}
+T. Nam, J. W. Shim, and K. Hur, ``The beneficial role of SMES coil in DC lines as an energy buffer for integrating large scale wind power,'' \textit{IEEE Trans. Appl. Supercond.}, vol. 22, no. 3, Jun. 2012, Art. no. 5701404, doi: 10.1109/TASC.2011.2175686.
 
-% 主题：仅靠变桨/轴向诱导因子调节平滑功率会损失风能利用效率
+% REF4 主题：仅靠变桨调节平滑功率会损失风能利用效率
 \bibitem{ref4}
-\textit{[To be replaced: actual reference 4.]}
+Y. Li and Z. Xu, ``Power smoothing control of wind turbines using different strategies,'' in \textit{Proc. IEEE Int. Conf. Smart Grid Commun. (SmartGridComm)}, Sydney, Australia, 2016, doi: 10.1109/SmartGridComm.2016.7778844.
 
-% 主题：仅靠变桨/轴向诱导因子调节会加剧机械部件疲劳
+% REF5 主题：频繁桨距角操纵导致桨距伺服系统明显疲劳
 \bibitem{ref5}
-\textit{[To be replaced: actual reference 5.]}
+X. Tang, M. Yin, C. Shen, Y. Xu, Z. Y. Dong, and Y. Zou, ``Active power control of wind turbine generators via coordinated rotor speed and pitch angle regulation,'' \textit{IEEE Trans. Sustain. Energy}, vol. 10, no. 2, pp. 822--832, Apr. 2019, doi: 10.1109/TSTE.2018.2848923.
 
-% 主题：WSIS（风-储联合系统）平抑并网功率波动并提升发电收益的关键方案
+% REF6 主题：WSIS（风-储联合系统）应用实例。
+% 原题（中文）：分散式风储一体化系统提升海上油田群电网频率稳定性研究（《中国电力》）
 \bibitem{ref6}
-\textit{[To be replaced: actual reference 6.]}
+K. Su, W. Dong, Y. Qiu, C. Wei, and X. Xie, ``Study on using distributed wind-storage integrated system to improve frequency stability of offshore oilfield power systems,'' \textit{Electric Power}, vol. 56, no. 5, pp. 163--171, 2023 (in Chinese), doi: 10.11930/j.issn.1004-9649.202205103.
 
-% 主题：风电机组与储能的动态特性/控制频率不同，分属慢/快时间尺度
+% REF7 主题：风机与储能动态特性/控制时间尺度不同，需分层协调（WSIS 平滑控制）
 \bibitem{ref7}
-\textit{[To be replaced: actual reference 7.]}
+S. Wang, J. Zhao, H. Zhao, Y. Cao, Z. Pan, G. Liu, and G. Liang, ``Coordinated power smoothing control for wind storage integrated system with physics-informed deep reinforcement learning,'' \textit{Electric Power Systems Research}, vol. 255, Art. no. 112707, 2026, doi: 10.1016/j.epsr.2025.112707.
 
-% 主题：MPC/规则控制依赖精确的尾流模型
+% REF8 主题：MPC/基于模型的控制依赖准确的尾流（延迟）模型
 \bibitem{ref8}
-\textit{[To be replaced: actual reference 8.]}
+Y. Liu, J. Lin, L.-l. Huang, C. Hua, R. Huang, and Y. Fu, ``LPV model predictive control for offshore wind farms considering wake delay characteristics,'' \textit{IEEE Trans. Sustain. Energy}, vol. 17, no. 1, pp. 217--229, Jan. 2026, doi: 10.1109/TSTE.2025.3589608.
 
-% 主题：大规模不确定环境下 MPC 等方法的建模复杂度与计算开销
+% REF9 主题：高保真风电建模/预测计算开销大（尾流模型计算成本）
 \bibitem{ref9}
-\textit{[To be replaced: actual reference 9.]}
+Z. Ti, X. W. Deng, and M. Zhang, ``Artificial neural networks based wake model for power prediction of wind farm,'' \textit{Renewable Energy}, vol. 172, pp. 618--631, 2021, doi: 10.1016/j.renene.2021.03.030.
 
-% 主题：模型预测控制计算开销大
+% REF10 主题：风电功率预测模型计算开销大（轻量化需求）
 \bibitem{ref10}
-\textit{[To be replaced: actual reference 10.]}
+Y. Jin, M. Liu, Z. Lai, X. Cheng, and X. Liu, ``LightWind: A lightweight framework for efficient wind power forecasting,'' \textit{IEEE Sensors J.}, vol. 25, no. 19, pp. 36691--36703, Oct. 2025, doi: 10.1109/JSEN.2025.3600483.
 
-% 主题：现有方法的泛化能力有限
+% REF11 主题：深度/机器学习模型在新场景下泛化能力弱
 \bibitem{ref11}
-\textit{[To be replaced: actual reference 11.]}
+H. Jin, G. Yang, S. Dong, S. Fan, H. Jin, and B. Wang, ``Wind power forecasting for newly built wind farms based on deep learning with dual-stage attention mechanism and adaptive transfer learning,'' \textit{Energy}, vol. 335, Art. no. 138275, 2025, doi: 10.1016/j.energy.2025.138275.
 
-% 主题：最大化经济效益与功率波动约束之间存在冲突
+% REF12 主题：最大化经济收益与（电网/多目标）约束之间的控制冲突
 \bibitem{ref12}
-\textit{[To be replaced: actual reference 12.]}
+Y. Huang and X. Zhao, ``Reinforcement learning-based multiobjective control of grid-connected wind farms,'' \textit{IEEE Trans. Ind. Informat.}, vol. 20, no. 5, pp. 7380--7390, May 2024, doi: 10.1109/TII.2024.3359420.
 
-% 主题：固定惩罚系数/单一连续奖励难以区分安全区、临界区与越界区
+% REF13 主题：固定惩罚系数/单一奖励难以区分安全区、临界区与越界区
 \bibitem{ref13}
-\textit{[To be replaced: actual reference 13.]}
+Y. Fu, W. Zhao, and L. Liu, ``Safe reinforcement learning for transition control of ducted-fan UAVs,'' \textit{Drones}, vol. 7, no. 5, Art. no. 332, 2023, doi: 10.3390/drones7050332.
 
-% 主题：分层强化学习按时间尺度分解上层风机调度与下层储能平抑
+% REF14 主题：分层强化学习用于风储一体化系统功率平滑（上层调度/下层平抑）
 \bibitem{ref14}
-\textit{[To be replaced: actual reference 14.]}
+S. Wang, H. Zhao, T. Shu, Z. Pan, G. Liang, and J. Zhao, ``Power smoothing control for wind-storage integrated systems with hierarchical safe reinforcement learning and curriculum learning,'' \textit{IEEE Trans. Smart Grid}, vol. 16, no. 6, pp. 4606--4619, Nov. 2025, doi: 10.1109/TSG.2025.3593340.
 
-% 主题：分层双时间尺度目标网络与延迟策略更新提升训练稳定性
+% REF15 主题：双 Critic（双时间尺度目标网络）+ 延迟策略更新提升训练稳定性（TD3 原文）
 \bibitem{ref15}
-\textit{[To be replaced: actual reference 15.]}
+S. Fujimoto, H. van Hoof, and D. Meger, ``Addressing function approximation error in actor-critic methods,'' in \textit{Proc. 35th Int. Conf. Mach. Learn. (ICML)}, Stockholm, Sweden, 2018, pp. 1587--1596.
 
 \end{thebibliography}
 
