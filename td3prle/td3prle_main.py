@@ -13,7 +13,7 @@ Parent packages:
       update, target policy smoothing, PRLEBuffer (PER + context store)
       with importance sampling, EMA dual ascent on actual per-block cost,
       H-layer update-stats recording, distilled 5-dim L observation,
-      9-case test with fixed seed 42, SOC inheritance across episodes.
+      9-case test with fixed seed 42, per-episode SOC random reset [0.5, 5.5].
   - Reward layer (prle/prle_main.py):
       Cal_Rew_PRRBB 机会/风险分离的分段奖励 with DYNAMIC wind thresholds,
       RBB hard clipping before env.step, sub-step context accumulation,
@@ -107,7 +107,9 @@ def train(num_iterations_H,
     episode_reward = episode_cost = episode_cost2 = episode_profit = 0.
     episode_bess_profit = 0.
     observation = None
-    prev_soc = None   # 上一 episode 末 SOC，跨 episode 继承（None = 首个 episode，用默认重置值）
+    # 每 episode (1440 步) 起点 SOC 均匀随机重置 [0.5, 5.5]，
+    # 替代原跨 episode 继承 (prev_soc) — 保证日初 SOC 覆盖安全带，避免长期锁死窄带
+    soc_reset_low, soc_reset_high = 0.5, 5.5
     time = 1/60
     # Curriculum learning: consecutive steps where EMA cost <= d_block
     consecutive_satisfied_H = 0
@@ -160,11 +162,10 @@ def train(num_iterations_H,
         prYellow('########### step:{} ###########'.format(step))
         if observation is None:
             observation = deepcopy(env.reset())  # [Pr,U,E,P_last]
-            # SOC 继承前一 episode：env.reset() 默认把 E 重置为 3.0，
-            # 此处恢复为上一 episode 末的 SOC（首个 episode 无前值，保持默认）。
-            if prev_soc is not None:
-                env.E = prev_soc
-                observation[2] = prev_soc
+            # SOC 每 episode 随机重置: env.reset() 默认把 E 重置为 3.0,
+            # 此处覆盖为 [0.5, 5.5] 均匀随机起点 (每个 episode 一致)
+            env.E = np.random.uniform(soc_reset_low, soc_reset_high)
+            observation[2] = env.E
             norm_observation = Normalize(observation)
             agent_H.reset(norm_observation)
 
@@ -720,7 +721,7 @@ def train(num_iterations_H,
 
             # end of episode
             # reset
-            prev_soc = float(observation[2])  # 保存本 episode 末 SOC，供下一 episode 继承
+            # 下个 episode 起点 SOC 由循环顶部在 [0.5, 5.5] 内随机重置，不再继承
             observation = None
             episode_steps = 0
             episode_reward = episode_cost = episode_profit = 0.

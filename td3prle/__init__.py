@@ -10,7 +10,7 @@ with PRLE's dynamic wind×price segmented reward and LLM meta-controller.
   >= 0), delayed policy update, target policy smoothing, PRLEBuffer
   (PER + context store for reward relabeling) with importance sampling,
   EMA dual ascent on actual per-block cost, distilled 5-dim L
-  observation, SOC inheritance across episodes.
+  observation, per-episode SOC random reset [0.5, 5.5].
 - Reward layer (from prle): Cal_Rew_PRRBB — 机会/风险分离的分段奖励 with
   DYNAMIC wind thresholds (SEG_COEFFS by wind×price), sub-step context
   accumulation, WindowStats + LLM threshold adjustment at 1440-step
