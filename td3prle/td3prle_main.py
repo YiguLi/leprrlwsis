@@ -31,7 +31,7 @@ Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
 
 Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
-     lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 3, 50), 初始 5.0
+     lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 3, 200), 初始 5.0
      d_block_H 初始 1.2, curriculum 连续 100 次满足则减半, 地板 0.3
   L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 10, 500)
      d_block_L 初始 14.0, curriculum 减半地板 1.75 (与 td3prrbb 同口径)
@@ -938,9 +938,10 @@ if __name__ == "__main__":
     )
 
     # H 层对偶改 EMA 实际成本更新 —— lam1 不再读 critic (Q_c)；
-    #     lam1 ∈ [3, 50] 初始 5.0 (与 TD3PRRBB H 层同配置, c1 公式同量级)
+    #     lam1 ∈ [3, 200] 初始 5.0 (上限 50→200: 放宽 H 层对偶可动范围, 允许更强压 c1;
+    #     与 td3prrbb 的 50 分岔)
     agent_H = SP_TD3_PRLE(nb_states = 4, nb_actions = 6, args = args,
-                          lam_max=50.0, lam_min=3.0,
+                          lam_max=200.0, lam_min=3.0,
                           ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                           record_update_stats=True,
                           policy_delay=args.policy_delay,
