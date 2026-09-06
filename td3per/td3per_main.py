@@ -611,6 +611,13 @@ if __name__ == "__main__":
                         help='target policy smoothing noise std, as fraction of action amplitude')
     parser.add_argument('--noise_clip', default=0.3, type=float,
                         help='target policy smoothing noise clip, as fraction of action amplitude')
+    # L 层(BESS)专用策略更新超参 (步骤A: 验证 TD3 smoothing/delay 拖慢下层跟随 pbrule 的假设)
+    # H 层保持 TD3 默认 (--policy_delay 2, --policy_noise 0.1); L 层放松为接近 DDPG 节奏:
+    #   --l_policy_delay 1 → 每批 critic 更新后都更新 actor; --l_policy_noise 0.01 ≈ 关闭 target smoothing
+    parser.add_argument('--l_policy_delay', default=2, type=int,
+                        help='L 层策略更新间隔: 1=每批更新(≈DDPG节奏, 步骤A) / 2=TD3延迟(默认, 与H一致)')
+    parser.add_argument('--l_policy_noise', default=0.1, type=float,
+                        help='L 层 target smoothing noise std (动作幅度比例): 0.01≈关闭(步骤A) / 0.1=TD3默认')
     parser.add_argument('--cost_critic_mode', default='max', type=str,
                         choices=['min', 'max'],
                         help='cost twin-critic aggregation: max (safe, recommended) or min (TD3 paper; risks cost underestimation -> Q_c collapse)')
@@ -690,14 +697,18 @@ if __name__ == "__main__":
     # B1: L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
     #     lam2 ∈ [10, 500]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
     #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
+    # L 层(步骤A): policy_delay/--policy_noise 独立于 H —— 放松到 delay=1+noise≈0 时节奏接近 DDPG
+    # (twin critic 与 EMA 对偶仍保留, 仅去掉延迟更新与 target smoothing 对窄可行窗的抹平)
     agent_L = SP_TD3(nb_states = 5, nb_actions = 1, args = args,
                      lam_max=500.0, lam_min=10.0,
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
-                     policy_delay=args.policy_delay,
-                     policy_noise=args.policy_noise,
+                     policy_delay=args.l_policy_delay,
+                     policy_noise=args.l_policy_noise,
                      noise_clip=args.noise_clip,
                      cost_critic_mode=args.cost_critic_mode)
     agent_L.cost_limit = 10.0  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
+    prYellow('L 层(BESS)策略超参: policy_delay={}, policy_noise={} (H 层 TD3: delay={}, noise={})'.format(
+        args.l_policy_delay, args.l_policy_noise, args.policy_delay, args.policy_noise))
     #TODO 是否预训练
     # agent_H.load_weights('output/1_2310S-run18')
     # agent_L.load_weights('output/1_2310S-run18')
