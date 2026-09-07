@@ -152,6 +152,8 @@ def train(num_iterations_H,
         df_episode = pd.DataFrame()
         df_test = pd.DataFrame()
         df_update = pd.DataFrame()  # H 层更新数据（TD/Q/batch 统计）
+        df_flushed_rows = 0          # 已增量落盘的 df 行数 (df 跨 episode 只增不减)
+        df_update_flushed_rows = 0   # 已增量落盘的 df_update 行数
 
     # ---- 1440-step window counters for env metrics ----
     window_violation_count = 0   # steps where |P_F| > 3 MW
@@ -384,7 +386,14 @@ def train(num_iterations_H,
                     if use_csv:
                         df_update = pd.concat([df_update, pd.DataFrame(
                             [{'step': step, **_mean}])], ignore_index=True)
-                        df_update.to_csv('{}/update_stats_H.csv'.format(output))
+                        # 增量落盘: 首段覆盖写, 其后追加新行 (避免每 5 步块全量重写增长表)
+                        _up_csv = '{}/update_stats_H.csv'.format(output)
+                        if df_update_flushed_rows == 0:
+                            df_update.to_csv(_up_csv, index=False)
+                        else:
+                            df_update.iloc[df_update_flushed_rows:].to_csv(
+                                _up_csv, mode='a', header=False, index=False)
+                        df_update_flushed_rows = len(df_update)
 
             # Test: 9-case segmented evaluation every 480 episode steps
             # (fixed scenario seed 42 -> same wind trajectory each test, so
@@ -502,7 +511,16 @@ def train(num_iterations_H,
                 'wind_high_min': get_wind_thresholds()[1],
             }])], ignore_index=True)
             if step % 50 == 0:
-                df.to_csv('{}/df_td3prle.csv'.format(output))
+                # 增量落盘: 首段覆盖写(截断旧文件), 其后只追加自上次落盘以来的新行。
+                # 之前每 50 步对跨 episode 只增不减的整表 df 做全量 to_csv, 是 50
+                # 整数倍 step 卡顿的根源; 崩溃时最多丢 <50 行, 与原先语义一致。
+                _df_csv = '{}/df_td3prle.csv'.format(output)
+                if df_flushed_rows == 0:
+                    df.to_csv(_df_csv, index=False)
+                else:
+                    df.iloc[df_flushed_rows:].to_csv(
+                        _df_csv, mode='a', header=False, index=False)
+                df_flushed_rows = len(df)
 
         # ---- Periodic checkpoint (every 2000 steps) ----
         if step > 0 and step % 2000 == 0:
