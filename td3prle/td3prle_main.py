@@ -33,7 +33,7 @@ Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
      lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 3, 100), 初始 5.0
      d_block_H 初始 1.2, curriculum 连续 100 次满足则减半, 地板 0.3
-  L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 10, 500)
+  L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 10, 100)
      d_block_L 初始 14.0, curriculum 减半地板 1.75 (与 td3prrbb 同口径)
 
 LLM meta-controller (from prle):
@@ -967,12 +967,13 @@ if __name__ == "__main__":
                           cost_critic_mode=args.cost_critic_mode)
     agent_H.lam = 5.0
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c), 与 td3prrbb 同配置;
-    #     lam2 ∈ [10, 500], ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
+    #     lam2 ∈ [10, 100] (上限 500→100: 收紧 L 层对偶可动范围), ema_alpha=0.02,
+    #     ema_lam_lr=0.01
     #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
     # L 层(步骤A): policy_delay/--policy_noise 独立于 H —— 放松到 delay=1+noise≈0 时节奏接近 DDPG
     # (twin critic 与 EMA 对偶仍保留, 仅去掉延迟更新与 target smoothing 对窄可行窗的抹平)
     agent_L = SP_TD3_PRLE(nb_states = 5, nb_actions = 1, args = args,
-                          lam_max=500.0, lam_min=10.0,
+                          lam_max=100.0, lam_min=10.0,
                           ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                           policy_delay=args.l_policy_delay,
                           policy_noise=args.l_policy_noise,
