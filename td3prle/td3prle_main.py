@@ -27,11 +27,11 @@ Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
                    SOC 贴边 → BESS 收益 ×0.7; 与 td3prrbb 一致)
              c1 = C1_RISK[wind]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
   Lower (L): r2 = 10*shadow_profit - 100*clip_amount
-             c2 = 700*soc_deviation   (wind-segmented SOC 安全带; 与 td3prrbb 原系数一致)
+             c2 = 60*soc_deviation   (wind-segmented SOC 安全带; td3prle 调参: 700 → 60)
 
 Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
-     lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 3, 200), 初始 5.0
+     lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 3, 100), 初始 5.0
      d_block_H 初始 1.2, curriculum 连续 100 次满足则减半, 地板 0.3
   L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 10, 500)
      d_block_L 初始 14.0, curriculum 减半地板 1.75 (与 td3prrbb 同口径)
@@ -116,12 +116,12 @@ def train(num_iterations_H,
     consecutive_satisfied_L = 0
     # H 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_H (与 sum_c1 同口径)
     # PRLE 标定: c1 = c1_risk_coeff*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
-    #            (HIGH 风速 ×1.2, LOW/MEDIUM ×0.8; W_GAP=50 对齐 PER/PRRBB)
+    #            (HIGH 风速 ×1.2, LOW/MEDIUM ×0.8; W_GAP=10, td3prle 调参: 原 50 → 10)
     d_block_H = 1.2         # 初值: 每块 sum_c1 预算
     d_block_H_min = 0.3     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    # c2 = C2_SOC_COEFF(700)*soc_deviation, 与 td3prrbb 原系数/预算一致
-    d_block_L = 14.0        # 初值: 每块 sum_c2 预算 (与 td3prrbb 同口径)
+    # c2 = C2_SOC_COEFF(60)*soc_deviation (td3prle 调参: 原 700 → 60)
+    d_block_L = 14.0        # 初值: 每块 sum_c2 预算 (按原 700 标定, 系数降为 60 后建议重新标定)
     d_block_L_min = 1.75    # curriculum 收紧地板
 
     # ---- TD3PRLE: Window statistics for LLM analysis ----
@@ -938,10 +938,9 @@ if __name__ == "__main__":
     )
 
     # H 层对偶改 EMA 实际成本更新 —— lam1 不再读 critic (Q_c)；
-    #     lam1 ∈ [3, 200] 初始 5.0 (上限 50→200: 放宽 H 层对偶可动范围, 允许更强压 c1;
-    #     与 td3prrbb 的 50 分岔)
+    #     lam1 ∈ [3, 100] 初始 5.0 (上限 200→100: 收紧 H 层对偶可动范围, 弱化对 c1 的压制)
     agent_H = SP_TD3_PRLE(nb_states = 4, nb_actions = 6, args = args,
-                          lam_max=200.0, lam_min=3.0,
+                          lam_max=100.0, lam_min=3.0,
                           ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                           record_update_stats=True,
                           policy_delay=args.policy_delay,

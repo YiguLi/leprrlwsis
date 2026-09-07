@@ -28,13 +28,13 @@ Upper (H) r1 (机会侧, 乘法分解, 与 td3prrbb 一致):
 
 Upper (H) c1 (风险侧):
   c1 = C1_RISK[wind] × [10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
-  C1_RISK: LOW=0.8 MEDIUM=1.0 HIGH=1.2, W_GAP=50 (与 td3prrbb 一致)
+  C1_RISK: LOW=0.8 MEDIUM=1.0 HIGH=1.2, W_GAP=10 (td3prle 调参: 原 50 → 10)
 
 Wind boundaries: 动态 (main 按 --seg 定起点, LLM 每 7200 步在 原设定±1 m/s 内调整)
 
 Lower (L):
   r2 = 10.0 * shadow_profit - 100.0 * clip_amount
-  c2 = 700.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束, 与 td3prrbb 原系数一致)
+  c2 = 60.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束; td3prle 调参: 原 700 → 60)
 """
 
 import numpy as np
@@ -222,8 +222,8 @@ def relabel_r1_substep(u, pr, turbine_raw, bess_raw, degradation, penalty_NN_H,
     return w_wind * turbine_raw + w_bess * bess_raw - degradation - penalty_NN_H
 
 
-# c1 中 unfeasible_gap 的惩罚权重 (MW→成本系数, 与 PER/PRRBB 的 W_GAP 一致)
-W_GAP = 50.0
+# c1 中 unfeasible_gap 的惩罚权重 (MW→成本系数; td3prle 调参: 原 50 → 10)
+W_GAP = 10.0
 
 
 def get_c1_risk_coeff(wind_level):
@@ -283,8 +283,8 @@ SOC_SAFE_RANGES = {
 
 
 # c2 系数: SOC 越界成本 (RMB/MWh 越界量), 进入 L 层拉格朗日约束。
-# 与 td3prrbb 原系数一致 = 700 (预算 d_block_L 同步按 14 / 1.75 标定)。
-C2_SOC_COEFF = 700.0
+# td3prle 调参: 原 700 (与 td3prrbb 一致, 预算 d_block_L 按 14 / 1.75 标定) → 60。
+C2_SOC_COEFF = 60.0
 
 
 def Cal_soc_deviation(SOC, wind_level='MEDIUM'):
@@ -336,11 +336,11 @@ def Cal_r2_PER_baseline(pbrule, shadow_price, SOC, wind_level='MEDIUM'):
     LEGACY helper (kept for backward compatibility, no longer called in
     Cal_Rew_PRRBB). The current lower-level reward/cost are computed inline:
       r2 = 10.0 * shadow_profit - 100.0 * clip_amount
-      c2 = 700.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束)
+      c2 = 60.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束)
 
     Wind-segmented lower-level r2.
 
-    r2 = 10.0 * shadow_profit - 700.0 * soc_deviation
+    r2 = 10.0 * shadow_profit - C2_SOC_COEFF * soc_deviation
 
     SOC safe range tightens with wind risk level:
       LOW wind    → [0.5, 5.5]
@@ -353,7 +353,7 @@ def Cal_r2_PER_baseline(pbrule, shadow_price, SOC, wind_level='MEDIUM'):
     """
     shadow_profit = -shadow_price * pbrule
     soc_dev = Cal_soc_deviation(SOC, wind_level)
-    return 10.0 * shadow_profit - 700.0 * soc_dev
+    return 10.0 * shadow_profit - C2_SOC_COEFF * soc_dev
 
 
 # =============================================================================
@@ -368,7 +368,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
              （wT/wB 乘法分解: wT=wT_u×wT_p, wB=wB_p×wB_soc, SOC 贴边 ×0.7）
     Upper c1 = C1_RISK[wind档]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
     Lower r2 = 10*shadow_profit - 100*clip_amount
-    Lower c2 = 700*soc_deviation
+    Lower c2 = 60*soc_deviation
 
     Parameters
     ----------
@@ -423,7 +423,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 
     # ==== Lower Level (L) ====
     # r2: 影子套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
-    # c2: SOC 越界项进入拉格朗日约束（系数 C2_SOC_COEFF = 700/MWh, 与 td3prrbb 一致）
+    # c2: SOC 越界项进入拉格朗日约束（系数 C2_SOC_COEFF = 60/MWh; td3prle 调参: 700 → 60）
     shadow_profit = -shadow_price * pbrule
     soc_dev = Cal_soc_deviation(SOC_new, wind_level)
     r2 = 10.0 * shadow_profit - 100.0 * clip_amount
