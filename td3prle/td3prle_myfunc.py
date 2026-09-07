@@ -283,7 +283,7 @@ SOC_SAFE_RANGES = {
 
 
 # c2 系数: SOC 越界成本 (RMB/MWh 越界量), 进入 L 层拉格朗日约束。
-# td3prle 调参: 原 700 (与 td3prrbb 一致, 预算 d_block_L 按 14 / 1.75 标定) → 60。
+# td3prle 调参: 原 700 (与 td3prrbb 一致) → 60; main 侧每块预算 d_block_L 已同步重标 14/1.75 → 1.2/0.15。
 C2_SOC_COEFF = 60.0
 
 
