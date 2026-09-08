@@ -34,7 +34,7 @@ Wind boundaries: 动态 (main 按 --seg 定起点, LLM 每 7200 步在 原设定
 
 Lower (L):
   r2 = 10.0 * shadow_profit - 100.0 * clip_amount
-  c2 = 100.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束; td3prle 调参沿革: 700 → 60 → 100)
+  c2 = 100.0 * (SOC_new − 3.0)²   (连续二次 SOC 势, 中心 3; 调参沿革: 线性 dev 700→60→100 → 二次 100)
 """
 
 import numpy as np
@@ -121,7 +121,7 @@ def get_wind_level(u):
 # 机会侧（利润）与风险侧（c1/c2）分离：
 #   wT = wT_u(u) × wT_p(pr)                 — 风机发电收益权重
 #   wB = wB_p(pr) × wB_soc(SOC, wind_level) — BESS 套利收益权重 (SOC 贴边 ×0.7)
-# 风险全部进入 c1（波动+不可行缺口）与 c2（SOC 安全带），不再混入收益权重。
+# 风险全部进入 c1（波动+不可行缺口）与 c2（SOC 二次势），不再混入收益权重。
 
 # 风机收益：低风鼓励多发（机会大、风险小），高风轻度降载倾向
 WT_WIND = {'LOW': 1.2, 'MEDIUM': 1.0, 'HIGH': 0.9}
@@ -282,8 +282,9 @@ SOC_SAFE_RANGES = {
 }
 
 
-# c2 系数: SOC 越界成本 (RMB/MWh 越界量), 进入 L 层拉格朗日约束。
-# td3prle 调参沿革: 700 → 60 → 100。
+# c2 系数 (二次 SOC 势, 中心 SOC=3): c2 = C2_SOC_COEFF * (SOC_new − 3.0)²。
+# 连续且 C¹, 不再依赖风速档安全带 (L 层 relabel 变为恒等); 与 H 侧 SOC_SAFE_RANGES 仅统计口径相关。
+# td3prle 调参沿革: 线性 700 → 60 → 100 → 二次势 100·(SOC−3)²。
 C2_SOC_COEFF = 100.0
 
 
@@ -305,29 +306,26 @@ def Cal_soc_deviation(SOC, wind_level='MEDIUM'):
 
 def relabel_c2_substep(u, SOC_new):
     """
-    Recompute c2 for a single L sub-step using CURRENT wind thresholds.
+    Recompute c2 for a single L sub-step.
 
-    c2 = C2_SOC_COEFF * soc_deviation, where the wind-segmented SOC safe band
-    (SOC_SAFE_RANGES[wind_level(u)]) depends on the wind level at the
-    decision step. When dynamic wind thresholds change, L-transition costs
-    stored under the old classification are stale, so the training loop
-    relabels them with this function. Inputs mirror the forward reward:
-    u = wind speed at t, SOC_new = SOC at t+1.
+    c2 = C2_SOC_COEFF * (SOC_new - 3.0)^2 — fixed-centre quadratic SOC
+    potential, independent of wind thresholds. u is kept in the signature
+    only for PRLEBuffer.relabel_c2_all call compatibility; relabeling is now
+    effectively the identity (the quadratic potential has no wind dependence).
 
     Parameters
     ----------
     u : float
-        Wind speed at the decision step (m/s); selects the SOC band.
+        Wind speed at the decision step (m/s); UNUSED (interface only).
     SOC_new : float
-        SOC at the next step (MWh); the deviation is measured on it.
+        SOC at the next step (MWh).
 
     Returns
     -------
     c2 : float
-        Recomputed SOC-deviation cost under current wind thresholds.
+        Recomputed quadratic SOC potential cost.
     """
-    wind_level = get_wind_level(u)
-    soc_dev = Cal_soc_deviation(SOC_new, wind_level)
+    soc_dev = (SOC_new - 3.0) ** 2
     return C2_SOC_COEFF * soc_dev
 
 
@@ -336,23 +334,19 @@ def Cal_r2_PER_baseline(pbrule, shadow_price, SOC, wind_level='MEDIUM'):
     LEGACY helper (kept for backward compatibility, no longer called in
     Cal_Rew_PRRBB). The current lower-level reward/cost are computed inline:
       r2 = 10.0 * shadow_profit - 100.0 * clip_amount
-      c2 = 100.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束)
+      c2 = C2_SOC_COEFF * (SOC_new - 3.0)^2   (quadratic SOC potential)
 
-    Wind-segmented lower-level r2.
+    Historical combined lower-level score (PER-era baseline):
 
-    r2 = 10.0 * shadow_profit - C2_SOC_COEFF * soc_deviation
-
-    SOC safe range tightens with wind risk level:
-      LOW wind    → [0.5, 5.5]
-      MEDIUM wind → [1.0, 5.0]
-      HIGH wind   → [1.5, 4.5]
+    score = 10.0 * shadow_profit - C2_SOC_COEFF * soc_deviation
+            with soc_deviation = (SOC - 3.0)^2 to match the quadratic potential.
 
     shadow_profit = -shadow_price * pbrule
       shadow_price > 0 → encourage discharge (pb < 0 → shadow_profit > 0)
       shadow_price < 0 → encourage charge    (pb > 0 → shadow_profit > 0)
     """
     shadow_profit = -shadow_price * pbrule
-    soc_dev = Cal_soc_deviation(SOC, wind_level)
+    soc_dev = (SOC - 3.0) ** 2
     return 10.0 * shadow_profit - C2_SOC_COEFF * soc_dev
 
 
@@ -368,7 +362,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
              （wT/wB 乘法分解: wT=wT_u×wT_p, wB=wB_p×wB_soc, SOC 贴边 ×0.7）
     Upper c1 = C1_RISK[wind档]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
     Lower r2 = 10*shadow_profit - 100*clip_amount
-    Lower c2 = 100*soc_deviation
+    Lower c2 = 100*(SOC_new−3)²    (连续二次势, 中心 3)
 
     Parameters
     ----------
@@ -423,9 +417,10 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 
     # ==== Lower Level (L) ====
     # r2: 影子套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
-    # c2: SOC 越界项进入拉格朗日约束（系数 C2_SOC_COEFF = 100/MWh; td3prle 调参沿革: 700 → 60 → 100）
+    # c2: 连续二次 SOC 势 c2 = C2_SOC_COEFF*(SOC_new−3)² (中心 3, 与风速无关,
+    #     梯度连续; 带内也有轻微向心拖拽, 消除"带内隐形+边界跳变")
     shadow_profit = -shadow_price * pbrule
-    soc_dev = Cal_soc_deviation(SOC_new, wind_level)
+    soc_dev = (SOC_new - 3.0) ** 2     # 二次势偏差 (SOC−3)²
     r2 = 10.0 * shadow_profit - 100.0 * clip_amount
     c2 = C2_SOC_COEFF * soc_dev
 
@@ -532,8 +527,8 @@ def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
     """TD3PRLE 蒸馏 L 观测 (5维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10].
 
     与 TD3PER/TD3PRRBB 同步的五维蒸馏观测: 当前可行域 (RBB, 与 pb 无关) + H 影子价格
-    信号 + 自身 SOC + 风速。u 使风速分段 c2 SOC 安全带 (SOC_SAFE_RANGES[wind_level])
-    可观测 (u 同时决定 relabel 时的 wind_level 分类)。
+    信号 + 自身 SOC + 风速。c2 已改固定中心二次势 100·(SOC−3)² (与风速无关);
+    u 仍保留在观测中, 供可行域/其它风速相关逻辑使用。
     """
     shadow_price = float(applied_action_H[-1]) * 2.0  # (-0.5,0.5) → (-1,1)
     return np.array([

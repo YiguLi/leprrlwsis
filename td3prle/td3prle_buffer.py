@@ -10,8 +10,8 @@ Context storage:
   - H-agent transitions: list of 5 sub-step dicts
     {'u', 'pr', 'turbine_raw', 'bess_raw', 'degradation', 'penalty_NN_H', 'P_F'}
   - L-agent transitions: list of 1 sub-step dict {'u', 'SOC_new'}
-    (c2 = coeff*soc_deviation 的 SOC 安全带分档依赖 wind_level(u);
-     relabel_c2_all() 用该上下文在动态阈值变化时重算 c2)
+    (c2 = 100*(SOC_new−3)² 固定中心二次势, 与风速无关; relabel_c2_all() 现为
+     恒等重算, 保留上下文仅为接口兼容)
 
 Base class: PER_buffer.PrioritizedReplayBuffer
 """
@@ -150,13 +150,13 @@ class PRLEBuffer(PrioritizedReplayBuffer):
 
     def relabel_c2_all(self, relabel_c2_fn):
         """
-        Recompute only the stored L-agent costs (c2) using CURRENT wind
-        thresholds; rewards (r2) are left untouched.
+        Recompute the stored L-agent costs (c2); rewards (r2) are untouched.
 
-        r2 has no wind dependency, but c2 = coeff * soc_deviation uses the
-        wind-segmented SOC band SOC_SAFE_RANGES[wind_level(u)]. When the
-        dynamic wind thresholds change, old c2 labels are stale and each
-        stored L sub-step cost is recomputed from its saved context.
+        c2 = C2_SOC_COEFF * (SOC_new - 3.0)^2 is a fixed-centre quadratic
+        potential with NO wind dependence, so relabeling is the identity
+        (each stored cost is recomputed to the same value). The call is kept
+        for interface compatibility with relabel_c2_substep; context entries
+        {'u', 'SOC_new'} remain stored as before.
 
         Parameters
         ----------

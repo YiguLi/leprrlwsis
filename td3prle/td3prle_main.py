@@ -27,14 +27,14 @@ Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
                    SOC 贴边 → BESS 收益 ×0.7; 与 td3prrbb 一致)
              c1 = C1_RISK[wind]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
   Lower (L): r2 = 10*shadow_profit - 100*clip_amount
-             c2 = 100*soc_deviation   (wind-segmented SOC 安全带; td3prle 调参沿革: 700 → 60 → 100)
+             c2 = 100*(SOC_new−3)²   (连续二次 SOC 势, 中心 3; 沿革: 线性 dev 700→60→100 → 二次 100)
 
 Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
      lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 50, 500), 初始 100.0
      d_block_H 初始 12.0 (c1 平滑系数已回调 0.1, 预算未随动), curriculum 连续 100 次满足则减半, 地板 3.0
-  L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 50, 500), 初始 100.0
-     d_block_L 初始 1.2, curriculum 减半地板 0.15 (按 c2=60 重标; c2 现回调 100, 预算未随动)
+  L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 2, 200), 初始 100.0
+     d_block_L 初始 400.0 (= 100·2²: 二次势下单步贴 ±2 的成本值; EMA 静止点 RMS≈0.89), curriculum 减半地板 0.15
 
 LLM meta-controller (from prle):
   - 每 7200 步（5 天）窗口边界, episode >= 3 后调用 LLM 分析窗口统计
@@ -120,8 +120,9 @@ def train(num_iterations_H,
     d_block_H = 12.0        # 初值: 每块 sum_c1 预算 (平滑系数曾 0.1→1.0 ×10 重标; 现已回调 0.1, 预算未随动)
     d_block_H_min = 3.0     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    # c2 = C2_SOC_COEFF(100)*soc_deviation (调参沿革: 700 → 60 → 100)
-    d_block_L = 1.2         # 初值: 每块 sum_c2 预算 (按 c2=60 重标 1.2; c2 回调 100 后未随动, 等价 2.0)
+    # c2 = C2_SOC_COEFF(100)*(SOC_new−3)² 二次势; 预算 d_block_L = 400 = 100·2²
+    #     (单步贴 ±2 处的成本值; 静止点 EMA=400 → RMS≈√(400/500)≈0.89)
+    d_block_L = 400.0       # 初值: 每块 sum_c2 预算 (二次势标定)
     d_block_L_min = 0.15    # curriculum 收紧地板
 
     # ---- TD3PRLE: Window statistics for LLM analysis ----
@@ -326,9 +327,8 @@ def train(num_iterations_H,
                 agent_L.update_ema_cost(sum_c2)
                 agent_L.update_lam_ema(d_block_L)
             done_L = True
-        # L 层每步过渡也存上下文 {u_t, SOC_new}: c2 的 SOC 安全带分档
-        # (SOC_SAFE_RANGES[wind_level(u_t)]) 依赖风速, 动态阈值变化时
-        # relabel_c2_substep 依此重算 L 缓冲中的 c2 (r2 与阈值无关, 不改)
+        # L 层每步过渡也存上下文 {u_t, SOC_new}: c2 = 100·(SOC_new−3)² 为固定中心
+        # 二次势 (与风速无关), relabel_c2_substep 重算为恒等, 保留上下文仅为接口兼容
         agent_L.observe_jump(norm_observation_L, original_action_L, r2, c2,
                              norm_observation2_L, done_L,
                              context=[{'u': float(observation[1]),
@@ -663,9 +663,8 @@ def train(num_iterations_H,
                     n_relabeled = agent_H.memory.relabel_all(
                         relabel_r1_substep, relabel_c1_substep)
                     prGreen('TD3PRLE: Relabeled {} H-agent transitions'.format(n_relabeled))
-                    # L-agent buffer: r2 与阈值无关, 但 c2 = coeff*soc_deviation 的
-                    # SOC 安全带分档依赖 wind_level(u), 阈值变化后旧 c2 标签失效,
-                    # 需对 L 缓冲做 cost-only relabel (重算 c2, 保留 r2)。
+                    # L-agent buffer: r2 与阈值无关; c2 = 100·(SOC_new−3)² 固定中心二次势
+                    # 也与风速无关 (relabel 为恒等), 保留调用仅为与 relabel_c2_substep 接口一致。
                     n_relabeled_L = agent_L.memory.relabel_c2_all(relabel_c2_substep)
                     prGreen('TD3PRLE: Relabeled {} L-agent costs'.format(n_relabeled_L))
 
@@ -967,13 +966,13 @@ if __name__ == "__main__":
                           cost_critic_mode=args.cost_critic_mode)
     agent_H.lam = 100.0
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c), 与 td3prrbb 同配置;
-    #     lam2 ∈ [50, 500] 初始 100.0 (高初值+高下限: 对偶恒处强惩罚区, 上限放宽留裕度),
-    #     ema_alpha=0.02, ema_lam_lr=0.01
+    #     lam2 ∈ [2, 200] 初始 100.0 (min=2: 带内拖拽 < 套利边际, 保留 ±2 软裕度;
+    #     max=200 顶配), ema_alpha=0.02, ema_lam_lr=0.01
     #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
     # L 层(步骤A): policy_delay/--policy_noise 独立于 H —— 放松到 delay=1+noise≈0 时节奏接近 DDPG
     # (twin critic 与 EMA 对偶仍保留, 仅去掉延迟更新与 target smoothing 对窄可行窗的抹平)
     agent_L = SP_TD3_PRLE(nb_states = 5, nb_actions = 1, args = args,
-                          lam_max=500.0, lam_min=50.0,
+                          lam_max=200.0, lam_min=2.0,
                           ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                           policy_delay=args.l_policy_delay,
                           policy_noise=args.l_policy_noise,
