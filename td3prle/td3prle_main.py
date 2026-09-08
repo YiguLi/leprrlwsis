@@ -25,16 +25,16 @@ Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
                   - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                   (wT = wT_u(u)×wT_p(pr), wB = wB_p(pr)×wB_soc(SOC,wind),
                    SOC 贴边 → BESS 收益 ×0.7; 与 td3prrbb 一致)
-             c1 = C1_RISK[wind]*[10*(P_F-3)+ + 0.5*P_F] + W_GAP*unfeasible_gap
+             c1 = C1_RISK[wind]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
   Lower (L): r2 = 10*shadow_profit - 100*clip_amount
-             c2 = 60*soc_deviation   (wind-segmented SOC 安全带; td3prle 调参: 700 → 60)
+             c2 = 100*soc_deviation   (wind-segmented SOC 安全带; td3prle 调参沿革: 700 → 60 → 100)
 
 Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
-     lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 3, 100), 初始 5.0
-     d_block_H 初始 12.0, curriculum 连续 100 次满足则减半, 地板 3.0
-  L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 10, 100)
-     d_block_L 初始 1.2, curriculum 减半地板 0.15 (按 c2 系数 60 重标: 原 14/1.75 × 60/700)
+     lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 50, 500), 初始 100.0
+     d_block_H 初始 12.0 (c1 平滑系数已回调 0.1, 预算未随动), curriculum 连续 100 次满足则减半, 地板 3.0
+  L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 50, 500), 初始 100.0
+     d_block_L 初始 1.2, curriculum 减半地板 0.15 (按 c2=60 重标; c2 现回调 100, 预算未随动)
 
 LLM meta-controller (from prle):
   - 每 7200 步（5 天）窗口边界, episode >= 3 后调用 LLM 分析窗口统计
@@ -115,14 +115,14 @@ def train(num_iterations_H,
     consecutive_satisfied_H = 0
     consecutive_satisfied_L = 0
     # H 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_H (与 sum_c1 同口径)
-    # PRLE 标定: c1 = c1_risk_coeff*[10*(P_F-3)+ + 0.5*P_F] + W_GAP*unfeasible_gap
+    # PRLE 标定: c1 = c1_risk_coeff*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
     #            (HIGH 风速 ×1.2, LOW/MEDIUM ×0.8; W_GAP=10, td3prle 调参: 原 50 → 10)
-    d_block_H = 12.0        # 初值: 每块 sum_c1 预算 (原 1.2; c1 平滑系数 0.1→1.0 后 ×10 重标)
-    d_block_H_min = 3.0     # curriculum 收紧地板 (原 0.3 × 10)
+    d_block_H = 12.0        # 初值: 每块 sum_c1 预算 (平滑系数曾 0.1→1.0 ×10 重标; 现已回调 0.1, 预算未随动)
+    d_block_H_min = 3.0     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    # c2 = C2_SOC_COEFF(60)*soc_deviation; 预算按系数 700→60 线性重标 (14×60/700=1.2)
-    d_block_L = 1.2         # 初值: 每块 sum_c2 预算 (原 14.0 按 700 标定)
-    d_block_L_min = 0.15    # curriculum 收紧地板 (原 1.75 × 60/700)
+    # c2 = C2_SOC_COEFF(100)*soc_deviation (调参沿革: 700 → 60 → 100)
+    d_block_L = 1.2         # 初值: 每块 sum_c2 预算 (按 c2=60 重标 1.2; c2 回调 100 后未随动, 等价 2.0)
+    d_block_L_min = 0.15    # curriculum 收紧地板
 
     # ---- TD3PRLE: Window statistics for LLM analysis ----
     window_stats = WindowStats()
@@ -956,29 +956,30 @@ if __name__ == "__main__":
     )
 
     # H 层对偶改 EMA 实际成本更新 —— lam1 不再读 critic (Q_c)；
-    #     lam1 ∈ [3, 100] 初始 5.0 (上限 200→100: 收紧 H 层对偶可动范围, 弱化对 c1 的压制)
+    #     lam1 ∈ [50, 500] 初始 100.0 (高初值+高下限: 对偶恒处强惩罚区, 上限放宽留裕度)
     agent_H = SP_TD3_PRLE(nb_states = 4, nb_actions = 6, args = args,
-                          lam_max=100.0, lam_min=3.0,
+                          lam_max=500.0, lam_min=50.0,
                           ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                           record_update_stats=True,
                           policy_delay=args.policy_delay,
                           policy_noise=args.policy_noise,
                           noise_clip=args.noise_clip,
                           cost_critic_mode=args.cost_critic_mode)
-    agent_H.lam = 5.0
+    agent_H.lam = 100.0
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c), 与 td3prrbb 同配置;
-    #     lam2 ∈ [10, 100] (上限 500→100: 收紧 L 层对偶可动范围), ema_alpha=0.02,
-    #     ema_lam_lr=0.01
+    #     lam2 ∈ [50, 500] 初始 100.0 (高初值+高下限: 对偶恒处强惩罚区, 上限放宽留裕度),
+    #     ema_alpha=0.02, ema_lam_lr=0.01
     #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
     # L 层(步骤A): policy_delay/--policy_noise 独立于 H —— 放松到 delay=1+noise≈0 时节奏接近 DDPG
     # (twin critic 与 EMA 对偶仍保留, 仅去掉延迟更新与 target smoothing 对窄可行窗的抹平)
     agent_L = SP_TD3_PRLE(nb_states = 5, nb_actions = 1, args = args,
-                          lam_max=100.0, lam_min=10.0,
+                          lam_max=500.0, lam_min=50.0,
                           ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                           policy_delay=args.l_policy_delay,
                           policy_noise=args.l_policy_noise,
                           noise_clip=args.noise_clip,
                           cost_critic_mode=args.cost_critic_mode)
+    agent_L.lam = 100.0
     agent_L.cost_limit = 10.0  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
     prYellow('L 层(BESS)策略超参: policy_delay={}, policy_noise={} (H 层 TD3: delay={}, noise={})'.format(
         args.l_policy_delay, args.l_policy_noise, args.policy_delay, args.policy_noise))
