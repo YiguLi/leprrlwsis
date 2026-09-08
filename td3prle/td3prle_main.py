@@ -32,7 +32,7 @@ Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
 Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
      lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 3, 100), 初始 5.0
-     d_block_H 初始 1.2, curriculum 连续 100 次满足则减半, 地板 0.3
+     d_block_H 初始 12.0, curriculum 连续 100 次满足则减半, 地板 3.0
   L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 10, 100)
      d_block_L 初始 1.2, curriculum 减半地板 0.15 (按 c2 系数 60 重标: 原 14/1.75 × 60/700)
 
@@ -117,8 +117,8 @@ def train(num_iterations_H,
     # H 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_H (与 sum_c1 同口径)
     # PRLE 标定: c1 = c1_risk_coeff*[10*(P_F-3)+ + 1.0*P_F] + W_GAP*unfeasible_gap
     #            (HIGH 风速 ×1.2, LOW/MEDIUM ×0.8; W_GAP=10, td3prle 调参: 原 50 → 10)
-    d_block_H = 1.2         # 初值: 每块 sum_c1 预算
-    d_block_H_min = 0.3     # curriculum 收紧地板
+    d_block_H = 12.0        # 初值: 每块 sum_c1 预算 (原 1.2; c1 平滑系数 0.1→1.0 后 ×10 重标)
+    d_block_H_min = 3.0     # curriculum 收紧地板 (原 0.3 × 10)
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
     # c2 = C2_SOC_COEFF(60)*soc_deviation; 预算按系数 700→60 线性重标 (14×60/700=1.2)
     d_block_L = 1.2         # 初值: 每块 sum_c2 预算 (原 14.0 按 700 标定)
