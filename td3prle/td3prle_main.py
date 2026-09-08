@@ -34,7 +34,7 @@ Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
      lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 50, 500), 初始 100.0
      d_block_H 初始 12.0 (c1 平滑系数已回调 0.1, 预算未随动), curriculum 连续 100 次满足则减半, 地板 3.0
   L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 2, 200), 初始 100.0
-     d_block_L 初始 400.0 (= 100·2²: 二次势下单步贴 ±2 的成本值; EMA 静止点 RMS≈0.89), curriculum 减半地板 0.15
+     d_block_L 初始 400.0 (= 100·2²: 二次势下单步贴 ±2 的成本值; EMA 静止点 RMS≈0.89), curriculum 减半地板 = 400 (不收紧)
 
 LLM meta-controller (from prle):
   - 每 7200 步（5 天）窗口边界, episode >= 3 后调用 LLM 分析窗口统计
@@ -123,7 +123,8 @@ def train(num_iterations_H,
     # c2 = C2_SOC_COEFF(100)*(SOC_new−3)² 二次势; 预算 d_block_L = 400 = 100·2²
     #     (单步贴 ±2 处的成本值; 静止点 EMA=400 → RMS≈√(400/500)≈0.89)
     d_block_L = 400.0       # 初值: 每块 sum_c2 预算 (二次势标定)
-    d_block_L_min = 0.15    # curriculum 收紧地板
+    d_block_L_min = 400.0   # 收紧地板 = 初值 → max(d/2, 400)≡400, 预算永不收紧:
+                            # SOC 保持软裕度 (静止 RMS≈0.89, 不会随 curriculum 渐渐被钉向 3)
 
     # ---- TD3PRLE: Window statistics for LLM analysis ----
     window_stats = WindowStats()
