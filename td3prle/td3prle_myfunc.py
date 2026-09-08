@@ -27,7 +27,7 @@ Upper (H) r1 (机会侧, 乘法分解, 与 td3prrbb 一致):
   wB_p: LOW=0.8 MEDIUM=1.0 HIGH=1.2 | wB_soc: 带内=1.0, 带外(SOC 贴边)=0.7
 
 Upper (H) c1 (风险侧):
-  c1 = C1_RISK[wind] × [10*(P_F-3)+ + 1.0*P_F] + W_GAP*unfeasible_gap
+  c1 = C1_RISK[wind] × [10*(P_F-3)+ + 0.5*P_F] + W_GAP*unfeasible_gap
   C1_RISK: LOW=0.8 MEDIUM=1.0 HIGH=1.2, W_GAP=10 (td3prle 调参: 原 50 → 10)
 
 Wind boundaries: 动态 (main 按 --seg 定起点, LLM 每 7200 步在 原设定±1 m/s 内调整)
@@ -235,7 +235,7 @@ def relabel_c1_substep(u, P_F, unfeasible_gap=0.0):
     """
     Recompute c1 for a single sub-step using CURRENT wind thresholds.
 
-    c1 = c1_risk_coeff * (10.0 * max(0, P_F - 3.0) + 1.0 * P_F)
+    c1 = c1_risk_coeff * (10.0 * max(0, P_F - 3.0) + 0.5 * P_F)
        + W_GAP * unfeasible_gap
 
     The base fluctuation penalty is threshold-independent (the 3.0 MW limit
@@ -263,8 +263,8 @@ def relabel_c1_substep(u, P_F, unfeasible_gap=0.0):
     """
     coeff = get_c1_risk_coeff(get_wind_level(u))
     if P_F > 3.0 + 1e-4:
-        return coeff * (10.0 * (P_F - 3.0) + 1.0 * P_F) + W_GAP * unfeasible_gap
-    return coeff * (1.0 * P_F) + W_GAP * unfeasible_gap
+        return coeff * (10.0 * (P_F - 3.0) + 0.5 * P_F) + W_GAP * unfeasible_gap
+    return coeff * (0.5 * P_F) + W_GAP * unfeasible_gap
 
 
 # =============================================================================
@@ -366,7 +366,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     PRRBB reward: 机会/风险分离 (与 td3prrbb 一致);
     Upper r1 = wT*pr*ptur*dt + wB*(-pr*pbrule*dt) - 退化 - penalty_NN_H
              （wT/wB 乘法分解: wT=wT_u×wT_p, wB=wB_p×wB_soc, SOC 贴边 ×0.7）
-    Upper c1 = C1_RISK[wind档]*[10*(P_F-3)+ + 1.0*P_F] + W_GAP*unfeasible_gap
+    Upper c1 = C1_RISK[wind档]*[10*(P_F-3)+ + 0.5*P_F] + W_GAP*unfeasible_gap
     Lower r2 = 10*shadow_profit - 100*clip_amount
     Lower c2 = 60*soc_deviation
 
@@ -412,14 +412,14 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 
     # c1: fluctuation penalty
     #   越限部分 10.0*(P_F-3.0) 仅在 P_F > 3.0 时生效；
-    #   平滑项 1.0*P_F 对任意波动值 P_F（不仅限于越限值）都生效。
+    #   平滑项 0.5*P_F 对任意波动值 P_F（不仅限于越限值）都生效。
     #   风险系数三档 (与 td3prrbb 一致): LOW×0.8, MEDIUM×1.0, HIGH×1.2;
     #   unfeasible_gap（平抑可行性缺口, MW）直接付费。
     c1_risk_coeff = get_c1_risk_coeff(wind_level)
     if P_F > 3.0 + 1e-4:
-        c1 = c1_risk_coeff * (10.0 * (P_F - 3.0) + 1.0 * P_F) + W_GAP * unfeasible_gap
+        c1 = c1_risk_coeff * (10.0 * (P_F - 3.0) + 0.5 * P_F) + W_GAP * unfeasible_gap
     else:
-        c1 = c1_risk_coeff * (1.0 * P_F) + W_GAP * unfeasible_gap
+        c1 = c1_risk_coeff * (0.5 * P_F) + W_GAP * unfeasible_gap
 
     # ==== Lower Level (L) ====
     # r2: 影子套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）

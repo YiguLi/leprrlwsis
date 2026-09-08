@@ -25,7 +25,7 @@ Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
                   - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                   (wT = wT_u(u)×wT_p(pr), wB = wB_p(pr)×wB_soc(SOC,wind),
                    SOC 贴边 → BESS 收益 ×0.7; 与 td3prrbb 一致)
-             c1 = C1_RISK[wind]*[10*(P_F-3)+ + 1.0*P_F] + W_GAP*unfeasible_gap
+             c1 = C1_RISK[wind]*[10*(P_F-3)+ + 0.5*P_F] + W_GAP*unfeasible_gap
   Lower (L): r2 = 10*shadow_profit - 100*clip_amount
              c2 = 60*soc_deviation   (wind-segmented SOC 安全带; td3prle 调参: 700 → 60)
 
@@ -115,7 +115,7 @@ def train(num_iterations_H,
     consecutive_satisfied_H = 0
     consecutive_satisfied_L = 0
     # H 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_H (与 sum_c1 同口径)
-    # PRLE 标定: c1 = c1_risk_coeff*[10*(P_F-3)+ + 1.0*P_F] + W_GAP*unfeasible_gap
+    # PRLE 标定: c1 = c1_risk_coeff*[10*(P_F-3)+ + 0.5*P_F] + W_GAP*unfeasible_gap
     #            (HIGH 风速 ×1.2, LOW/MEDIUM ×0.8; W_GAP=10, td3prle 调参: 原 50 → 10)
     d_block_H = 12.0        # 初值: 每块 sum_c1 预算 (原 1.2; c1 平滑系数 0.1→1.0 后 ×10 重标)
     d_block_H_min = 3.0     # curriculum 收紧地板 (原 0.3 × 10)
