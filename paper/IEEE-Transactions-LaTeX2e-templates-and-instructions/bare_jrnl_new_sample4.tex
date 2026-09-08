@@ -41,13 +41,23 @@ Article submission, IEEE, IEEEtran, journal, \LaTeX, paper, template, typesettin
 \end{IEEEkeywords}
 
 \section{Introduction}
-\IEEEPARstart{A}{s} the penetration rate of wind power continues to rise, the randomness and intermittency of wind speeds, as well as forecasting errors, cause frequent fluctuations in the grid-connected power output of wind farms~\cite{ref1}. Such fluctuations affect power quality, dispatch reliability, and grid security~\cite{ref2,ref3}. Power smoothing achieved solely by adjusting the wind turbine's pitch angle or axial induction factor often results in a loss of wind energy utilization efficiency~\cite{ref4} and increases mechanical component fatigue~\cite{ref5}. The Wind-Storage Integrated System (WSIS) combines wind farms with battery energy storage systems. By leveraging the power regulation capabilities of wind turbines and the rapid charging and discharging capabilities of energy storage, it suppresses grid-connected power fluctuations while increasing power generation revenue, making it a key solution for high-penetration wind power grid integration~\cite{ref6}.
+\IEEEPARstart{W}{ith} climate change, renewable energy has become a crucial part of the energy transition in countries around the world, and the penetration rate of wind power has continued to rise accordingly. However, the randomness and intermittency of wind speeds, as well as forecasting errors, cause frequent fluctuations in the grid-connected power of wind farms~\cite{ref1}, which in turn affect power quality, dispatch reliability, and grid security~\cite{ref2,ref3}. Regarding power fluctuations caused by wind power, existing control methods fall into two main categories: one involves power smoothing solely by adjusting the wind turbine's pitch angle or axial induction factor. This method often results in a loss of wind energy utilization rate~\cite{ref4} and increases fatigue on the mechanical components of wind turbines~\cite{ref5}. The other category involves introducing energy storage facilities to form a Wind-Storage Integrated System (WSIS) in conjunction with the wind farm. By leveraging the power regulation capabilities of wind turbines and the rapid charging and discharging capabilities of energy storage, WSIS suppresses grid-connected power fluctuations while increasing power generation revenue, and has become a key solution for integrating high proportions of wind power into the grid~\cite{ref6}.
 
-WSIS control requires coordinating wind turbines and energy storage devices, which have different dynamic characteristics and control frequencies: wind turbines typically optimize overall power generation on a slower timescale, while energy storage tracks and smooths the target on a faster timescale~\cite{ref7}. Model predictive control and rule-based control rely on accurate wake models~\cite{ref8}, wind speed forecasts, and battery models; however, in large-scale, highly uncertain environments, they face issues such as modeling complexity, high computational overhead~\cite{ref9,ref10}, and limited generalization ability~\cite{ref11}. Furthermore, there is a clear conflict between maximizing economic benefits and power fluctuation constraints~\cite{ref12}; fixed penalty coefficients or a single continuous reward make it difficult to simultaneously distinguish between the safe zone, critical zone, and out-of-bounds zone~\cite{ref13}, which may result in overly conservative strategies or frequent violations of safety constraints.
+WSIS control requires coordinating wind turbines and energy storage systems with different dynamic characteristics and control frequencies: to avoid wind energy losses and mechanical fatigue caused by frequent adjustments to the wind turbines, the turbines typically optimize their overall power output on a slower time scale; meanwhile, the energy storage system tracks a smooth target on a faster time scale to achieve a smooth overall output~\cite{ref7}. Mainstream wind turbine control methods each have their own limitations and shortcomings: PID control relies on linearized model parameters; in wind power environments characterized by strong nonlinearity, high inertia, and time delays, it suffers from poor robustness, and parameter tuning is time-consuming and difficult; Model predictive control and rule-based control rely on accurate wake models~\cite{ref8}, wind speed forecasts, and battery models; in large-scale, highly uncertain environments, they suffer from complex modeling, high computational overhead~\cite{ref9,ref10}, and limited generalization ability~\cite{ref11}. Furthermore, there is a clear conflict between maximizing economic benefits and power fluctuation constraints~\cite{ref12}, which may result in overly conservative strategies or frequent violations of safety constraints.
 
-Reinforcement learning enables the direct learning of control policies through interaction with the environment, providing a new approach to model-free control for complex WSIS systems. Hierarchical reinforcement learning leverages different control time scales to decompose upper-level wind turbine scheduling and lower-level energy storage smoothing into collaborative decision-making processes~\cite{ref14}. However, existing methods still face challenges such as reward boundaries relying on human expertise, difficulty in adapting boundaries to changing operating conditions, and training oscillations caused by inter-layer coupling and constraint sample imbalance.
+To address the above issues, reinforcement learning (RL)---as a model-free approach that directly learns control policies through interaction with the environment without the need for prior modeling of system dynamics---offers a new approach to controlling complex WSIS systems~\cite{ref7,ref13}. Hierarchical Safe Reinforcement Learning (HSRL) utilizes different control time scales to decompose upper-level wind turbine scheduling and lower-level energy storage smoothing into mutually cooperative decision-making processes, while ensuring compliance with control constraints and objectives~\cite{ref14}. However, existing methods still face challenges such as reward boundaries relying on manual experience, difficulty in adapting boundaries to changing operating conditions, and training oscillations caused by inter-layer coupling and sample imbalance in constraints. To this end, this paper proposes an LLM-guided segmented reward reinforcement learning framework based on the HSRL framework~\cite{ref14}. By explicitly delineating different risk and profit zones through segment-based rewards, this approach utilizes a large language model (LLM) in conjunction with operational data to dynamically adjust segment boundaries, and employs a hierarchical dual-timescale objective network and a delayed strategy update to enhance training stability~\cite{ref15,ref16}.
 
-To address these challenges, this paper proposes an LLM-guided, segmented-reward hierarchical reinforcement learning framework. This framework explicitly characterizes different risk regions through segmented rewards, utilizes an LLM in conjunction with operational data to dynamically adjust segment boundaries, and employs a hierarchical dual-timescale objective network and delayed policy updates to enhance training stability~\cite{ref15}.
+A fixed penalty coefficient or a single continuous reward makes it difficult to simultaneously distinguish between the safe zone, the balanced zone, and the dangerous zone~\cite{ref17}, which may result in the policy becoming overly conservative or frequently violating safety constraints. Segmented Reward Function Reinforcement Learning (PRRL) offers a highly promising solution to this problem. This method employs different reward function formulas based on control objectives in various environments; for example, it emphasizes utility in the safe zone, balances utility and constraints in the balanced zone, and guides rapid stabilization while adhering to fluctuation constraints in the hazardous zone. Experiments have demonstrated that in air combat decision-making~\cite{ref18} and mobile robot navigation and close-following scenarios~\cite{ref19}, segmented reward models can significantly improve accuracy and stability in complex scenarios compared to single-value baseline reward models. On the other hand, Large Language Model-Enhanced Reinforcement Learning (LERL) provides a more efficient segmentation method for reinforcement learning agents using segmented reward functions. During training with segmented reward functions, precisely identifying the most appropriate segmentation boundaries is challenging due to the continuous nature of wind speeds in the WSIS environment. By using an LLM to fine-tune the segmentation boundaries based on data collected during training, an optimal partition can be obtained that balances constraint satisfaction with profit maximization. LLMs have been widely applied in various aspects of reinforcement learning~\cite{ref20}, such as serving as information processors to reduce learning complexity~\cite{ref21}, as reward designers to design reward functions in complex task environments~\cite{ref22}, and as decision-makers to generate or guide reliable actions to accelerate offline reinforcement learning~\cite{ref23}.
+
+Although there has been extensive research in the academic community on both piecewise reward function reinforcement learning (PRRL) and LLM-enhanced RL (LERL), few studies have attempted to integrate PRRL and LERL to construct an LLM-enhanced piecewise reward function reinforcement learning (LEPRRL) framework. This integration presents several challenges, notably: 1) segmented reward functions introduce non-smooth reward surfaces at the boundaries, leading to high-variance gradient updates and cumulative overestimation; 2) fine-tuning of segmented boundaries by the LLM causes local shifts in the reward surface, resulting in Q-value estimates lagging behind surface changes and affecting the accuracy of policy updates. To address these limitations, this paper proposes an LLM-enhanced segmented reward reinforcement learning (LEPRRL) framework based on the TD3 algorithm for the WSIS control problem, building upon the HSRL framework~\cite{ref14}. Its contributions are as follows:
+
+\begin{enumerate}
+\item A piecewise reward function method is proposed. By guiding the agent to pursue different objectives in different segments, this method improves control performance and operational safety, thereby resolving the challenge of balancing reward optimization with safety constraints.
+
+\item A method for LLM-enhanced reinforcement learning is proposed. By utilizing an LLM to monitor parameters and fine-tune segmentation logic during training, this method identifies optimal segmentation points and optimizes the agent's overall performance.
+
+\item To address the training instability introduced by the aforementioned segmented reward mechanism and LLM boundary fine-tuning, we introduce a TD3-based dual-Q-network and delayed policy update framework, which ensures the convergence stability of the LEPRRL framework during long-time-domain training.
+\end{enumerate}
 
 \section{The Design, Intent, and \\ Limitations of the Templates}
 The templates are intended to {\bf{approximate the final look and page length of the articles/papers}}. {\bf{They are NOT intended to be the final produced work that is displayed in print or on IEEEXplore\textsuperscript{\textregistered}}}. They will help to give the authors an approximation of the number of pages that will be in the final version. The structure of the \LaTeX\ files, as designed, enable easy conversion to XML for the composition systems used by the IEEE. The XML files are used to produce the final print/IEEEXplore pdf and then converted to HTML for IEEEXplore.
@@ -552,81 +562,113 @@ You can use a bibliography generated by BibTeX as a .bbl file.
 You can manually copy in the resultant .bbl file and set second argument of $\backslash${\tt{begin}} to the number of references
  (used to reserve space for the reference number labels box).
 
-\begin{thebibliography}{15}
+\begin{thebibliography}{23}
 \bibliographystyle{IEEEtran}
 
 % =====================================================================
-% 参考文献（编号 1-15 与 Introduction 中的 [1]-[15] 一一对应）。
-% 条目依据下载 PDF 原文（"阅读材料\自找的参考文献\[N]xxx.pdf"）提取。
+% 参考文献（23 条，编号按 Introduction 中首次出现顺序排列）。
+% 条目依据下载 PDF 原文（"阅读材料\自找的参考文献"）提取。
 % 说明：
-%  - ref4 为会议论文，PDF 未印页码，故只给 DOI；
-%  - ref6 为《中国电力》中文期刊论文，按 IEEE 惯例给英文译题并标注
-%    (in Chinese)，作者按论文英文摘要罗马化；
-%  - ref8 正式期次为 2026 年 1 月（©2025，2025-07-16 early access），
-%    此处按正式期次取 2026 年；
-%  - ref15 页码 1587-1596 为 ICML 2018 (PMLR vol. 80) 正式页码。
+%  - 原草稿编号仅用于对应 PDF；此处已按正文出现顺序重编号。
+%  - 13.1.pdf 与 [7] 为同一篇文献（EPSR 255 (2026) 112707），已合并，
+%    正文 RL 句复引第 7 条；
+%  - ref6 为《中国电力》中文论文，用英文译题并标注 (in Chinese)；
+%  - ref21/ref23 为 arXiv 预印本；ref22 为 ICLR 会议论文；
+%  - ref19/ref23 作者众多：ref19 全部列出，ref23 按 IEEE 惯例用
+%    "M. Ahn et al."（46 位作者全文见 arXiv:2204.01691）。
 % =====================================================================
 
-% REF1 主题：风速随机性/间歇性及预测误差导致风电场并网出力频繁波动
+% REF1 (源 [1]) 风速随机性/间歇性及预测误差导致风电场并网出力频繁波动
 \bibitem{ref1}
 A. Michiorri, J. Lugaro, N. Siebert, R. Girard, and G. Kariniotakis, ``Storage sizing for grid connected hybrid wind and storage power plants taking into account forecast errors autocorrelation,'' \textit{Renewable Energy}, vol. 117, pp. 380--392, 2018, doi: 10.1016/j.renene.2017.10.070.
 
-% REF2 主题：并网功率波动影响电能质量
+% REF2 (源 [2]) 并网功率波动影响电能质量
 \bibitem{ref2}
 E. Rahimi, A. Rabiee, J. Aghaei, K. M. Muttaqi, and A. Esmaeel Nezhad, ``On the management of wind power intermittency,'' \textit{Renewable and Sustainable Energy Reviews}, vol. 28, pp. 643--653, 2013, doi: 10.1016/j.rser.2013.08.034.
 
-% REF3 主题：风电大规模并网影响调度可靠性与电网安全
+% REF3 (源 [3]) 风电大规模并网影响调度可靠性与电网安全
 \bibitem{ref3}
 T. Nam, J. W. Shim, and K. Hur, ``The beneficial role of SMES coil in DC lines as an energy buffer for integrating large scale wind power,'' \textit{IEEE Trans. Appl. Supercond.}, vol. 22, no. 3, Jun. 2012, Art. no. 5701404, doi: 10.1109/TASC.2011.2175686.
 
-% REF4 主题：仅靠变桨调节平滑功率会损失风能利用效率
+% REF4 (源 [4]) 仅靠变桨调节平滑功率会损失风能利用效率（会议论文，PDF 未印页码）
 \bibitem{ref4}
 Y. Li and Z. Xu, ``Power smoothing control of wind turbines using different strategies,'' in \textit{Proc. IEEE Int. Conf. Smart Grid Commun. (SmartGridComm)}, Sydney, Australia, 2016, doi: 10.1109/SmartGridComm.2016.7778844.
 
-% REF5 主题：频繁桨距角操纵导致桨距伺服系统明显疲劳
+% REF5 (源 [5]) 频繁桨距角操纵导致桨距伺服系统明显疲劳
 \bibitem{ref5}
 X. Tang, M. Yin, C. Shen, Y. Xu, Z. Y. Dong, and Y. Zou, ``Active power control of wind turbine generators via coordinated rotor speed and pitch angle regulation,'' \textit{IEEE Trans. Sustain. Energy}, vol. 10, no. 2, pp. 822--832, Apr. 2019, doi: 10.1109/TSTE.2018.2848923.
 
-% REF6 主题：WSIS（风-储联合系统）应用实例。
-% 原题（中文）：分散式风储一体化系统提升海上油田群电网频率稳定性研究（《中国电力》）
+% REF6 (源 [6]) WSIS 应用实例；原题（中文）：分散式风储一体化系统提升海上油田群电网频率稳定性研究（《中国电力》）
 \bibitem{ref6}
 K. Su, W. Dong, Y. Qiu, C. Wei, and X. Xie, ``Study on using distributed wind-storage integrated system to improve frequency stability of offshore oilfield power systems,'' \textit{Electric Power}, vol. 56, no. 5, pp. 163--171, 2023 (in Chinese), doi: 10.11930/j.issn.1004-9649.202205103.
 
-% REF7 主题：风机与储能动态特性/控制时间尺度不同，需分层协调（WSIS 平滑控制）
+% REF7 (源 [7]=13.1) 风机与储能不同时间尺度协调；RL 无模型控制 WSIS（正文两处引用）
 \bibitem{ref7}
 S. Wang, J. Zhao, H. Zhao, Y. Cao, Z. Pan, G. Liu, and G. Liang, ``Coordinated power smoothing control for wind storage integrated system with physics-informed deep reinforcement learning,'' \textit{Electric Power Systems Research}, vol. 255, Art. no. 112707, 2026, doi: 10.1016/j.epsr.2025.112707.
 
-% REF8 主题：MPC/基于模型的控制依赖准确的尾流（延迟）模型
+% REF8 (源 [8]) MPC/基于模型的控制依赖准确的尾流（延迟）模型（正式期次 2026-01，©2025）
 \bibitem{ref8}
 Y. Liu, J. Lin, L.-l. Huang, C. Hua, R. Huang, and Y. Fu, ``LPV model predictive control for offshore wind farms considering wake delay characteristics,'' \textit{IEEE Trans. Sustain. Energy}, vol. 17, no. 1, pp. 217--229, Jan. 2026, doi: 10.1109/TSTE.2025.3589608.
 
-% REF9 主题：高保真风电建模/预测计算开销大（尾流模型计算成本）
+% REF9 (源 [9]) 高保真风电建模/预测计算开销大（尾流模型计算成本）
 \bibitem{ref9}
 Z. Ti, X. W. Deng, and M. Zhang, ``Artificial neural networks based wake model for power prediction of wind farm,'' \textit{Renewable Energy}, vol. 172, pp. 618--631, 2021, doi: 10.1016/j.renene.2021.03.030.
 
-% REF10 主题：风电功率预测模型计算开销大（轻量化需求）
+% REF10 (源 [10]) 风电功率预测模型计算开销大（轻量化需求）
 \bibitem{ref10}
 Y. Jin, M. Liu, Z. Lai, X. Cheng, and X. Liu, ``LightWind: A lightweight framework for efficient wind power forecasting,'' \textit{IEEE Sensors J.}, vol. 25, no. 19, pp. 36691--36703, Oct. 2025, doi: 10.1109/JSEN.2025.3600483.
 
-% REF11 主题：深度/机器学习模型在新场景下泛化能力弱
+% REF11 (源 [11]) 深度/机器学习模型在新场景下泛化能力弱
 \bibitem{ref11}
 H. Jin, G. Yang, S. Dong, S. Fan, H. Jin, and B. Wang, ``Wind power forecasting for newly built wind farms based on deep learning with dual-stage attention mechanism and adaptive transfer learning,'' \textit{Energy}, vol. 335, Art. no. 138275, 2025, doi: 10.1016/j.energy.2025.138275.
 
-% REF12 主题：最大化经济收益与（电网/多目标）约束之间的控制冲突
+% REF12 (源 [12]) 最大化经济收益与（电网/多目标）约束之间的控制冲突
 \bibitem{ref12}
 Y. Huang and X. Zhao, ``Reinforcement learning-based multiobjective control of grid-connected wind farms,'' \textit{IEEE Trans. Ind. Informat.}, vol. 20, no. 5, pp. 7380--7390, May 2024, doi: 10.1109/TII.2024.3359420.
 
-% REF13 主题：固定惩罚系数/单一奖励难以区分安全区、临界区与越界区
+% REF13 (源 13.2) RL（MATD3）无需尾流模型的风储协调有功控制——模型无关 RL 用于 WSIS
 \bibitem{ref13}
-Y. Fu, W. Zhao, and L. Liu, ``Safe reinforcement learning for transition control of ducted-fan UAVs,'' \textit{Drones}, vol. 7, no. 5, Art. no. 332, 2023, doi: 10.3390/drones7050332.
+Q. Yao, Z. Liang, Y. Guan, Y. Ke, Y. Hu, F. Fang, and J. Liu, ``Wake model-free active power control for wind-storage coordination using a state-decoupled MATD3 algorithm,'' \textit{Energy}, vol. 347, Art. no. 140265, 2026, doi: 10.1016/j.energy.2026.140265.
 
-% REF14 主题：分层强化学习用于风储一体化系统功率平滑（上层调度/下层平抑）
+% REF14 (源 [14]) 分层强化学习用于风储一体化功率平滑（HSRL，上层调度/下层平抑）
 \bibitem{ref14}
 S. Wang, H. Zhao, T. Shu, Z. Pan, G. Liang, and J. Zhao, ``Power smoothing control for wind-storage integrated systems with hierarchical safe reinforcement learning and curriculum learning,'' \textit{IEEE Trans. Smart Grid}, vol. 16, no. 6, pp. 4606--4619, Nov. 2025, doi: 10.1109/TSG.2025.3593340.
 
-% REF15 主题：双 Critic（双时间尺度目标网络）+ 延迟策略更新提升训练稳定性（TD3 原文）
+% REF15 (源 [15]) TD3 原文：双 Critic + 延迟策略更新提升训练稳定性
 \bibitem{ref15}
 S. Fujimoto, H. van Hoof, and D. Meger, ``Addressing function approximation error in actor-critic methods,'' in \textit{Proc. 35th Int. Conf. Mach. Learn. (ICML)}, Stockholm, Sweden, 2018, pp. 1587--1596.
+
+% REF16 (源 15.7) TD3 训练稳定性/延迟更新相关验证（多阶段室内导航基准）
+\bibitem{ref16}
+S. Sun and J. Han, ``Comparative benchmarking of TD3 for multi-stage indoor navigation,'' in \textit{Proc. Int. Conf. Intell. Percept. Auton. Control (IPAC)}, 2026, doi: 10.1109/IPAC69021.2026.11542699.
+
+% REF17 (源 [13]) 固定惩罚系数/单一奖励难以区分安全区、平衡区与危险区
+\bibitem{ref17}
+Y. Fu, W. Zhao, and L. Liu, ``Safe reinforcement learning for transition control of ducted-fan UAVs,'' \textit{Drones}, vol. 7, no. 5, Art. no. 332, 2023, doi: 10.3390/drones7050332.
+
+% REF18 (源 15.1) 分段奖励：空战决策（PRRL 应用实例）
+\bibitem{ref18}
+Y. Li, Y. Yuan, Y. Cheng, and L. Hua, ``Predictive air combat decision model with segmented reward allocation,'' \textit{Complex Intell. Syst.}, vol. 10, pp. 7513--7530, 2024, doi: 10.1007/s40747-024-01556-3.
+
+% REF19 (源 15.2) 安全约束强化学习（机会约束/跟随场景下的惩罚-拉格朗日方法）
+\bibitem{ref19}
+B. Peng, Y. Mu, J. Duan, Y. Guan, S. E. Li, and J. Chen, ``Separated proportional-integral Lagrangian for chance constrained reinforcement learning,'' in \textit{Proc. IEEE Intell. Veh. Symp. (IV)}, Nagoya, Japan, 2021, doi: 10.1109/IV48863.2021.9575205.
+
+% REF20 (源 15.3) LLM 增强 RL 综述（信息处理器/奖励设计/决策者/生成器四角色）
+\bibitem{ref20}
+Y. Cao, H. Zhao, Y. Cheng, T. Shu, Y. Chen, G. Liu, G. Liang, J. Zhao, J. Yan, and Y. Li, ``Survey on large language model-enhanced reinforcement learning: Concept, taxonomy, and methods,'' \textit{IEEE Trans. Neural Netw. Learn. Syst.}, vol. 36, no. 6, pp. 9737--9757, Jun. 2025, doi: 10.1109/TNNLS.2024.3497992.
+
+% REF21 (源 15.4) LLM/语言信息处理降低策略学习复杂度（arXiv 预印本）
+\bibitem{ref21}
+J.-C. Pang, X.-Y. Yang, S.-H. Yang, and Y. Yu, ``Natural language-conditioned reinforcement learning with inside-out task language development and translation,'' arXiv:2302.09368, 2023.
+
+% REF22 (源 15.5) LLM 作为奖励设计器（EUREKA，ICLR 2024）
+\bibitem{ref22}
+Y. J. Ma, W. Liang, G. Wang, D.-A. Huang, O. Bastani, D. Jayaraman, Y. Zhu, L. Fan, and A. Anandkumar, ``Eureka: Human-level reward design via coding large language models,'' in \textit{Proc. 12th Int. Conf. Learn. Represent. (ICLR)}, Vienna, Austria, 2024.
+
+% REF23 (源 15.6) LLM 作为决策者：语言-机器人能力接地（SayCan，46 位作者，此处用 et al.）
+\bibitem{ref23}
+M. Ahn et al., ``Do as I can, not as I say: Grounding language in robotic affordances,'' arXiv:2204.01691, 2022.
 
 \end{thebibliography}
 
