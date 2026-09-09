@@ -340,20 +340,23 @@ def train(num_iterations_H,
             if episode_steps % 5 == 4:
                 # Curriculum convergence: halve d_block when EMA cost
                 # <= d_block for 100 consecutive policy updates
-                # UTD 2:1 -> 1:1: one policy update per new transition
-                # (5 env steps per block -> 5 updates), TD3 paper default.
+                # H 层本轮实验: 更新频率 5 → 2 次/块 (块内前 2 次与 L 交替);
+                # L 层维持每块 10 次 (UTD 2:1)。
                 update_num = 0
-                while update_num < 5:
+                while update_num < 2:
                     agent_H.update_policy()
                     agent_L.update_policy()
                     update_num += 1
 
-                # L 层智能体更简单 (1 维动作), 提高其更新频率至每块 10 次 (UTD 2:1),
-                # H 层维持每块 5 次 (UTD 1:1)。额外更新不重复累计 curriculum 计数
-                # (EMA 成本每块只更新一次, 与块末判据一致)。
-                for _ in range(5):
+                # L 层补足至每块 10 次 (while 内已 2 次, 此处再 8 次; UTD 2:1)
+                for _ in range(8):
                     agent_L.update_policy()
 
+                # curriculum 计数保持原节奏 (每块 5 次 × 两 agent):
+                # EMA 成本每块只在块末更新一次, 块内多次检查结果一致、仅推进计数器,
+                # 故判定阈值 100 不变时, d_block 减半所需"满足块数"与改动前相同
+                # (不随 H 更新次数下调而变化)。
+                for _ in range(5):
                     # Track consecutive satisfaction for H (EMA 实际成本判据)
                     if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
                         consecutive_satisfied_H += 1
@@ -374,7 +377,7 @@ def train(num_iterations_H,
                     consecutive_satisfied_L = 0
                     prGreen('L: d_block_L halved to {}'.format(d_block_L))
 
-                # ---- H 层更新数据记录（本块 10 批均值 → TB/csv） ----
+                # ---- H 层更新数据记录（本块 H 更新批均值 → TB/csv） ----
                 # 记录"神经网络更新时实际采用的数据"：TD/Q/target/batch 奖励成本/ISW。
                 if agent_H.record_update_stats and len(agent_H.update_stats) > 0:
                     _stats = agent_H.update_stats
