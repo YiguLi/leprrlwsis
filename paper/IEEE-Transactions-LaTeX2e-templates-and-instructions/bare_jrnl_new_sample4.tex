@@ -13,6 +13,13 @@
 \hyphenation{op-tical net-works semi-conduc-tor IEEE-Xplore}
 % updated with editorial comments 8/9/2021
 
+% 可点击引用：正文 [n] 显示为蓝色链接，点击跳转到文末参考文献条目。
+% 投稿前如需无色，把 colorlinks 选项去掉并改 hidelinks 即可：
+% \usepackage[hidelinks]{hyperref}
+\usepackage[colorlinks=true, linkcolor=blue, citecolor=blue, urlcolor=blue, breaklinks=true, hypertexnames=false]{hyperref}
+% 模板示例章节标题里的 "\\" 不适用于 PDF 书签字符串，书签里用空格代替（仅影响书签）
+\pdfstringdefDisableCommands{\def\\{ }}
+
 \begin{document}
 
 \title{A Sample Article Using IEEEtran.cls\\ for IEEE Journals and Transactions}
