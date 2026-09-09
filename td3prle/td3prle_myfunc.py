@@ -462,24 +462,40 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 
 
 # =============================================================================
-# 7. Action Checking (PER convention, unchanged)
+# 7. Action Checking
 # =============================================================================
 
+# ---- 越界惩罚系数 (penalty_NN_H 本轮调参) ----
+# H 层 (风机+信号): 每维越界系数 200→100, 并对总惩罚封顶 PENALTY_NN_H_CAP=100。
+#   动机: run162 崩坏链 "越界→重罚→负Q→更差动作" 中, 无上限线性惩罚让 sum_r1
+#   被 -5×penalty 主导 (曾达 150+/步且不封顶), profit-critic 学到无底洞负 Q。
+#   封顶后最坏单步只扣 100, 与真实利润 (每步 ~10-100 RMB) 同量级;
+#   界外仍保留线性"拉回界内"梯度 (软墙), 只是破坏力被封死。
+# L 层 (BESS): penalty_NN_L 不进学习信号 (仅日志/缓冲列), 系数维持 200 不变。
+BOUND_PEN_COEF_H = 100.0   # H 每维越界惩罚系数
+PENALTY_NN_H_CAP = 100.0   # penalty_NN_H 总封顶 (单位: 与 r1 相同的 RMB 刻度)
+BOUND_PEN_COEF_L = 200.0   # L 每维越界惩罚系数 (不变)
+
+
 def CheckAction(action, charge=10.):
-    """Clip actions to feasible ranges. WT: [0,0.5], Signal: [-0.5,0.5], Bat: [-charge,charge]."""
+    """Clip actions to feasible ranges. WT: [0,0.5], Signal: [-0.5,0.5], Bat: [-charge,charge].
+
+    penalty_NN_H (H 动作分支, len 5/6): 每维越界量 × BOUND_PEN_COEF_H(=100),
+    总和再封顶 PENALTY_NN_H_CAP(=100)。L 动作 (len 1) 系数不变。
+    """
     penalty = 0
     SIGNAL_MIN, SIGNAL_MAX = -0.5, 0.5
 
     if len(action) == 7:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 200 *((ma - 0.5) + (0. - mi))
+            penalty += BOUND_PEN_COEF_H * ((ma - 0.5) + (0. - mi))
         sig = action[5]
-        if sig > SIGNAL_MAX:    penalty += 200 *(sig - SIGNAL_MAX)
-        elif sig < SIGNAL_MIN:  penalty += 200 *(SIGNAL_MIN - sig)
+        if sig > SIGNAL_MAX:    penalty += BOUND_PEN_COEF_H * (sig - SIGNAL_MAX)
+        elif sig < SIGNAL_MIN:  penalty += BOUND_PEN_COEF_H * (SIGNAL_MIN - sig)
         for j in action[6:]:
             ma, mi = max(charge, j), min(-charge, j)
-            penalty += 200 *((ma - charge) + (-charge - mi))
+            penalty += BOUND_PEN_COEF_L * ((ma - charge) + (-charge - mi))
         a_H = np.append(np.clip(action[:5], 0., 0.5),
                         np.clip(action[5], SIGNAL_MIN, SIGNAL_MAX))
         a_L = np.clip(action[6:], -charge, charge)
@@ -488,24 +504,26 @@ def CheckAction(action, charge=10.):
     elif len(action) == 6:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 200 *((ma - 0.5) + (0. - mi))
+            penalty += BOUND_PEN_COEF_H * ((ma - 0.5) + (0. - mi))
         sig = action[5]
-        if sig > SIGNAL_MAX:    penalty += 200 *(sig - SIGNAL_MAX)
-        elif sig < SIGNAL_MIN:  penalty += 200 *(SIGNAL_MIN - sig)
+        if sig > SIGNAL_MAX:    penalty += BOUND_PEN_COEF_H * (sig - SIGNAL_MAX)
+        elif sig < SIGNAL_MIN:  penalty += BOUND_PEN_COEF_H * (SIGNAL_MIN - sig)
         applied = np.append(np.clip(action[:5], 0., 0.5),
                             np.clip(action[5], SIGNAL_MIN, SIGNAL_MAX))
-        return applied, penalty
+        # penalty_NN_H 总封顶
+        return applied, min(penalty, PENALTY_NN_H_CAP)
 
     elif len(action) == 5:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 200 *((ma - 0.5) + (0. - mi))
-        return np.clip(action[:5], 0., 0.5), penalty
+            penalty += BOUND_PEN_COEF_H * ((ma - 0.5) + (0. - mi))
+        # penalty_NN_H 总封顶
+        return np.clip(action[:5], 0., 0.5), min(penalty, PENALTY_NN_H_CAP)
 
     elif len(action) == 1:
         for j in action:
             ma, mi = max(charge, j), min(-charge, j)
-            penalty += 200 *((ma - charge) + (-charge - mi))
+            penalty += BOUND_PEN_COEF_L * ((ma - charge) + (-charge - mi))
         return np.clip(action, -charge, charge), penalty
 
     return action, penalty
