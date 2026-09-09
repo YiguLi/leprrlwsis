@@ -27,14 +27,14 @@ Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
                    SOC 贴边 → BESS 收益 ×0.7; 与 td3prrbb 一致)
              c1 = C1_RISK[wind]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
   Lower (L): r2 = 10*shadow_profit - 100*clip_amount
-             c2 = 100*(SOC_new−3)²   (连续二次 SOC 势, 中心 3; 沿革: 线性 dev 700→60→100 → 二次 100)
+             c2 = (SOC_new−3)²   (连续二次 SOC 势, 中心 3; 取消×100 系数, 削弱居中先验放开套利)
 
 Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
      lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 50, 500), 初始 100.0
      d_block_H 初始 12.0 (c1 平滑系数已回调 0.1, 预算未随动), curriculum 连续 100 次满足则减半, 地板 3.0
   L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 2, 200), 初始 100.0
-     d_block_L 初始 400.0 (= 100·2²: 二次势下单步贴 ±2 的成本值; EMA 静止点 RMS≈0.89), curriculum 减半地板 = 400 (不收紧)
+     d_block_L 初始 4.0 (= 1·2²: 取消×100 后单步贴 ±2 的成本值; EMA 静止点 RMS≈0.89 不变), curriculum 减半地板 = 4 (不收紧)
 
 LLM meta-controller (from prle):
   - 每 7200 步（5 天）窗口边界, episode >= 3 后调用 LLM 分析窗口统计
@@ -120,10 +120,10 @@ def train(num_iterations_H,
     d_block_H = 12.0        # 初值: 每块 sum_c1 预算 (平滑系数曾 0.1→1.0 ×10 重标; 现已回调 0.1, 预算未随动)
     d_block_H_min = 3.0     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    # c2 = C2_SOC_COEFF(100)*(SOC_new−3)² 二次势; 预算 d_block_L = 400 = 100·2²
-    #     (单步贴 ±2 处的成本值; 静止点 EMA=400 → RMS≈√(400/500)≈0.89)
-    d_block_L = 400.0       # 初值: 每块 sum_c2 预算 (二次势标定)
-    d_block_L_min = 400.0   # 收紧地板 = 初值 → max(d/2, 400)≡400, 预算永不收紧:
+    # c2 = (SOC_new−3)² 二次势 (取消×100, C2_SOC_COEFF=1); 预算 d_block_L = 4 = 1·2²
+    #     (单步贴 ±2 处的成本值; 静止点 EMA=4 → RMS≈√(4/5)≈0.89, 与 400/100 的 RMS 相同)
+    d_block_L = 4.0         # 初值: 每块 sum_c2 预算 (二次势标定, 取消×100 后重标)
+    d_block_L_min = 4.0     # 收紧地板 = 初值 → max(d/2, 4)≡4, 预算永不收紧:
                             # SOC 保持软裕度 (静止 RMS≈0.89, 不会随 curriculum 渐渐被钉向 3)
 
     # ---- TD3PRLE: Window statistics for LLM analysis ----
@@ -328,7 +328,7 @@ def train(num_iterations_H,
                 agent_L.update_ema_cost(sum_c2)
                 agent_L.update_lam_ema(d_block_L)
             done_L = True
-        # L 层每步过渡也存上下文 {u_t, SOC_new}: c2 = 100·(SOC_new−3)² 为固定中心
+        # L 层每步过渡也存上下文 {u_t, SOC_new}: c2 = (SOC_new−3)² 为固定中心
         # 二次势 (与风速无关), relabel_c2_substep 重算为恒等, 保留上下文仅为接口兼容
         agent_L.observe_jump(norm_observation_L, original_action_L, r2, c2,
                              norm_observation2_L, done_L,
@@ -667,7 +667,7 @@ def train(num_iterations_H,
                     n_relabeled = agent_H.memory.relabel_all(
                         relabel_r1_substep, relabel_c1_substep)
                     prGreen('TD3PRLE: Relabeled {} H-agent transitions'.format(n_relabeled))
-                    # L-agent buffer: r2 与阈值无关; c2 = 100·(SOC_new−3)² 固定中心二次势
+                    # L-agent buffer: r2 与阈值无关; c2 = (SOC_new−3)² 固定中心二次势
                     # 也与风速无关 (relabel 为恒等), 保留调用仅为与 relabel_c2_substep 接口一致。
                     n_relabeled_L = agent_L.memory.relabel_c2_all(relabel_c2_substep)
                     prGreen('TD3PRLE: Relabeled {} L-agent costs'.format(n_relabeled_L))
