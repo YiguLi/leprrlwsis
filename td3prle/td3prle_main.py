@@ -38,11 +38,12 @@ Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
 
 Discount (γ) settings:
   H 层 (块级语义: transition = 5 步块, target = sum_r1 + γ·V(s')):
-    γ 由 --h_discount_start(0.96) 退火到 --h_discount_end(0.98), 跨度 --h_discount_anneal_episodes(10) 个 episode;
-    γ(x) = 1 − 1/(37.5 − 12.5·cos(π x)), x = clip(episode / 跨度, 0, 1)
-    (等价于在 1/(1−γ) 视野空间余弦缓动: 25 步块 → 50 步块; 两端斜率≈0)
-    每步等效折扣 γ^(1/5): 0.99187 → 0.99597, 时间常数 2.05 h → 4.13 h
-  L 层 (步级语义: transition = 1 步): 固定 γ = --l_discount(0.96), 本轮不退火;
+    【当前设定】退火机制取消 (--h_discount_anneal_episodes = 0), γ 由 --discount 固定为 0.96;
+    每步等效折扣 γ^(1/5) = 0.99187, 时间常数 123 步块 ≈ 2.05 h, 90% 质量 ≈ 4.7 h
+    (退火机制代码保留: 设 --h_discount_anneal_episodes > 0 即恢复
+     γ 从 --h_discount_start(0.96) 按 γ(x)=1−1/(37.5−12.5·cos(πx)) 缓动到 --h_discount_end(0.98),
+     x = clip(episode/跨度, 0, 1); 时间常数 2.05 h → 4.13 h)
+  L 层 (步级语义: transition = 1 步): 固定 γ = --l_discount(0.96), 不退火;
     bootstrap 视野由"每 5 步块强制终止"改为 --l_horizon(1440) 步 (整日级, 不提前截断);
     有效视野仍由 γ 决定: 时间常数 25 步(25 min), 90% 质量 ≈56 步(56 min), 99% ≈113 步(1.9 h)
 
@@ -855,15 +856,16 @@ if __name__ == "__main__":
                         default=200,
                         type=int,
                         help='time without training but only filling the replay memory')
-    parser.add_argument('--discount', default=0.98, type=float,
-                        help='遗留默认折扣; H 层由 --h_discount_* 退火覆盖, L 层由 --l_discount 覆盖')
+    parser.add_argument('--discount', default=0.96, type=float,
+                        help='H 层固定折扣 (块级语义; 退火关闭时生效, 当前设定 0.96)')
     # 0.99
     parser.add_argument('--h_discount_start', default=0.96, type=float,
-                        help='H 层折扣退火起点 (块级语义: H transition = 5 步块)')
+                        help='H 层折扣退火起点 (块级语义: H transition = 5 步块; 仅退火开启时使用)')
     parser.add_argument('--h_discount_end', default=0.98, type=float,
                         help='H 层折扣退火终点 (块级语义)')
-    parser.add_argument('--h_discount_anneal_episodes', default=10, type=int,
-                        help='H 层折扣退火跨度 (episode 数, 每 episode 约 1440 步); <=0 关闭退火')
+    parser.add_argument('--h_discount_anneal_episodes', default=0, type=int,
+                        help='H 层折扣退火跨度 (episode 数); 0 = 【当前设定】取消退火机制, '
+                             'H 层固定用 --discount; >0 则从 --h_discount_start 退火到 --h_discount_end')
     parser.add_argument('--l_discount', default=0.96, type=float,
                         help='L 层固定折扣 (步级语义, 本轮不退火)')
     parser.add_argument('--l_horizon', default=1440, type=int,
@@ -1063,14 +1065,19 @@ if __name__ == "__main__":
                           cost_critic_mode=args.cost_critic_mode)
     agent_L.lam = 100.0
     agent_L.cost_limit = 10.0  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
-    # L 层折扣固定 --l_discount (默认 0.96, 步级语义; 本轮不退火);
-    # H 层折扣在 train() 内按 cos 缓动公式从 --h_discount_start 退火到 --h_discount_end
+    # L 层折扣固定 --l_discount (默认 0.96, 步级语义);
+    # H 层折扣: 退火机制已取消 (--h_discount_anneal_episodes=0), 由 --discount 固定 (默认 0.96);
+    # 如需恢复退火: --h_discount_anneal_episodes 10
     agent_L.discount = args.l_discount
+    if args.h_discount_anneal_episodes > 0:
+        _h_gamma_desc = 'γ_H: {}→{} over {} episode'.format(
+            args.h_discount_start, args.h_discount_end, args.h_discount_anneal_episodes)
+    else:
+        _h_gamma_desc = 'γ_H: 固定 {} (退火机制已取消)'.format(agent_H.discount)
     prYellow('L 层(BESS)策略超参: policy_delay={}, policy_noise={} (H 层 TD3: delay={}, noise={}); '
-             'γ_L={} (L 层视野 {} 步), γ_H: {}→{} over {} episode'.format(
+             'γ_L={} (L 层视野 {} 步), {}'.format(
                  args.l_policy_delay, args.l_policy_noise, args.policy_delay, args.policy_noise,
-                 args.l_discount, args.l_horizon,
-                 args.h_discount_start, args.h_discount_end, args.h_discount_anneal_episodes))
+                 args.l_discount, args.l_horizon, _h_gamma_desc))
     #TODO 是否预训练
     # agent_H.load_weights('output/1_2310S-run18')
     # agent_L.load_weights('output/1_2310S-run18')
