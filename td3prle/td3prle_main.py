@@ -42,9 +42,9 @@ Discount (γ) settings:
     γ(x) = 1 − 1/(37.5 − 12.5·cos(π x)), x = clip(episode / 跨度, 0, 1)
     (等价于在 1/(1−γ) 视野空间余弦缓动: 25 步块 → 50 步块; 两端斜率≈0)
     每步等效折扣 γ^(1/5): 0.99187 → 0.99597, 时间常数 2.05 h → 4.13 h
-  L 层 (步级语义: transition = 1 步): 固定 γ = --l_discount(0.95), 本轮不退火;
+  L 层 (步级语义: transition = 1 步): 固定 γ = --l_discount(0.96), 本轮不退火;
     bootstrap 视野由"每 5 步块强制终止"改为 --l_horizon(1440) 步 (整日级, 不提前截断);
-    有效视野仍由 γ 决定: 时间常数 20 步(20 min), 90% 质量 ≈45 步(45 min)
+    有效视野仍由 γ 决定: 时间常数 25 步(25 min), 90% 质量 ≈56 步(56 min), 99% ≈113 步(1.9 h)
 
 LLM meta-controller (from prle):
   - 每 7200 步（5 天）窗口边界, episode >= 3 后调用 LLM 分析窗口统计
@@ -370,8 +370,8 @@ def train(num_iterations_H,
         # 旧语义: 每块末 done_L=True → L 层 bootstrap 在块末被截断, 有效视野 ≤5 步;
         # 新语义: L 层按自身计数 --l_horizon (默认 1440 步 = 24h) 终止, 与 max_episode_length
         #   解耦; env.step 恒返回 done=False, 故再用 done (H 层 episode 终止) 兜底。
-        # L 层折扣固定 --l_discount (默认 0.95, 步级语义, 本轮不退火):
-        #   时间常数 1/(1-γ)=20 步 ≈ 20 min, 90% 质量视野 ≈45 步 ≈45 min;
+        # L 层折扣固定 --l_discount (默认 0.96, 步级语义, 本轮不退火):
+        #   时间常数 1/(1-γ)=25 步 ≈ 25 min, 90% 质量视野 ≈56 步 ≈56 min;
         #   即 1440 步的意义是"不在块末被截断", 有效视野仍由 γ 决定 (若要日内 SOC 级
         #   视野需提高 γ_L, 例如 0.99→1.7h, 0.998→8.3h)。
         l_episode_steps += 1
@@ -853,7 +853,7 @@ if __name__ == "__main__":
                         help='H 层折扣退火终点 (块级语义)')
     parser.add_argument('--h_discount_anneal_episodes', default=10, type=int,
                         help='H 层折扣退火跨度 (episode 数, 每 episode 约 1440 步); <=0 关闭退火')
-    parser.add_argument('--l_discount', default=0.95, type=float,
+    parser.add_argument('--l_discount', default=0.96, type=float,
                         help='L 层固定折扣 (步级语义, 本轮不退火)')
     parser.add_argument('--l_horizon', default=1440, type=int,
                         help='L 层 bootstrap 视野 (步): 5=旧"每块强制终止", 1440=整日级不提前截断')
@@ -1052,7 +1052,7 @@ if __name__ == "__main__":
                           cost_critic_mode=args.cost_critic_mode)
     agent_L.lam = 100.0
     agent_L.cost_limit = 10.0  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
-    # L 层折扣固定 --l_discount (默认 0.95, 步级语义; 本轮不退火);
+    # L 层折扣固定 --l_discount (默认 0.96, 步级语义; 本轮不退火);
     # H 层折扣在 train() 内按 cos 缓动公式从 --h_discount_start 退火到 --h_discount_end
     agent_L.discount = args.l_discount
     prYellow('L 层(BESS)策略超参: policy_delay={}, policy_noise={} (H 层 TD3: delay={}, noise={}); '
