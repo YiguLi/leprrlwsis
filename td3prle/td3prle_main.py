@@ -47,7 +47,7 @@ Discount (γ) settings:
     有效视野仍由 γ 决定: 时间常数 25 步(25 min), 90% 质量 ≈56 步(56 min), 99% ≈113 步(1.9 h)
 
 LLM meta-controller (from prle):
-  - 每 7200 步（5 天）窗口边界, episode >= 3 后调用 LLM 分析窗口统计
+  - 每 7200 步（5 天）窗口边界, 【强制】episode >= 10 后才调用 LLM 分析窗口统计
     并给出 (adjust_low_max, adjust_high_min) 阈值调整建议;
   - 调整范围硬约束: 阈值只能在 原设定 ±1 m/s 内变化 (整个训练过程);
   - 阈值实际变化后, 对 H 层回放缓冲 relabel_all() 重算奖励/成本;
@@ -160,7 +160,11 @@ def train(num_iterations_H,
     # ---- TD3PRLE: Window statistics for LLM analysis ----
     window_stats = WindowStats()
     threshold_history = []         # records of past adjustments
-    min_episodes_before_llm = 3    # cold-start protection: wait for initial convergence
+    # 【强制设定】10 个 episode 之前一律不允许 LLM 介入调整 (硬约束, 不接受命令行覆盖):
+    #   - 窗口边界在 step % 7200 == 0 (每 5 个 episode); 门槛=10 → 最早可介入的边界是
+    #     step 14400 (episode 10), 之前的边界 (7200, episode 5) 一律跳过;
+    #   - 与 H 层折扣退火跨度 (10 episode) 对齐: 退火结束前不允许元控制器改阈值。
+    min_episodes_before_llm = 10
     block_ctx_H = []               # accumulates sub-step context for current 5-step block
 
     # ---- TD3PRLE: Create LLM call function (reads from config file by default) ----
@@ -168,6 +172,13 @@ def train(num_iterations_H,
                                      config_path=args.llm_config)
     prCyan('TD3PRLE: LLM ready (provider={})'.format(
         args.llm_provider or 'from config'))
+    # 【强制设定】把硬约束打进 run 日志, 便于事后核对 (窗口边界: step % 7200 == 0)
+    _ep_len = max_episode_length if max_episode_length else 1440
+    _first_boundary = 7200 * int(np.ceil(
+        min_episodes_before_llm * _ep_len / 7200.0))
+    prCyan('TD3PRLE: [HARD] LLM 阈值调整在 episode < {} 前一律禁止 '
+           '(首个允许的窗口边界: step {} ≈ episode {})'.format(
+               min_episodes_before_llm, _first_boundary, min_episodes_before_llm))
 
     # ---- TD3PRLE: Startup API connectivity test ----
     prCyan('TD3PRLE: Testing LLM API connectivity...')
