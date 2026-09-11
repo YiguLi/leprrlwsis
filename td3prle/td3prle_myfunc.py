@@ -569,11 +569,11 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 #   被 -5×penalty 主导 (曾达 150+/步且不封顶), profit-critic 学到无底洞负 Q。
 #   封顶后界外仍保留线性"拉回界内"梯度 (软墙), 只是破坏力被封死。
 #   沿革: 系数 200→100 (b50d1bc) 且首次封顶 100 (b50d1bc) → 封顶 50 (ca8bf09)
-#         → 本轮封顶 50→200: 与 100/MW 系数配套, 即总越界量达 2 MW 才触顶
-#         (旧值 0.5 MW 触顶); 单步最坏 -200, 块级 -1000。
+#         → 试 200 → 本轮定 100: 与 100/MW 系数配套, 即总越界量达 1 MW 触顶;
+#         单步最坏 -100, 块级 -500 (≈ 0.5 个正常块利润, 与 run162 风暴前的标定同量级)。
 # L 层 (BESS): penalty_NN_L 不进学习信号 (仅日志/缓冲列), 系数维持 200 不变。
 BOUND_PEN_COEF_H = 100.0   # H 每维越界惩罚系数
-PENALTY_NN_H_CAP = 200.0   # penalty_NN_H 总封顶 (单位: 与 r1 相同的 RMB 刻度)
+PENALTY_NN_H_CAP = 100.0   # penalty_NN_H 总封顶 (单位: 与 r1 相同的 RMB 刻度)
 BOUND_PEN_COEF_L = 200.0   # L 每维越界惩罚系数 (不变)
 
 
@@ -581,7 +581,7 @@ def CheckAction(action, charge=10.):
     """Clip actions to feasible ranges. WT: [0,0.5], Signal: [-0.5,0.5], Bat: [-charge,charge].
 
     penalty_NN_H (H 动作分支, len 5/6): 每维越界量 × BOUND_PEN_COEF_H(=100),
-    总和再封顶 PENALTY_NN_H_CAP(=200)。L 动作 (len 1) 系数不变。
+    总和再封顶 PENALTY_NN_H_CAP(=100)。L 动作 (len 1) 系数不变。
     """
     penalty = 0
     SIGNAL_MIN, SIGNAL_MAX = -0.5, 0.5
