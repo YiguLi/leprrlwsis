@@ -23,8 +23,10 @@ Parent packages:
 Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
   Upper (H): r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
                   - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
-                  (wT = wT_u(u)×wT_p(pr), wB = wB_p(pr)×wB_soc(SOC,wind),
-                   SOC 贴边 → BESS 收益 ×0.7; 与 td3prrbb 一致)
+                  (wT = wT_u(u)×wT_p(pr), wB = wB_p(pr);
+                   【本轮变更】取消"按 SOC 位置折减 BESS 盈利 ×0.7"的机制,
+                   WB_SOC_OUTSIDE 0.7 → 1.0, SOC 位置不再影响 H 的收益权重;
+                   与 td3prrbb 的差异仅在于此)
              c1 = C1_RISK[wind]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
                   + 块末结算项 c1_soc_track = 10*|soc_target − SOC_块末|
   Lower (L): r2 = -100*clip_amount   (信号改为 SOC 目标后取消影子套利项)
@@ -81,6 +83,7 @@ from td3prle.td3prle_myfunc import (
     relabel_r1_substep, relabel_c1_substep,
     relabel_c2_substep,
     signal_to_soc_target, soc_track_penalty,
+    WB_PRICE, WB_SOC_OUTSIDE, WT_PRICE, WT_WIND,
 )
 from td3prle.td3prle_llm import (
     WindowStats, llm_analyze_thresholds, create_llm_call_fn,
@@ -982,6 +985,11 @@ if __name__ == "__main__":
     if upload:
         writer = SummaryWriter(args.output)
         writer.add_scalar('seed', args.seed)
+
+    # ---- H 层收益权重留痕 (本轮取消 SOC 贴边折减: wB 只由电价档决定) ----
+    prCyan('H 层收益权重: wT=wT_u(u)×wT_p(pr), wB=wB_p(pr) — SOC 位置不影响权重 '
+           '(WB_SOC_OUTSIDE={}, =1.0 表示折减已取消); WB_PRICE={}, WT_WIND={}, WT_PRICE={}'.format(
+               WB_SOC_OUTSIDE, WB_PRICE, WT_WIND, WT_PRICE))
 
     env = WindBattery(max_E, args.nb_turbine, upload, engine)
     env_test = WindBattery(max_E, args.nb_turbine, upload, engine)
