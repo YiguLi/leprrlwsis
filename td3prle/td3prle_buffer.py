@@ -10,7 +10,7 @@ Context storage:
   - H-agent transitions: list of 5 sub-step dicts
     {'u', 'pr', 'turbine_raw', 'bess_raw', 'degradation', 'penalty_NN_H', 'P_F'}
   - L-agent transitions: list of 1 sub-step dict {'u', 'SOC_new'}
-    (c2 = (SOC_new−3)² 固定中心二次势, C2_SOC_COEFF=1, 与风速无关; relabel_c2_all() 现为
+    (c2 = 100*(SOC_new−3)² 固定中心二次势, 与风速无关; relabel_c2_all() 现为
      恒等重算, 保留上下文仅为接口兼容)
 
 Base class: PER_buffer.PrioritizedReplayBuffer

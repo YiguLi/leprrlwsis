@@ -27,28 +27,17 @@ Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
                    SOC 贴边 → BESS 收益 ×0.7; 与 td3prrbb 一致)
              c1 = C1_RISK[wind]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
   Lower (L): r2 = 10*shadow_profit - 100*clip_amount
-             c2 = (SOC_new−3)²   (连续二次 SOC 势, 中心 3; 取消×100 系数, 削弱居中先验放开套利)
+             c2 = 100*(SOC_new−3)²   (连续二次 SOC 势, 中心 3; 沿革: 线性 dev 700→60→100 → 二次 100)
 
 Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
      lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 50, 500), 初始 100.0
      d_block_H 初始 12.0 (c1 平滑系数已回调 0.1, 预算未随动), curriculum 连续 100 次满足则减半, 地板 3.0
   L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 2, 200), 初始 100.0
-     d_block_L 初始 4.0 (= 1·2²: 取消×100 后单步贴 ±2 的成本值; EMA 静止点 RMS≈0.89 不变), curriculum 减半地板 = 4 (不收紧)
-
-Discount (γ) settings:
-  H 层 (块级语义: transition = 5 步块, target = sum_r1 + γ·V(s')):
-    【当前设定】退火机制取消 (--h_discount_anneal_episodes = 0), γ 由 --discount 固定为 0.96;
-    每步等效折扣 γ^(1/5) = 0.99187, 时间常数 123 步块 ≈ 2.05 h, 90% 质量 ≈ 4.7 h
-    (退火机制代码保留: 设 --h_discount_anneal_episodes > 0 即恢复
-     γ 从 --h_discount_start(0.96) 按 γ(x)=1−1/(37.5−12.5·cos(πx)) 缓动到 --h_discount_end(0.98),
-     x = clip(episode/跨度, 0, 1); 时间常数 2.05 h → 4.13 h)
-  L 层 (步级语义: transition = 1 步): 固定 γ = --l_discount(0.96), 不退火;
-    bootstrap 视野由"每 5 步块强制终止"改为 --l_horizon(1440) 步 (整日级, 不提前截断);
-    有效视野仍由 γ 决定: 时间常数 25 步(25 min), 90% 质量 ≈56 步(56 min), 99% ≈113 步(1.9 h)
+     d_block_L 初始 400.0 (= 100·2²: 二次势下单步贴 ±2 的成本值; EMA 静止点 RMS≈0.89), curriculum 减半地板 = 400 (不收紧)
 
 LLM meta-controller (from prle):
-  - 每 7200 步（5 天）窗口边界, 【强制】episode >= 10 后才调用 LLM 分析窗口统计
+  - 每 7200 步（5 天）窗口边界, episode >= 3 后调用 LLM 分析窗口统计
     并给出 (adjust_low_max, adjust_high_min) 阈值调整建议;
   - 调整范围硬约束: 阈值只能在 原设定 ±1 m/s 内变化 (整个训练过程);
   - 阈值实际变化后, 对 H 层回放缓冲 relabel_all() 重算奖励/成本;
@@ -98,24 +87,6 @@ import matlab.engine
 engine = matlab.engine.start_matlab()
 
 
-def h_discount_anneal(x, gamma_start, gamma_end):
-    """H 层折扣退火: 在 1/(1-γ) (有效视野步数) 空间做余弦缓动。
-
-    γ(x) = 1 - 1/D(x),  D(x) = (D0+D1)/2 - (D1-D0)/2·cos(π x),
-    D0 = 1/(1-γ_start), D1 = 1/(1-γ_end), x ∈ [0,1] 为退火进度 (开始→结束)。
-
-    γ_start=0.96, γ_end=0.98 时 D0=25, D1=50 → D = 37.5 - 12.5·cos(π x),
-    即 γ(x) = 1 - 1/(37.5 - 12.5·cos(π x)) (本次方案指定公式); 两端斜率≈0, 中段最快。
-
-    注意: H 层 transition 是 5 步块 (块级语义), γ 作用于块;
-    每步等效折扣 = γ^(1/5): 0.96 → 0.99187 (时间常数 2.05 h), 0.98 → 0.99597 (4.13 h)。
-    """
-    d0 = 1.0 / (1.0 - gamma_start)
-    d1 = 1.0 / (1.0 - gamma_end)
-    d = 0.5 * (d0 + d1) - 0.5 * (d1 - d0) * np.cos(np.pi * float(x))
-    return 1.0 - 1.0 / d
-
-
 # TD3PRLE: TD3 + PRLE 动态阈值分段奖励 + CL + LLM 元控制
 def train(num_iterations_H,
           agent_H,
@@ -140,9 +111,6 @@ def train(num_iterations_H,
     # 替代原跨 episode 继承 (prev_soc) — 保证日初 SOC 覆盖安全带，避免长期锁死窄带
     soc_reset_low, soc_reset_high = 0.5, 5.5
     time = 1/60
-    # L 层独立 episode 计数 (视野 --l_horizon, 默认 1440 步; 与 max_episode_length 解耦,
-    # 由 "每 5 步块强制终止" 改为整日级 bootstrap 视野)
-    l_episode_steps = 0
     # Curriculum learning: consecutive steps where EMA cost <= d_block
     consecutive_satisfied_H = 0
     consecutive_satisfied_L = 0
@@ -152,20 +120,16 @@ def train(num_iterations_H,
     d_block_H = 12.0        # 初值: 每块 sum_c1 预算 (平滑系数曾 0.1→1.0 ×10 重标; 现已回调 0.1, 预算未随动)
     d_block_H_min = 3.0     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    # c2 = (SOC_new−3)² 二次势 (取消×100, C2_SOC_COEFF=1); 预算 d_block_L = 4 = 1·2²
-    #     (单步贴 ±2 处的成本值; 静止点 EMA=4 → RMS≈√(4/5)≈0.89, 与 400/100 的 RMS 相同)
-    d_block_L = 4.0         # 初值: 每块 sum_c2 预算 (二次势标定, 取消×100 后重标)
-    d_block_L_min = 4.0     # 收紧地板 = 初值 → max(d/2, 4)≡4, 预算永不收紧:
+    # c2 = C2_SOC_COEFF(100)*(SOC_new−3)² 二次势; 预算 d_block_L = 400 = 100·2²
+    #     (单步贴 ±2 处的成本值; 静止点 EMA=400 → RMS≈√(400/500)≈0.89)
+    d_block_L = 400.0       # 初值: 每块 sum_c2 预算 (二次势标定)
+    d_block_L_min = 400.0   # 收紧地板 = 初值 → max(d/2, 400)≡400, 预算永不收紧:
                             # SOC 保持软裕度 (静止 RMS≈0.89, 不会随 curriculum 渐渐被钉向 3)
 
     # ---- TD3PRLE: Window statistics for LLM analysis ----
     window_stats = WindowStats()
     threshold_history = []         # records of past adjustments
-    # 【强制设定】10 个 episode 之前一律不允许 LLM 介入调整 (硬约束, 不接受命令行覆盖):
-    #   - 窗口边界在 step % 7200 == 0 (每 5 个 episode); 门槛=10 → 最早可介入的边界是
-    #     step 14400 (episode 10), 之前的边界 (7200, episode 5) 一律跳过;
-    #   - 与 H 层折扣退火跨度 (10 episode) 对齐: 退火结束前不允许元控制器改阈值。
-    min_episodes_before_llm = 10
+    min_episodes_before_llm = 3    # cold-start protection: wait for initial convergence
     block_ctx_H = []               # accumulates sub-step context for current 5-step block
 
     # ---- TD3PRLE: Create LLM call function (reads from config file by default) ----
@@ -173,13 +137,6 @@ def train(num_iterations_H,
                                      config_path=args.llm_config)
     prCyan('TD3PRLE: LLM ready (provider={})'.format(
         args.llm_provider or 'from config'))
-    # 【强制设定】把硬约束打进 run 日志, 便于事后核对 (窗口边界: step % 7200 == 0)
-    _ep_len = max_episode_length if max_episode_length else 1440
-    _first_boundary = 7200 * int(np.ceil(
-        min_episodes_before_llm * _ep_len / 7200.0))
-    prCyan('TD3PRLE: [HARD] LLM 阈值调整在 episode < {} 前一律禁止 '
-           '(首个允许的窗口边界: step {} ≈ episode {})'.format(
-               min_episodes_before_llm, _first_boundary, min_episodes_before_llm))
 
     # ---- TD3PRLE: Startup API connectivity test ----
     prCyan('TD3PRLE: Testing LLM API connectivity...')
@@ -216,13 +173,6 @@ def train(num_iterations_H,
             norm_observation = Normalize(observation)
             agent_H.reset(norm_observation)
 
-        # ---- H 层折扣退火 (块级语义): γ 从 --h_discount_start 缓动到 --h_discount_end ----
-        # x = episode / 退火跨度 ∈[0,1] (episode 0 处 x=0); γ(x) = 1 − 1/(37.5 − 12.5·cos(πx))
-        # 即 1/(1−γ) 视野从 25 步(块) 缓动到 50 步(块); <=0 关闭退火 (沿用 --discount)。
-        if args.h_discount_anneal_episodes > 0:
-            _x = float(np.clip(episode / float(args.h_discount_anneal_episodes), 0.0, 1.0))
-            agent_H.discount = h_discount_anneal(_x, args.h_discount_start, args.h_discount_end)
-
         # agent pick action 上层选择动作
         if episode_steps % 5 == 0:
             sum_r1 = 0
@@ -250,8 +200,7 @@ def train(num_iterations_H,
         norm_observation_L = build_L_obs_distilled(
             observation, pw_tru, applied_action_H, rbb_info_obs)
         prPurple('--L-- obs = {}.'.format(round_list(norm_observation_L,3)))
-        # 下层 episode 语义已改: L 层 bootstrap 视野 = --l_horizon (默认 1440 步, 整日级),
-        # 不再每 5 步块终止; 此处 reset 仅重置 agent_L 的观测链 (与终止语义无关)
+        # 下层每一个5-step都是一个episode
         if episode_steps % 5 == 0:
             agent_L.reset(norm_observation_L)
             pb_l = list()
@@ -378,24 +327,13 @@ def train(num_iterations_H,
             if step > args.warmup:
                 agent_L.update_ema_cost(sum_c2)
                 agent_L.update_lam_ema(d_block_L)
-        # ---- L 层 episode 终止: 由"每 5 步块强制终止"改为"整日级视野" ----
-        # 旧语义: 每块末 done_L=True → L 层 bootstrap 在块末被截断, 有效视野 ≤5 步;
-        # 新语义: L 层按自身计数 --l_horizon (默认 1440 步 = 24h) 终止, 与 max_episode_length
-        #   解耦; env.step 恒返回 done=False, 故再用 done (H 层 episode 终止) 兜底。
-        # L 层折扣固定 --l_discount (默认 0.96, 步级语义, 本轮不退火):
-        #   时间常数 1/(1-γ)=25 步 ≈ 25 min, 90% 质量视野 ≈56 步 ≈56 min;
-        #   即 1440 步的意义是"不在块末被截断", 有效视野仍由 γ 决定 (若要日内 SOC 级
-        #   视野需提高 γ_L, 例如 0.99→1.7h, 0.998→8.3h)。
-        l_episode_steps += 1
-        done_L = bool(done) or (args.l_horizon > 0 and l_episode_steps >= args.l_horizon)
-        # L 层每步过渡也存上下文 {u_t, SOC_new}: c2 = (SOC_new−3)² 为固定中心
+            done_L = True
+        # L 层每步过渡也存上下文 {u_t, SOC_new}: c2 = 100·(SOC_new−3)² 为固定中心
         # 二次势 (与风速无关), relabel_c2_substep 重算为恒等, 保留上下文仅为接口兼容
         agent_L.observe_jump(norm_observation_L, original_action_L, r2, c2,
                              norm_observation2_L, done_L,
                              context=[{'u': float(observation[1]),
                                        'SOC_new': float(observation2[2])}])
-        if done_L:
-            l_episode_steps = 0
 
         if step > args.warmup:
             #--------------------Update----------------------
@@ -534,10 +472,6 @@ def train(num_iterations_H,
                 'lam1': agent_H.lam, 'lam2': agent_L.lam,
                 'd_block_H': d_block_H,
                 'ema_c1_H': agent_H.ema_cost,
-                # 折扣因子追踪 (H 层退火中; L 层固定) + L 层自身 episode 计数
-                'discount_H': agent_H.discount,
-                'discount_L': agent_L.discount,
-                'l_episode_steps': l_episode_steps,
                 # RBB metrics
                 'pb_original': rbb_info['pb_original'],
                 'pbrule': rbb_info['pbrule'],
@@ -610,9 +544,6 @@ def train(num_iterations_H,
             writer.add_scalar('lam2', agent_L.lam, step)
             writer.add_scalar('d1', d_block_H, step)
             writer.add_scalar('d2', agent_L.cost_limit, step)
-            # 折扣因子 (H 层退火轨迹可在此核对)
-            writer.add_scalar('discount_H', agent_H.discount, step)
-            writer.add_scalar('discount_L', agent_L.discount, step)
             if agent_H.ema_cost is not None:
                 writer.add_scalar('ema_c1_H', agent_H.ema_cost, step)
             writer.add_scalar('soc', float(observation[2]), step)
@@ -736,7 +667,7 @@ def train(num_iterations_H,
                     n_relabeled = agent_H.memory.relabel_all(
                         relabel_r1_substep, relabel_c1_substep)
                     prGreen('TD3PRLE: Relabeled {} H-agent transitions'.format(n_relabeled))
-                    # L-agent buffer: r2 与阈值无关; c2 = (SOC_new−3)² 固定中心二次势
+                    # L-agent buffer: r2 与阈值无关; c2 = 100·(SOC_new−3)² 固定中心二次势
                     # 也与风速无关 (relabel 为恒等), 保留调用仅为与 relabel_c2_substep 接口一致。
                     n_relabeled_L = agent_L.memory.relabel_c2_all(relabel_c2_substep)
                     prGreen('TD3PRLE: Relabeled {} L-agent costs'.format(n_relabeled_L))
@@ -856,20 +787,8 @@ if __name__ == "__main__":
                         default=200,
                         type=int,
                         help='time without training but only filling the replay memory')
-    parser.add_argument('--discount', default=0.96, type=float,
-                        help='H 层固定折扣 (块级语义; 退火关闭时生效, 当前设定 0.96)')
+    parser.add_argument('--discount', default=0.98, type=float, help='')
     # 0.99
-    parser.add_argument('--h_discount_start', default=0.96, type=float,
-                        help='H 层折扣退火起点 (块级语义: H transition = 5 步块; 仅退火开启时使用)')
-    parser.add_argument('--h_discount_end', default=0.98, type=float,
-                        help='H 层折扣退火终点 (块级语义)')
-    parser.add_argument('--h_discount_anneal_episodes', default=0, type=int,
-                        help='H 层折扣退火跨度 (episode 数); 0 = 【当前设定】取消退火机制, '
-                             'H 层固定用 --discount; >0 则从 --h_discount_start 退火到 --h_discount_end')
-    parser.add_argument('--l_discount', default=0.96, type=float,
-                        help='L 层固定折扣 (步级语义, 本轮不退火)')
-    parser.add_argument('--l_horizon', default=1440, type=int,
-                        help='L 层 bootstrap 视野 (步): 5=旧"每块强制终止", 1440=整日级不提前截断')
     parser.add_argument('--bsize', default=32, type=int,
                         help='minibatch size')  #64
     parser.add_argument('--rmsize',
@@ -1065,19 +984,8 @@ if __name__ == "__main__":
                           cost_critic_mode=args.cost_critic_mode)
     agent_L.lam = 100.0
     agent_L.cost_limit = 10.0  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
-    # L 层折扣固定 --l_discount (默认 0.96, 步级语义);
-    # H 层折扣: 退火机制已取消 (--h_discount_anneal_episodes=0), 由 --discount 固定 (默认 0.96);
-    # 如需恢复退火: --h_discount_anneal_episodes 10
-    agent_L.discount = args.l_discount
-    if args.h_discount_anneal_episodes > 0:
-        _h_gamma_desc = 'γ_H: {}→{} over {} episode'.format(
-            args.h_discount_start, args.h_discount_end, args.h_discount_anneal_episodes)
-    else:
-        _h_gamma_desc = 'γ_H: 固定 {} (退火机制已取消)'.format(agent_H.discount)
-    prYellow('L 层(BESS)策略超参: policy_delay={}, policy_noise={} (H 层 TD3: delay={}, noise={}); '
-             'γ_L={} (L 层视野 {} 步), {}'.format(
-                 args.l_policy_delay, args.l_policy_noise, args.policy_delay, args.policy_noise,
-                 args.l_discount, args.l_horizon, _h_gamma_desc))
+    prYellow('L 层(BESS)策略超参: policy_delay={}, policy_noise={} (H 层 TD3: delay={}, noise={})'.format(
+        args.l_policy_delay, args.l_policy_noise, args.policy_delay, args.policy_noise))
     #TODO 是否预训练
     # agent_H.load_weights('output/1_2310S-run18')
     # agent_L.load_weights('output/1_2310S-run18')

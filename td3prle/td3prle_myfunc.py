@@ -284,11 +284,8 @@ SOC_SAFE_RANGES = {
 
 # c2 系数 (二次 SOC 势, 中心 SOC=3): c2 = C2_SOC_COEFF * (SOC_new − 3.0)²。
 # 连续且 C¹, 不再依赖风速档安全带 (L 层 relabel 变为恒等); 与 H 侧 SOC_SAFE_RANGES 仅统计口径相关。
-# td3prle 调参沿革: 线性 700 → 60 → 100 → 二次势 100·(SOC−3)² → 取消×100 系数
-#   (C2_SOC_COEFF 100→1, c2 = (SOC−3)²; d_block_L 同步 400→4 = 1·2², lam2 上下限/初值不变):
-#   削弱 SOC 居中先验 100 倍以放开 BESS 套利自由度; SOC 安全仍由 RBB 可行域
-#   (pbrulemin/max 随 SOC) 与 r2 的 100·clip_amount 兜底。
-C2_SOC_COEFF = 1.0
+# td3prle 调参沿革: 线性 700 → 60 → 100 → 二次势 100·(SOC−3)²。
+C2_SOC_COEFF = 100.0
 
 
 def Cal_soc_deviation(SOC, wind_level='MEDIUM'):
@@ -365,7 +362,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
              （wT/wB 乘法分解: wT=wT_u×wT_p, wB=wB_p×wB_soc, SOC 贴边 ×0.7）
     Upper c1 = C1_RISK[wind档]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
     Lower r2 = 10*shadow_profit - 100*clip_amount
-    Lower c2 = (SOC_new−3)²    (连续二次势, 中心 3; 取消×100 系数)
+    Lower c2 = 100*(SOC_new−3)²    (连续二次势, 中心 3)
 
     Parameters
     ----------
@@ -549,7 +546,7 @@ def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
     """TD3PRLE 蒸馏 L 观测 (5维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10].
 
     与 TD3PER/TD3PRRBB 同步的五维蒸馏观测: 当前可行域 (RBB, 与 pb 无关) + H 影子价格
-    信号 + 自身 SOC + 风速。c2 已改固定中心二次势 (SOC−3)², C2_SOC_COEFF=1 (与风速无关);
+    信号 + 自身 SOC + 风速。c2 已改固定中心二次势 100·(SOC−3)² (与风速无关);
     u 仍保留在观测中, 供可行域/其它风速相关逻辑使用。
     """
     shadow_price = float(applied_action_H[-1]) * 2.0  # (-0.5,0.5) → (-1,1)
