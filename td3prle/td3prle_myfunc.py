@@ -406,8 +406,19 @@ def relabel_c2_substep(u, SOC_new, soc_target=None):
 # 6. Combined Reward Function (forward computation during data collection)
 # =============================================================================
 
+# L 层 pbrule 裁剪惩罚系数 (r2): r2 = -L_CLIP_PEN_COEF * (clip_amount + l_clip_over)
+#   两项同系数、合成同一个惩罚项:
+#   - clip_amount = |pb_original − pbrule|: 送进 RBB 的动作被【可行窗口】夹掉的量;
+#   - l_clip_over : 原始意图被【执行器上限 ±charge(±10 MW)】夹掉的量
+#                   = |original_action_L| − |applied_action_L| (≥0, 由调用方传入)。
+#   动机: 只惩罚窗口裁剪时, 原始意图一旦超过 ±10, 回报在动作维度上是平的
+#   (clip_amount 与 raw 无关) → ∂Q/∂a ≡ 0, 策略无法被拉回区间内 (run165 曾出现
+#   |raw|≈900 MW 而 clip=10 的死区)。加上 l_clip_over 后该方向重新有斜率。
+L_CLIP_PEN_COEF = 100.0
+
+
 def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
-                   penalty_NN_H=0.0, time=1.0 / 60, ptur=None):
+                   penalty_NN_H=0.0, time=1.0 / 60, ptur=None, l_clip_over=0.0):
     """
     PRRBB reward: 机会/风险分离 (与 td3prrbb 一致);
     Upper r1 = wT*pr*ptur*dt + wB*(-pr*pbrule*dt) - 退化 - penalty_NN_H
@@ -415,7 +426,9 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     Upper c1 = C1_RISK[wind档]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
              （H 的 SOC 跟踪惩罚 c1_soc_track 在块末结算, 见 soc_track_penalty,
                不在此逐步入账）
-    Lower r2 = -100*clip_amount   (信号已改为 SOC 目标, 不再有影子套利项)
+    Lower r2 = -100*(clip_amount + l_clip_over)
+             (clip_amount = 窗口裁剪量; l_clip_over = 超越执行器 ±10 的原始意图量;
+              信号已改为 SOC 目标, 不再有影子套利项)
     Lower c2 = 10*(SOC_new − soc_target)²   (目标中心二次势, ×10 惩罚系数)
 
     Parameters
@@ -429,6 +442,9 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     penalty_NN_H : float, upper action boundary penalty
     time         : step duration in hours
     ptur         : float, turbine power output (MW). Must be provided.
+    l_clip_over  : float, L 层原始意图被执行器上限 (±charge, ±10 MW) 夹掉的量
+                   (MW, ≥0): l_clip_over = |original_action_L| − |applied_action_L|.
+                   与 clip_amount 同系数计入 r2 (见 L_CLIP_PEN_COEF)。
 
     Returns
     -------
@@ -473,13 +489,18 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
         c1 = c1_risk_coeff * (0.1 * P_F) + W_GAP * unfeasible_gap
 
     # ==== Lower Level (L) ====
-    # r2: 仅剩 pbrule 裁剪惩罚（信号已改为 SOC 目标, 影子套利项取消:
-    #     L 层由 c2 的目标 SOC 跟踪驱动, 套利机会由 H 通过目标设定体现）
+    # r2: 裁剪惩罚 (两项同系数合成一项):
+    #     (a) clip_amount  — 送进 RBB 的动作被可行窗口夹掉的量;
+    #     (b) l_clip_over  — 原始意图被 CheckAction 夹到 ±charge 之外的部分,
+    #         由调用方传入 (|raw| − |applied|)。
+    #     信号已改为 SOC 目标, 影子套利项取消: L 由 c2 的目标 SOC 跟踪驱动,
+    #     套利机会由 H 通过目标设定体现。
     # c2: 目标中心二次势 c2 = C2_SOC_COEFF*(SOC_new − soc_target)²
     #     (×10 惩罚系数, 梯度连续; 目标由 H 信号给定, 与风速档无关)
     soc_track_err = SOC_new - soc_target          # 有符号偏差 (MWh)
     soc_dev = soc_track_err ** 2                  # 二次势偏差 (SOC−target)²
-    r2 = -100.0 * clip_amount
+    clip_over = max(0.0, float(l_clip_over))      # 超越 ±charge 的原始意图量 (MW)
+    r2 = -L_CLIP_PEN_COEF * (clip_amount + clip_over)
     c2 = C2_SOC_COEFF * soc_dev
 
     # ==== Details ====
@@ -511,6 +532,8 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
         # RBB
         'unfeasible_gap': unfeasible_gap,
         'clip_amount': clip_amount,
+        'clip_over': clip_over,              # 超越执行器 ±charge 的原始意图量 (MW)
+        'clip_pen_total': clip_amount + clip_over,   # r2 惩罚的两个分量之和 (MW)
         # Penalties
         'penalty_NN_H': penalty_NN_H,
         'c1_fluct': c1,
@@ -654,8 +677,12 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
             pb_original=0.0, ptur=float(pw_tru),
             pg_prev=float(obs[-1]), E=float(obs[2]))
         norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs)
-        action_L = agent_L.select_action(norm_obs_L)
-        action_L, penalty_NN_L = CheckAction(action_L)
+        raw_action_L = agent_L.select_action(norm_obs_L)
+        action_L, penalty_NN_L = CheckAction(raw_action_L)
+        # L 层原始意图被 ±charge 夹掉的量 (与训练同口径, 计入 r2 裁剪惩罚)
+        l_clip_over = float(np.sum(np.maximum(
+            np.abs(np.asarray(raw_action_L, dtype=float)) -
+            np.abs(np.asarray(action_L, dtype=float)), 0.0)))
 
         action = np.concatenate((action_H, action_L))
 
@@ -682,7 +709,7 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
         r1, c1, r2, c2, details = Cal_Rew_PRRBB(
             obs, obs2, action_rbb, rbb_info,
             penalty_NN_H=penalty_NN_H, time=time,
-            ptur=ptur,
+            ptur=ptur, l_clip_over=l_clip_over,
         )
 
         sum_r1 += r1
@@ -721,6 +748,7 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
                 'soc_target': details['soc_target'],
                 'soc_track_err': details['soc_track_err'],
                 'c1_soc_track': c1_soc_track,
+                'clip_over': details['clip_over'],
                 'revenue': details['revenue'],
                 'degradation': details['degradation'],
                 'P_F': details['P_F'],
@@ -828,8 +856,12 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             pb_original=0.0, ptur=float(pw_tru),
             pg_prev=float(obs[-1]), E=float(obs[2]))
         norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs)
-        action_L = agent_L.select_action(norm_obs_L)
-        action_L, penalty_NN_L = CheckAction(action_L)
+        raw_action_L = agent_L.select_action(norm_obs_L)
+        action_L, penalty_NN_L = CheckAction(raw_action_L)
+        # L 层原始意图被 ±charge 夹掉的量 (与训练同口径, 计入 r2 裁剪惩罚)
+        l_clip_over = float(np.sum(np.maximum(
+            np.abs(np.asarray(raw_action_L, dtype=float)) -
+            np.abs(np.asarray(action_L, dtype=float)), 0.0)))
 
         action = np.concatenate((action_H, action_L))
 
@@ -855,7 +887,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         r1, c1, r2, c2, details = Cal_Rew_PRRBB(
             obs, obs2, action_rbb, rbb_info,
             penalty_NN_H=penalty_NN_H, time=time,
-            ptur=ptur,
+            ptur=ptur, l_clip_over=l_clip_over,
         )
 
         bi = step // 5
@@ -898,6 +930,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
                 'soc_target': details['soc_target'],
                 'soc_track_err': details['soc_track_err'],
                 'c1_soc_track': c1_soc_track,
+                'clip_over': details['clip_over'],
                 'pbrule': rbb_info['pbrule'],
                 'clip_amount': rbb_info['clip_amount'],
                 'action': action_rbb,
