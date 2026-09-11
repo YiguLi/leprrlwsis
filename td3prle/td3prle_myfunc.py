@@ -12,10 +12,18 @@ current threshold values.
 
 TD3PRLE addition over prle_myfunc.py:
   - build_L_obs_distilled() — 5-dim distilled L observation
-    [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10] (from
+    [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10] (from
     td3prrbb_myfunc.py); prrbb_S_test() and nine_case_test() use it.
 
-奖励函数结构严格对照 td3prrbb (PRRBB 乘法分解), 仅叠加 PRLE 动态阈值层:
+【信号语义 (本轮变更)】上层 H 第 6 维输出 signal 不再是影子价格, 而是 SOC 目标的
+  归一化指令; H 的输出范围不变 ((-0.5, 0.5)), 由【下层】线性映射为物理目标:
+      soc_target = SOC_TARGET_CENTER + SOC_TARGET_SPAN * signal = 3.0 + 5.0*signal
+      → signal = -0.5 / 0 / +0.5  ⇒  目标 SOC = 0.5 / 3.0 / 5.5 MWh
+  H 的"结算"发生在 5 步块末: 目标与实际 SOC 的差值按
+      c1_soc_track = C1_SOC_TRACK * |soc_target − SOC_块末|
+  计入 c1 (约束口, 与波动/不可行缺口共用预算 d_block_H, 由 lam1 对偶驱动)。
+
+奖励函数结构严格对照 td3prrbb (PRRBB 乘法分解), 仅叠加 PRLE 动态阈值层 + SOC 目标层:
 
 Upper (H) r1 (机会侧, 乘法分解, 与 td3prrbb 一致):
   r1 = wT * (pr * ptur * time)            ← 风机收益, wT = wT_u(u) × wT_p(pr)
@@ -28,13 +36,15 @@ Upper (H) r1 (机会侧, 乘法分解, 与 td3prrbb 一致):
 
 Upper (H) c1 (风险侧):
   c1 = C1_RISK[wind] × [10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
+  块末结算再叠加 SOC 跟踪项: c1_soc_track = C1_SOC_TRACK × |soc_target − SOC_块末|
   C1_RISK: LOW=0.8 MEDIUM=1.0 HIGH=1.2, W_GAP=10 (td3prle 调参: 原 50 → 10)
 
 Wind boundaries: 动态 (main 按 --seg 定起点, LLM 每 7200 步在 原设定±1 m/s 内调整)
 
 Lower (L):
-  r2 = 10.0 * shadow_profit - 100.0 * clip_amount
-  c2 = 100.0 * (SOC_new − 3.0)²   (连续二次 SOC 势, 中心 3; 调参沿革: 线性 dev 700→60→100 → 二次 100)
+  r2 = -100.0 * clip_amount      (取消影子套利项: signal 不再是价格, L 由 c2 跟踪驱动)
+  c2 = 10.0 * (SOC_new − soc_target)²   (目标中心二次势, ×10 惩罚系数;
+       沿革: 固定中心 3 线性 dev 700→60→100 → 固定中心 100·(SOC−3)² → 目标中心 10·(SOC−target)²)
 """
 
 import numpy as np
@@ -282,10 +292,58 @@ SOC_SAFE_RANGES = {
 }
 
 
-# c2 系数 (二次 SOC 势, 中心 SOC=3): c2 = C2_SOC_COEFF * (SOC_new − 3.0)²。
-# 连续且 C¹, 不再依赖风速档安全带 (L 层 relabel 变为恒等); 与 H 侧 SOC_SAFE_RANGES 仅统计口径相关。
-# td3prle 调参沿革: 线性 700 → 60 → 100 → 二次势 100·(SOC−3)²。
-C2_SOC_COEFF = 100.0
+# ---- SOC 目标映射 (本轮信号语义): H 信号 (-0.5,0.5) → 目标 SOC [0.5,5.5] MWh ----
+# 上层输出范围不变; 映射在【下层】完成, 使同一物理目标同时供 L 观测、c2 与 H 结算使用。
+SOC_TARGET_CENTER = 3.0     # signal = 0 → 目标 SOC = 3.0 MWh
+SOC_TARGET_SPAN = 5.0       # signal = ±0.5 → 目标 5.5 / 0.5 MWh
+SOC_TARGET_MIN = SOC_TARGET_CENTER - 0.5 * SOC_TARGET_SPAN   # 0.5 MWh
+SOC_TARGET_MAX = SOC_TARGET_CENTER + 0.5 * SOC_TARGET_SPAN   # 5.5 MWh
+
+
+def signal_to_soc_target(signal):
+    """
+    下层映射: 上层 H 信号 signal ∈ (-0.5, 0.5) → SOC 目标 ∈ [0.5, 5.5] MWh。
+
+    线性映射 soc_target = 3.0 + 5.0·signal (-0.5→0.5, 0→3.0, +0.5→5.5)。
+    入参先钳制到 [-0.5, 0.5]: warmup 期 H 用 random_action(), 其第 6 维是
+    uniform(-10, 10) 且不经 CheckAction, 故此处必须自行钳制。
+    """
+    sig = float(np.clip(float(signal), -0.5, 0.5))
+    return SOC_TARGET_CENTER + SOC_TARGET_SPAN * sig
+
+
+# c2 系数 (目标中心二次势): c2 = C2_SOC_COEFF * (SOC_new − soc_target)²。
+# 沿革: 线性 dev 700 → 60 → 100 → 固定中心二次势 100·(SOC−3)² → 本轮改目标中心 + ×10
+#   (C2_SOC_COEFF = 10, 中心 = H 给定的 SOC 目标; d_block_L 同步 400 → 40 = 10·2²,
+#    lam2 上下限/初值不变): L 层按 ×10 计费跟踪 H 的目标偏差。
+C2_SOC_COEFF = 10.0
+
+# H 层块末结算的 SOC 跟踪惩罚系数:
+#   c1_soc_track = C1_SOC_TRACK * |soc_target − SOC_块末|  (MWh 线性计费)
+# 计入 c1 约束口 → 与波动/不可行缺口共用 d_block_H, 由 lam1 对偶驱动, 使 H 提出
+# 下层实际可达的目标 SOC。
+C1_SOC_TRACK = 10.0
+
+
+def soc_track_penalty(soc_target, soc_actual, coeff=C1_SOC_TRACK):
+    """
+    H 层块末结算: 目标 SOC 与实际 SOC 差值的惩罚 (线性, 单位 MWh)。
+
+    Parameters
+    ----------
+    soc_target : float
+        H 信号映射出的目标 SOC (MWh)。
+    soc_actual : float
+        块末实际 SOC (MWh)。
+    coeff : float
+        惩罚系数 (默认 C1_SOC_TRACK=10)。
+
+    Returns
+    -------
+    penalty : float
+        coeff * |soc_target − soc_actual| ≥ 0。
+    """
+    return float(coeff) * abs(float(soc_target) - float(soc_actual))
 
 
 def Cal_soc_deviation(SOC, wind_level='MEDIUM'):
@@ -304,14 +362,15 @@ def Cal_soc_deviation(SOC, wind_level='MEDIUM'):
     return dev
 
 
-def relabel_c2_substep(u, SOC_new):
+def relabel_c2_substep(u, SOC_new, soc_target=None):
     """
     Recompute c2 for a single L sub-step.
 
-    c2 = C2_SOC_COEFF * (SOC_new - 3.0)^2 — fixed-centre quadratic SOC
-    potential, independent of wind thresholds. u is kept in the signature
-    only for PRLEBuffer.relabel_c2_all call compatibility; relabeling is now
-    effectively the identity (the quadratic potential has no wind dependence).
+    c2 = C2_SOC_COEFF * (SOC_new − soc_target)² — target-centred quadratic
+    SOC potential (soc_target comes from the H signal, so it is independent
+    of the wind thresholds). u is kept in the signature only for
+    PRLEBuffer.relabel_c2_all call compatibility; relabeling is the identity
+    as long as the stored soc_target is passed back in.
 
     Parameters
     ----------
@@ -319,35 +378,19 @@ def relabel_c2_substep(u, SOC_new):
         Wind speed at the decision step (m/s); UNUSED (interface only).
     SOC_new : float
         SOC at the next step (MWh).
+    soc_target : float or None
+        Target SOC carried by the H signal for this transition (MWh);
+        None (legacy context entries) falls back to SOC_TARGET_CENTER.
 
     Returns
     -------
     c2 : float
-        Recomputed quadratic SOC potential cost.
+        Recomputed target-centred quadratic SOC cost.
     """
-    soc_dev = (SOC_new - 3.0) ** 2
+    if soc_target is None:
+        soc_target = SOC_TARGET_CENTER
+    soc_dev = (SOC_new - float(soc_target)) ** 2
     return C2_SOC_COEFF * soc_dev
-
-
-def Cal_r2_PER_baseline(pbrule, shadow_price, SOC, wind_level='MEDIUM'):
-    """
-    LEGACY helper (kept for backward compatibility, no longer called in
-    Cal_Rew_PRRBB). The current lower-level reward/cost are computed inline:
-      r2 = 10.0 * shadow_profit - 100.0 * clip_amount
-      c2 = C2_SOC_COEFF * (SOC_new - 3.0)^2   (quadratic SOC potential)
-
-    Historical combined lower-level score (PER-era baseline):
-
-    score = 10.0 * shadow_profit - C2_SOC_COEFF * soc_deviation
-            with soc_deviation = (SOC - 3.0)^2 to match the quadratic potential.
-
-    shadow_profit = -shadow_price * pbrule
-      shadow_price > 0 → encourage discharge (pb < 0 → shadow_profit > 0)
-      shadow_price < 0 → encourage charge    (pb > 0 → shadow_profit > 0)
-    """
-    shadow_profit = -shadow_price * pbrule
-    soc_dev = (SOC - 3.0) ** 2
-    return 10.0 * shadow_profit - C2_SOC_COEFF * soc_dev
 
 
 # =============================================================================
@@ -361,14 +404,18 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     Upper r1 = wT*pr*ptur*dt + wB*(-pr*pbrule*dt) - 退化 - penalty_NN_H
              （wT/wB 乘法分解: wT=wT_u×wT_p, wB=wB_p×wB_soc, SOC 贴边 ×0.7）
     Upper c1 = C1_RISK[wind档]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
-    Lower r2 = 10*shadow_profit - 100*clip_amount
-    Lower c2 = 100*(SOC_new−3)²    (连续二次势, 中心 3)
+             （H 的 SOC 跟踪惩罚 c1_soc_track 在块末结算, 见 soc_track_penalty,
+               不在此逐步入账）
+    Lower r2 = -100*clip_amount   (信号已改为 SOC 目标, 不再有影子套利项)
+    Lower c2 = 10*(SOC_new − soc_target)²   (目标中心二次势, ×10 惩罚系数)
 
     Parameters
     ----------
     observation  : [pr, u, E, P_G_last]
     observation2 : [pr', u', E', P_G]
-    action_rbb   : [a1..a5, shadow_price_signal, pbrule]
+    action_rbb   : [a1..a5, soc_target_signal, pbrule]
+                   (第 6 维 = H 的 SOC 目标信号 ∈ (-0.5,0.5), 由本函数按
+                    下层映射 signal_to_soc_target() 转成物理 SOC 目标)
     rbb_info     : dict from RuleBasedBESS.compute_pbrule()
     penalty_NN_H : float, upper action boundary penalty
     time         : step duration in hours
@@ -392,7 +439,8 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     clip_amount = float(rbb_info['clip_amount'])
     P_F = abs(P_G_new - P_G_old)
 
-    shadow_price = float(action_rbb[5]) * 2.0  # (-0.5, 0.5) → (-1, 1)
+    # 下层映射: H 信号 (-0.5,0.5) → 目标 SOC [0.5,5.5] MWh (输出范围不变)
+    soc_target = signal_to_soc_target(action_rbb[5])
 
     wind_level = get_wind_level(u)
     price_level = get_price_level(pr_old)
@@ -416,12 +464,13 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
         c1 = c1_risk_coeff * (0.1 * P_F) + W_GAP * unfeasible_gap
 
     # ==== Lower Level (L) ====
-    # r2: 影子套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
-    # c2: 连续二次 SOC 势 c2 = C2_SOC_COEFF*(SOC_new−3)² (中心 3, 与风速无关,
-    #     梯度连续; 带内也有轻微向心拖拽, 消除"带内隐形+边界跳变")
-    shadow_profit = -shadow_price * pbrule
-    soc_dev = (SOC_new - 3.0) ** 2     # 二次势偏差 (SOC−3)²
-    r2 = 10.0 * shadow_profit - 100.0 * clip_amount
+    # r2: 仅剩 pbrule 裁剪惩罚（信号已改为 SOC 目标, 影子套利项取消:
+    #     L 层由 c2 的目标 SOC 跟踪驱动, 套利机会由 H 通过目标设定体现）
+    # c2: 目标中心二次势 c2 = C2_SOC_COEFF*(SOC_new − soc_target)²
+    #     (×10 惩罚系数, 梯度连续; 目标由 H 信号给定, 与风速档无关)
+    soc_track_err = SOC_new - soc_target          # 有符号偏差 (MWh)
+    soc_dev = soc_track_err ** 2                  # 二次势偏差 (SOC−target)²
+    r2 = -100.0 * clip_amount
     c2 = C2_SOC_COEFF * soc_dev
 
     # ==== Details ====
@@ -442,9 +491,9 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
         'bess_profit': bess_profit,
         'revenue': turbine_profit + bess_profit,
         'degradation': BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time,
-        'shadow_profit': shadow_profit,
-        'shadow_price': shadow_price,
-        'soc_deviation': soc_dev,
+        'soc_target': soc_target,
+        'soc_track_err': soc_track_err,      # 有符号: SOC_new − soc_target
+        'soc_deviation': soc_dev,            # 二次势 (SOC−target)²
         # Power
         'ptur': ptur,
         'pbrule': pbrule,
@@ -543,17 +592,18 @@ def Original(obs, max_E=6.):
 
 
 def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
-    """TD3PRLE 蒸馏 L 观测 (5维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10].
+    """TD3PRLE 蒸馏 L 观测 (5维): [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10].
 
-    与 TD3PER/TD3PRRBB 同步的五维蒸馏观测: 当前可行域 (RBB, 与 pb 无关) + H 影子价格
-    信号 + 自身 SOC + 风速。c2 已改固定中心二次势 100·(SOC−3)² (与风速无关);
+    与 TD3PER/TD3PRRBB 同步的五维蒸馏观测: 当前可行域 (RBB, 与 pb 无关) +
+    H 的 SOC 目标 (第 3 维, 下游映射后与 SOC 同刻度, 便于网络直接比较"目标 vs 自身")
+    + 自身 SOC + 风速。c2 = 10·(SOC−soc_target)² 为上层给定目标下的二次势;
     u 仍保留在观测中, 供可行域/其它风速相关逻辑使用。
     """
-    shadow_price = float(applied_action_H[-1]) * 2.0  # (-0.5,0.5) → (-1,1)
+    soc_target = signal_to_soc_target(applied_action_H[-1])
     return np.array([
         rbb_info['pbrulemin'] / 10.0,
         rbb_info['pbrulemax'] / 10.0,
-        shadow_price,
+        soc_target / 10.0,
         float(observation[2]) / 10.0,
         float(observation[1]) / 10.0,  # u: 风速 (0~25 → 0~2.5)
     ])
@@ -590,7 +640,7 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
             sum_r1 = 0.0
             sum_c1 = 0.0
 
-        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
+        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
         _, rbb_info_obs = rbb_system.compute_pbrule(
             pb_original=0.0, ptur=float(pw_tru),
             pg_prev=float(obs[-1]), E=float(obs[2]))
@@ -631,6 +681,12 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
         if c1 > 0:
             cvm += 1
 
+        # H 层块末结算 (与训练同口径): 目标 SOC 与实际 SOC 差值惩罚计入 c1 约束口;
+        # cvm 仍只统计波动违规步。
+        c1_soc_track = 0.0
+        if step % 5 == 4:
+            c1_soc_track = soc_track_penalty(details['soc_target'], obs2[2])
+
         if test_csv:
             df = pd.concat([df, pd.DataFrame([{
                 'step': step,
@@ -653,8 +709,9 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
                 'turbine_profit': details['turbine_profit'],
                 'bess_profit': details['bess_profit'],
                 'soc_deviation': details['soc_deviation'],
-                'shadow_profit': details['shadow_profit'],
-                'shadow_price': details['shadow_price'],
+                'soc_target': details['soc_target'],
+                'soc_track_err': details['soc_track_err'],
+                'c1_soc_track': c1_soc_track,
                 'revenue': details['revenue'],
                 'degradation': details['degradation'],
                 'P_F': details['P_F'],
@@ -675,9 +732,9 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
                 np.save(f'{output}/test_s_td3prle.npy', data_list)
 
         episode_reward += (r1 + r2)
-        episode_cost += c1
+        episode_cost += c1 + c1_soc_track
         episode_r1 += r1; episode_r2 += r2
-        episode_c1 += c1; episode_c2 += c2
+        episode_c1 += c1 + c1_soc_track; episode_c2 += c2
 
         norm_obs = norm_obs2
         obs = obs2
@@ -722,6 +779,8 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
     -------
     case_metrics : list of dict (length 9)
         Per-case 5-step mean metrics + cvm + project_wind_levels;
+        'c1' 为结算总成本 = 波动/缺口成本 + 块末 SOC 跟踪项 'c1_soc_track'
+        (cvm 仍按逐步波动 c1>0 统计, 不含 SOC 跟踪项);
         'profit' = the case's 5-step profit sum
         (profit_step = P_G*pr*dt - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*dt).
     overall : dict
@@ -744,6 +803,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
 
     per_case = {i: {'r1': 0.0, 'c1': 0.0, 'r2': 0.0, 'c2': 0.0,
                     'r': 0.0, 'c': 0.0, 'cvm': 0, 'profit': 0.0,
+                    'c1_soc_track': 0.0,
                     'project_winds': set()}
                 for i in range(len(blocks))}
     df = pd.DataFrame()
@@ -754,7 +814,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             action_H, penalty_NN_H = CheckAction(action_H)
             pw_tru = env_test.PowerOutput(obs[1], action_H)
 
-        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
+        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
         _, rbb_info_obs = rbb_system.compute_pbrule(
             pb_original=0.0, ptur=float(pw_tru),
             pg_prev=float(obs[-1]), E=float(obs[2]))
@@ -801,6 +861,15 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             pc['cvm'] += 1
         pc['project_winds'].add(details['wind_level'])
 
+        # H 层块末结算 (与训练同口径): 目标 SOC 与实际 SOC 差值惩罚计入 c1 约束口。
+        # cvm 仍只统计"波动违规步"(按逐步 c1 判定), 不受本项影响。
+        c1_soc_track = 0.0
+        if step % 5 == 4:
+            c1_soc_track = soc_track_penalty(details['soc_target'], obs2[2])
+            pc['c1'] += c1_soc_track
+            pc['c'] += c1_soc_track
+            pc['c1_soc_track'] += c1_soc_track
+
         # profit: 上层利润 = P_G * pr * dt - BESS_DEG_RMB_PER_MWH*max(-pb,0)*dt（与训练 episode_profit 同口径）
         profit_step = obs2[-1] * obs[0] * time - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0.0) * time
         pc['profit'] += profit_step
@@ -817,6 +886,9 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
                 'r1': r1, 'c1': c1, 'r2': r2, 'c2': c2,
                 'r': r1 + r2, 'c': c1,
                 'profit': profit_step,
+                'soc_target': details['soc_target'],
+                'soc_track_err': details['soc_track_err'],
+                'c1_soc_track': c1_soc_track,
                 'pbrule': rbb_info['pbrule'],
                 'clip_amount': rbb_info['clip_amount'],
                 'action': action_rbb,
@@ -840,7 +912,9 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             'wind_level': b['wind_level'],
             'price_level': b['price_level'],
             'r1': pc['r1'] / n_per_case,
+            # c1 = 结算总成本 (波动/缺口 + 块末 SOC 跟踪项); c1_soc_track 为其分量
             'c1': pc['c1'] / n_per_case,
+            'c1_soc_track': pc['c1_soc_track'] / n_per_case,
             'r2': pc['r2'] / n_per_case,
             'c2': pc['c2'] / n_per_case,
             'r': pc['r'] / n_per_case,
@@ -853,6 +927,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
     overall = {
         'r1': float(np.mean([m['r1'] for m in case_metrics])),
         'c1': float(np.mean([m['c1'] for m in case_metrics])),
+        'c1_soc_track': float(np.mean([m['c1_soc_track'] for m in case_metrics])),
         'r2': float(np.mean([m['r2'] for m in case_metrics])),
         'c2': float(np.mean([m['c2'] for m in case_metrics])),
         'r': float(np.mean([m['r'] for m in case_metrics])),

@@ -9,9 +9,9 @@ thresholds (relabel_all), without changing the sample path.
 Context storage:
   - H-agent transitions: list of 5 sub-step dicts
     {'u', 'pr', 'turbine_raw', 'bess_raw', 'degradation', 'penalty_NN_H', 'P_F'}
-  - L-agent transitions: list of 1 sub-step dict {'u', 'SOC_new'}
-    (c2 = 100*(SOC_new−3)² 固定中心二次势, 与风速无关; relabel_c2_all() 现为
-     恒等重算, 保留上下文仅为接口兼容)
+  - L-agent transitions: list of 1 sub-step dict {'u', 'SOC_new', 'soc_target'}
+    (c2 = 10*(SOC_new−soc_target)² 目标中心二次势, 目标由 H 信号给定, 与风速无关;
+     relabel_c2_all() 仍为恒等重算 —— 只要把存档的 soc_target 原样传回) 
 
 Base class: PER_buffer.PrioritizedReplayBuffer
 """
@@ -60,7 +60,7 @@ class PRLEBuffer(PrioritizedReplayBuffer):
         context : list of dicts or None
             H-agent: list of sub-step dicts with keys:
                 'u', 'pr', 'turbine_raw', 'bess_raw', 'degradation', 'penalty_NN_H'
-            L-agent: list of 1 dict with keys 'u', 'SOC_new' (c2 relabel 用)
+            L-agent: list of 1 dict with keys 'u', 'SOC_new', 'soc_target' (c2 relabel 用)
         """
         idx = self._next_idx
         # Call parent's append for the base transition storage + PER tree update
@@ -152,16 +152,17 @@ class PRLEBuffer(PrioritizedReplayBuffer):
         """
         Recompute the stored L-agent costs (c2); rewards (r2) are untouched.
 
-        c2 = C2_SOC_COEFF * (SOC_new - 3.0)^2 is a fixed-centre quadratic
-        potential with NO wind dependence, so relabeling is the identity
-        (each stored cost is recomputed to the same value). The call is kept
-        for interface compatibility with relabel_c2_substep; context entries
-        {'u', 'SOC_new'} remain stored as before.
+        c2 = C2_SOC_COEFF * (SOC_new − soc_target)^2 is a target-centred
+        quadratic potential with NO wind dependence (soc_target comes from the
+        H signal, not from the wind thresholds), so relabeling is the identity
+        as long as the archived soc_target is passed back to the function. The
+        call is kept for interface compatibility with relabel_c2_substep;
+        context entries {'u', 'SOC_new', 'soc_target'} are stored for it.
 
         Parameters
         ----------
         relabel_c2_fn : callable
-            Function with signature relabel_c2_fn(u, SOC_new) → c2.
+            Function with signature relabel_c2_fn(u, SOC_new, soc_target) → c2.
             Typically td3prle_myfunc.relabel_c2_substep.
 
         Returns
@@ -182,6 +183,7 @@ class PRLEBuffer(PrioritizedReplayBuffer):
                 new_cost += relabel_c2_fn(
                     sub['u'],
                     sub['SOC_new'],
+                    sub.get('soc_target'),
                 )
 
             # Tuple is immutable so recreate with the new cost only
