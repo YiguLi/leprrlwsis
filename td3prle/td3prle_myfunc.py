@@ -406,7 +406,8 @@ def relabel_c2_substep(u, SOC_new, soc_target=None):
 # 6. Combined Reward Function (forward computation during data collection)
 # =============================================================================
 
-# L 层 pbrule 裁剪惩罚系数 (r2): r2 = -L_CLIP_PEN_COEF * (clip_amount + l_clip_over)
+# L 层 pbrule 裁剪惩罚系数 (r2): r2 = -min(L_CLIP_PEN_COEF*(clip_amount + l_clip_over),
+#                                          L_CLIP_PEN_TOTAL_CAP)
 #   两项同系数、合成同一个惩罚项:
 #   - clip_amount = |pb_original − pbrule|: 送进 RBB 的动作被【可行窗口】夹掉的量;
 #   - l_clip_over : 原始意图被【执行器上限 ±charge(±10 MW)】夹掉的量
@@ -415,6 +416,15 @@ def relabel_c2_substep(u, SOC_new, soc_target=None):
 #   (clip_amount 与 raw 无关) → ∂Q/∂a ≡ 0, 策略无法被拉回区间内 (run165 曾出现
 #   |raw|≈900 MW 而 clip=10 的死区)。加上 l_clip_over 后该方向重新有斜率。
 L_CLIP_PEN_COEF = 100.0
+
+# 裁剪惩罚【总上限】(RMB/step, 与 r2 同刻度) —— 对 (clip_amount + clip_over) 合计封顶,
+# 等价于"总裁剪量 ≤ 10 MW"。动机与 H 层 PENALTY_NN_H_CAP 相同 (见 b50d1bc):
+#   不封顶时 raw 可无界 (run165 实测 max |raw|≈3719 MW) → 单步 r2 可达 -3.7e5,
+#   块级 -1e6, 配合 PER 的 |TD| 优先级会把利润 critic 单向拉爆 ("越界→重罚→负Q" 风暴)。
+# 取值权衡: 正常运行时 clip 仅 0.02~0.08 MW (罚 2~8 RMB, 远低于上限, 不受影响);
+#   上限只在病态饱和区截断, 而"拉回 ±10 以内"所需的斜率在 0~10 MW 区间已完整保留
+#   (100 RMB/MW)。改这一个常数即可调松紧 (1000 ⇔ 10 MW)。
+L_CLIP_PEN_TOTAL_CAP = 1000.0
 
 
 def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
@@ -426,8 +436,9 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     Upper c1 = C1_RISK[wind档]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
              （H 的 SOC 跟踪惩罚 c1_soc_track 在块末结算, 见 soc_track_penalty,
                不在此逐步入账）
-    Lower r2 = -100*(clip_amount + l_clip_over)
+    Lower r2 = -min(100*(clip_amount + l_clip_over), L_CLIP_PEN_TOTAL_CAP)
              (clip_amount = 窗口裁剪量; l_clip_over = 超越执行器 ±10 的原始意图量;
+              两项合计封顶 L_CLIP_PEN_TOTAL_CAP=1000 RMB/step ⇔ 合计 ≤10 MW;
               信号已改为 SOC 目标, 不再有影子套利项)
     Lower c2 = 10*(SOC_new − soc_target)²   (目标中心二次势, ×10 惩罚系数)
 
@@ -444,7 +455,8 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     ptur         : float, turbine power output (MW). Must be provided.
     l_clip_over  : float, L 层原始意图被执行器上限 (±charge, ±10 MW) 夹掉的量
                    (MW, ≥0): l_clip_over = |original_action_L| − |applied_action_L|.
-                   与 clip_amount 同系数计入 r2 (见 L_CLIP_PEN_COEF)。
+                   与 clip_amount 同系数计入 r2, 两者【合计】受
+                   L_CLIP_PEN_TOTAL_CAP (=1000 RMB/step) 封顶 (见 L_CLIP_PEN_COEF)。
 
     Returns
     -------
@@ -500,7 +512,10 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     soc_track_err = SOC_new - soc_target          # 有符号偏差 (MWh)
     soc_dev = soc_track_err ** 2                  # 二次势偏差 (SOC−target)²
     clip_over = max(0.0, float(l_clip_over))      # 超越 ±charge 的原始意图量 (MW)
-    r2 = -L_CLIP_PEN_COEF * (clip_amount + clip_over)
+    clip_pen_total = clip_amount + clip_over      # 裁剪惩罚的两个分量之和 (MW)
+    clip_pen = L_CLIP_PEN_COEF * clip_pen_total   # 未封顶的惩罚额 (RMB)
+    clip_pen_capped = clip_pen > L_CLIP_PEN_TOTAL_CAP
+    r2 = -min(clip_pen, L_CLIP_PEN_TOTAL_CAP)     # 总上限封顶
     c2 = C2_SOC_COEFF * soc_dev
 
     # ==== Details ====
@@ -533,7 +548,9 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
         'unfeasible_gap': unfeasible_gap,
         'clip_amount': clip_amount,
         'clip_over': clip_over,              # 超越执行器 ±charge 的原始意图量 (MW)
-        'clip_pen_total': clip_amount + clip_over,   # r2 惩罚的两个分量之和 (MW)
+        'clip_pen_total': clip_pen_total,    # r2 惩罚的两个分量之和 (MW)
+        'clip_pen_capped': float(clip_pen_capped),   # 1=本步触到总上限 (RMB 截断)
+        'r2_clip_pen': float(min(clip_pen, L_CLIP_PEN_TOTAL_CAP)),  # 本步实收裁剪惩罚 (RMB, ≥0)
         # Penalties
         'penalty_NN_H': penalty_NN_H,
         'c1_fluct': c1,
@@ -749,6 +766,7 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
                 'soc_track_err': details['soc_track_err'],
                 'c1_soc_track': c1_soc_track,
                 'clip_over': details['clip_over'],
+                'clip_pen_capped': details['clip_pen_capped'],
                 'revenue': details['revenue'],
                 'degradation': details['degradation'],
                 'P_F': details['P_F'],
@@ -931,6 +949,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
                 'soc_track_err': details['soc_track_err'],
                 'c1_soc_track': c1_soc_track,
                 'clip_over': details['clip_over'],
+                'clip_pen_capped': details['clip_pen_capped'],
                 'pbrule': rbb_info['pbrule'],
                 'clip_amount': rbb_info['clip_amount'],
                 'action': action_rbb,

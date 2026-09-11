@@ -29,10 +29,11 @@ Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
                    与 td3prrbb 的差异仅在于此)
              c1 = C1_RISK[wind]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
                   + 块末结算项 c1_soc_track = 10*|soc_target − SOC_块末|
-  Lower (L): r2 = -100*(clip_amount + clip_over)
+  Lower (L): r2 = -min(100*(clip_amount + clip_over), 1000)
              (clip_amount = 送进 RBB 的动作被可行窗口夹掉的量;
               clip_over = 原始意图被 CheckAction 夹到 ±10 MW 之外的部分,
-              两项同系数合成同一个裁剪惩罚, 见 myfunc.L_CLIP_PEN_COEF)
+              两项同系数合成同一个裁剪惩罚, 并受【总上限】封顶 1000 RMB/step
+              ⇔ 合计裁剪量 ≤10 MW; 见 myfunc.L_CLIP_PEN_COEF / _TOTAL_CAP)
              c2 = 10*(SOC_new − soc_target)²   (目标中心二次势, ×10 惩罚系数)
 
 【信号语义 (本轮变更)】H 第 6 维输出 signal 不再是影子价格, 而是 SOC 目标的归一化指令;
@@ -307,9 +308,10 @@ def train(num_iterations_H,
             round(reward_details['degradation'], 3)))
         prGreen('c1 = {} (fluct={})'.format(
             round(c1, 3), round(reward_details['c1_fluct'], 3)))
-        prGreen('r2 = {} (clip={}, clip_over={})'.format(
+        prGreen('r2 = {} (clip={}, clip_over={}, capped={})'.format(
             round(r2, 3), round(reward_details['clip_amount'], 3),
-            round(reward_details['clip_over'], 3)))
+            round(reward_details['clip_over'], 3),
+            int(reward_details['clip_pen_capped'])))
         prGreen('c2 = {} (soc_dev={}, soc_track_err={})'.format(
             round(c2, 3), round(reward_details['soc_deviation'], 3),
             round(reward_details['soc_track_err'], 3)))
@@ -526,6 +528,7 @@ def train(num_iterations_H,
                 'pbrulemax': rbb_info['pbrulemax'],
                 'clip_amount': rbb_info['clip_amount'],
                 'clip_over': reward_details['clip_over'],   # ±10 夹掉的原始意图量 (MW)
+                'clip_pen_capped': reward_details['clip_pen_capped'],  # 1=触到总上限
                 'unfeasible_gap': rbb_info['unfeasible_gap'],
                 'soc': rbb_info['soc'],
                 'is_infeasible': float(rbb_info['is_infeasible']),
@@ -619,6 +622,7 @@ def train(num_iterations_H,
             writer.add_scalar('reward_lower/soc_track_err', reward_details['soc_track_err'], step)
             writer.add_scalar('reward_lower/clip_amount', reward_details['clip_amount'], step)
             writer.add_scalar('reward_lower/clip_over', reward_details['clip_over'], step)
+            writer.add_scalar('reward_lower/clip_pen_capped', reward_details['clip_pen_capped'], step)
 
             # SOC 目标 (H 信号映射后的物理目标) 与块末结算跟踪惩罚
             writer.add_scalar('action/soc_target', soc_target_H, step)
