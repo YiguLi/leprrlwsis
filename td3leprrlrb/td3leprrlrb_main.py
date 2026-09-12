@@ -26,6 +26,9 @@ H: r1 = wT*(pr*ptur*dt) + wB*(-pr*pbrule*dt) - 490*max(-pbrule,0)*dt - penalty_N
     d_block_H 初值 50.0, 地板 5.0; 连续 100 次满足则减半
 
 【本项目新增: LLM 分段微调层】
+    0. 启动自检: __main__ 在解析参数后立刻打印 LLM 配置 (provider/model/掩码 key)
+       并做一次真实连通性测试 (PASSED/FAILED + 耗时), 结果醒目地留在控制台最前面;
+       自检不通过不中断训练, 只降级为占位模式。
     1. 风速分段阈值不再是常量: 启动时按 --seg (percentile/kmeans/expert) 定起点
        (模块默认 7.0/11.0, 即 td3prrlrb 的写死值);
     2. 每 --llm_window 步 (默认 7200 = 5 天) 且 episode >= --llm_min_episodes 时,
@@ -38,6 +41,7 @@ H: r1 = wT*(pr*ptur*dt) + wB*(-pr*pbrule*dt) - 490*max(-pbrule,0)*dt - penalty_N
 """
 import os
 import sys
+import time
 import numpy as np
 import argparse
 from copy import deepcopy
@@ -61,7 +65,7 @@ from td3leprrlrb.td3leprrlrb_myfunc import (
     WT_WIND, WT_PRICE, WB_PRICE, WB_SOC_OUTSIDE,
 )
 from td3leprrlrb.td3leprrlrb_llm import (
-    WindowStats, llm_analyze_thresholds, create_llm_call_fn,
+    WindowStats, llm_analyze_thresholds, create_llm_call_fn, load_llm_config,
 )
 from td3leprrlrb.td3leprrlrb_rule_bess import (
     RuleBasedBESS, SocTracker, block_cap_charge, block_cap_discharge,
@@ -113,7 +117,8 @@ def train(num_iterations_H,
           debug=False,
           upload=False,
           use_csv=False,
-          adj_bounds=None):
+          adj_bounds=None,
+          llm_call_fn=None):
 
     agent_H.is_training = True
     step = episode = episode_steps = 0
@@ -138,27 +143,13 @@ def train(num_iterations_H,
     min_episodes_before_llm = int(getattr(args, 'llm_min_episodes', 3))
     llm_relabel_count = 0                 # 阈值变更次数 (落盘用)
 
-    # ---- LEPRRLRB: 建立 LLM 调用函数 (默认读 td3leprrlrb/llm_config.json) ----
-    llm_call_fn = None
-    try:
-        llm_call_fn = create_llm_call_fn(provider=args.llm_provider,
-                                        config_path=args.llm_config)
-        prCyan('LEPRRLRB: LLM ready (provider={})'.format(
-            args.llm_provider or 'from config'))
-    except Exception as e:
-        prRed('LEPRRLRB: LLM 初始化失败 ({}) — 退化为占位模式 (阈值不调整)'.format(e))
-
-    # ---- LEPRRLRB: 启动连通性自检 (失败则退化为占位模式) ----
-    if llm_call_fn is not None:
-        prCyan('LEPRRLRB: Testing LLM API connectivity...')
-        try:
-            test_response = llm_call_fn('请回复"OK"，不要包含任何其他内容。')
-            prGreen('LEPRRLRB: LLM API test passed. Response: "{}"'.format(
-                str(test_response).strip()[:120]))
-        except Exception as e:
-            prRed('LEPRRLRB: LLM API test FAILED — {}'.format(e))
-            prRed('LEPRRLRB: 训练继续, 但阈值调整将被跳过。')
-            llm_call_fn = None
+    # ---- LEPRRLRB: LLM 调用函数由 __main__ 的【启动自检】构建并传入 ----
+    # (放在 __main__ 而非此处, 是为了让 LLM 连通性验证在运行一开始就打印出来,
+    #  不必等 MATLAB 引擎启动 + 分段计算 + env/agent 构造全部完成。)
+    # llm_call_fn is None ⇒ 占位模式: 阈值永不调整, 行为等价于 td3prrlrb。
+    if llm_call_fn is None:
+        prYellow('LEPRRLRB: LLM 不可用 → 占位模式: 阈值保持起始值不变, '
+                 '行为等价于 td3prrlrb')
 
     if use_csv:
         # 增量落盘: 只把新增行追加进 CSV
@@ -931,6 +922,43 @@ if __name__ == "__main__":
     if args.resume == 'default':
         args.resume = 'output/{}-run0'.format(args.env)
 
+    # ================================================================
+    # LEPRRLRB: LLM 启动自检 —— 运行一开始就验证 LLM 分段微调层是否可用
+    #   自检不通过不中断训练: llm_call_fn=None ⇒ 占位模式 (阈值保持起始值,
+    #   行为等价于 td3prrlrb)。自检通过则把所有 LLM 输出留在控制台最前面,
+    #   便于确认"这次 run 到底有没有在调阈值"。
+    # ================================================================
+    _SEP = '=' * 78
+    prCyan(_SEP)
+    prCyan('LEPRRLRB: LLM 分段微调层 · 启动自检')
+    prCyan(_SEP)
+    llm_call_fn = None
+    try:
+        _cfg = load_llm_config(args.llm_config)
+        _prov = args.llm_provider or _cfg['provider']
+        _key = _cfg['api_key'] or ''
+        _key_show = ('{}...{}'.format(_key[:6], _key[-4:])
+                     if len(_key) > 12 else ('(未设置)' if not _key else _key))
+        prCyan('LEPRRLRB: 配置 provider={} model={} api_key={} (来源: {})'.format(
+            _prov, _cfg['model'] or '(provider 默认)', _key_show,
+            'llm_config.json' if _cfg['api_key'] else '环境变量/缺省'))
+        llm_call_fn = create_llm_call_fn(provider=args.llm_provider,
+                                         config_path=args.llm_config)
+        prCyan('LEPRRLRB: LLM ready (provider={})'.format(
+            args.llm_provider or 'from config'))
+        prCyan('LEPRRLRB: Testing LLM API connectivity ...')
+        _t0 = time.time()
+        _resp = llm_call_fn('请回复"OK"，不要包含任何其他内容。')
+        prGreen('LEPRRLRB: LLM API test PASSED ({:.1f}s). Response: "{}"'.format(
+            time.time() - _t0, str(_resp).strip()[:120]))
+    except Exception as e:
+        prRed('LEPRRLRB: LLM API test FAILED — {}: {}'.format(type(e).__name__, e))
+        prRed('LEPRRLRB: 训练将继续, 但【阈值调整会被跳过】(占位模式, 等价于 td3prrlrb)。')
+        prRed('LEPRRLRB: 排查顺序: --llm_provider / --llm_config 路径 → '
+              'llm_config.json 的 api_key → provider SDK 是否安装 → 网络。')
+        llm_call_fn = None
+    prCyan(_SEP)
+
     # ---- LEPRRLRB: 风速分段起点 (percentile / kmeans / expert) ----
     # LLM 的微调在此基础上进行; 模块默认 7.0/11.0 即 td3prrlrb 的写死值。
     from data_piecewise.boundaries import apply_segmentation
@@ -1021,7 +1049,8 @@ if __name__ == "__main__":
               debug=args.debug,
               upload=upload,
               use_csv=use_csv,
-              adj_bounds=adj_bounds)
+              adj_bounds=adj_bounds,
+              llm_call_fn=llm_call_fn)
         if upload:
             writer.close()
 

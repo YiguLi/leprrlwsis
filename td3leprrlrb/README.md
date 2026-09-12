@@ -158,6 +158,36 @@ python td3leprrlrb/td3leprrlrb_main.py --llm_provider deepseek   # 覆盖配置�
 其余参数（`--warmup`、`--discount`、`--policy_delay`、`--soc_tol`、
 `--rbb_fluctuation_limit`、`--rbb_rated_power` 等）与 `td3prrlrb` 完全一致。
 
+### 3.1 启动自检（LLM 验证输出）
+
+`__main__` 在解析完参数后**立刻**打印 LLM 分段微调层的自检结果（在分段计算、env/agent
+构造、TensorBoard 建目录之前），所以你一启动就能确知"这次 run 到底会不会调阈值"：
+
+```
+==============================================================================
+ LEPRRLRB: LLM 分段微调层 · 启动自检
+==============================================================================
+ LEPRRLRB: 配置 provider=deepseek model=deepseek-v4-flash api_key=sk-e0a...0747 (来源: llm_config.json)
+ LEPRRLRB: LLM ready (provider=from config)
+ LEPRRLRB: Testing LLM API connectivity ...
+ LEPRRLRB: LLM API test PASSED (2.4s). Response: "OK"
+==============================================================================
+```
+
+自检**不通过也不会中断训练**，只会降级为占位模式并给出排查顺序：
+
+```
+ LEPRRLRB: LLM API test FAILED — ImportError: No module named 'anthropic'
+ LEPRRLRB: 训练将继续, 但【阈值调整会被跳过】(占位模式, 等价于 td3prrlrb)。
+ LEPRRLRB: 排查顺序: --llm_provider / --llm_config 路径 → llm_config.json 的 api_key → provider SDK 是否安装 → 网络。
+```
+
+`train()` 通过 `llm_call_fn` 参数接收自检结果；传 `None` 即占位模式（阈值恒为起点值）。
+`api_key` 只打印掩码（前 6 位 + 后 4 位）。
+
+> 注意：MATLAB 引擎是在**模块 import 时**启动的（沿用兄弟项目的写法），所以引擎启动的
+> 十几秒仍会排在自检之前；自检之后才轮到分段计算与 env 构造。
+
 > `--seg expert` 给的是 8.5/12.0，与 `td3prrlrb` 写死的 7.0/11.0 不同。
 > 想复现基线口径，用 `--seg percentile`（约 9.15/11.79）或直接把
 > `td3leprrlrb_myfunc.WIND_LOW_MAX/WIND_HIGH_MIN` 改回 7.0/11.0（模块默认值即 7.0/11.0）。
