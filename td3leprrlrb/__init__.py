@@ -5,8 +5,10 @@ TD3PRRLRB 的 LLM 增强版 —— 关系类比 td3prrbb → td3prle。
 
 架构: 上层 TD3 是唯一学习器 (5 台风机桨距 + 1 个 SOC 目标信号),
       下层是确定性规则控制器 SocTracker (在 RBB 可行窗口内最大能力跟踪目标)。
-      这与 td3prrlrb 完全一致 —— 本项目不改变分层与奖励结构, 只把
-      【风速分段阈值】交给 LLM 在线微调。
+      分层与奖励结构与 td3prrlrb 相同, 差异只有两处:
+      (1) 【风速分段阈值】交给 LLM 在线微调 (启动按 --seg 定起点, ±1 m/s 硬约束);
+      (2) wB 的 SOC 贴边折减取消 (WB_SOC_OUTSIDE 0.7 → 1.0, 与 td3prle 对齐),
+          上层 BESS 盈利不再随 SOC 位置打折, 该约束改由 SOC 目标机制承担。
 
 - Algorithm layer (from td3prrlrb): SP_TD3_LEPRRLRB — twin critics
   (profit channel: MIN aggregation / clipped double Q-learning;
@@ -16,7 +18,8 @@ TD3PRRLRB 的 LLM 增强版 —— 关系类比 td3prrbb → td3prle。
   EMA dual ascent on actual per-block cost, per-episode SOC random
   reset [0.5, 5.5].
 - Reward layer (from prle): Cal_Rew_RLRB with DYNAMIC wind thresholds
-  (WT_WIND / WT_PRICE / WB_PRICE / C1_RISK all keyed by wind_level),
+  (WT_WIND and C1_RISK keyed by wind_level; wB keyed by price only, its
+  SOC-edge discount cancelled),
   per-sub-step context accumulation, WindowStats + LLM threshold
   adjustment at --llm_window boundaries (default 7200 steps = 5 days),
   and batch relabeling of stored (r1, c1) whenever thresholds move.

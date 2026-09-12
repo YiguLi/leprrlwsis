@@ -308,8 +308,10 @@ def train(num_iterations_H,
         # ================================================================
         # LEPRRLRB: 逐子步 relabel 上下文 (阈值变动后据此精确重算历史 r1/c1)
         #   与阈值无关的原料全部缓存: pr·ptur·dt / −pr·pbrule·dt / 退化 /
-        #   越界罚; 阈值相关的只有分档权重与风险系数, 另需决策时刻 SOC
-        #   (wB 的 SOC 贴边折减依赖它)。gap_pen 在块末回填到本块最后一个子步。
+        #   越界罚; 阈值相关的只有分档权重与风险系数。
+        #   SOC 也一并缓存: 当前 WB_SOC_OUTSIDE=1.0 下 wB 已不依赖它, 但保留该
+        #   字段才能让"改回 0.7 折减"的回退路径 relabel 依然精确。
+        #   gap_pen 在块末回填到本块最后一个子步 (见下方 episode_steps%5==4)。
         # ================================================================
         step_profit = (observation2[-1] * observation[0] * time
                        - 490.0 * max(-pbrule, 0) * time)
@@ -944,8 +946,8 @@ if __name__ == "__main__":
                orig_low_max - 1.0, orig_low_max + 1.0,
                orig_high_min - 1.0, orig_high_min + 1.0))
     prCyan('LEPRRLRB: 收益权重表 WT_WIND={}, WT_PRICE={}, WB_PRICE={}, '
-           'WB_SOC_OUTSIDE={} (与 td3prrlrb 一致)'.format(
-               WT_WIND, WT_PRICE, WB_PRICE, WB_SOC_OUTSIDE))
+           'WB_SOC_OUTSIDE={} (SOC 贴边折减已取消: wB 只由电价档决定, 与 td3prle 对齐)'
+           .format(WT_WIND, WT_PRICE, WB_PRICE, WB_SOC_OUTSIDE))
 
     max_E = 6.
     upload = True

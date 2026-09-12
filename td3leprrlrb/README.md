@@ -8,13 +8,17 @@
 | 分段奖励 + 学习型下层 | `td3prrbb` | `td3prle` |
 | 分段奖励 + **规则**下层 | `td3prrlrb` | **`td3leprrlrb`（本项目）** |
 
-**与 `td3prrlrb` 的唯一差别**：风速分段阈值 `LOW_MAX / HIGH_MIN` 不再是写死的常量，
-而是**可变模块状态** —— 启动时由 `--seg` 定起点，训练中每隔一个窗口由 LLM 依据运行
-统计**在线微调**（硬约束：只能在原设定 ±1 m/s 内移动），阈值一变就立刻用新阈值
-**重算回放池里历史转移的 (r1, c1)**。
+与 `td3prrlrb` 的差异共两处：
 
-分层结构、动作语义、奖励/成本公式、对偶上升、规则下层 —— 全部与 `td3prrlrb` 逐字一致，
-未做任何改动。
+1. **风速分段阈值动态化**（本项目主体）：`LOW_MAX / HIGH_MIN` 不再是写死的常量，而是
+   **可变模块状态** —— 启动时由 `--seg` 定起点，训练中每隔一个窗口由 LLM 依据运行统计
+   **在线微调**（硬约束：只能在原设定 ±1 m/s 内移动），阈值一变就立刻用新阈值
+   **重算回放池里历史转移的 (r1, c1)**。
+2. **`wB` 的 SOC 贴边折减取消**（`WB_SOC_OUTSIDE`: 0.7 → 1.0，与 `td3prle` 对齐）：
+   上层 BESS 盈利不再随 SOC 位置打折，改由 SOC 目标机制承担该约束。
+
+除此之外，分层结构、动作语义、奖励/成本公式（除第 2 点）、对偶上升、规则下层 —— 全部与
+`td3prrlrb` 逐字一致，`td3prrlrb` 本体未做任何改动。
 
 ```
 td3leprrlrb/
@@ -46,8 +50,9 @@ td3leprrlrb/
 ```
 收益侧:  wT = WT_WIND[档] × WT_PRICE[电价]
               WT_WIND: LOW=1.2  MEDIUM=1.0  HIGH=0.9   ← HIGH 抑制激进
-         wB = WB_PRICE[电价] × wB_soc(SOC, SOC_SAFE_RANGES[档])
-              （SOC 落在该档安全带外时 ×0.7）
+         wB = WB_PRICE[电价] × w_soc
+              w_soc ≡ 1.0（SOC 贴边折减已取消，WB_SOC_OUTSIDE = 1.0）
+              ⇒ wB 只由电价档决定，与 SOC 位置、风速档都无关
 风险侧:  c1 的波动项乘 C1_RISK[档]
               C1_RISK: LOW=0.8  MEDIUM=1.0  HIGH=1.2
 ```
@@ -58,6 +63,12 @@ td3leprrlrb/
   → 盈利空间变大，风险敞口也变大；
 - 调低 `HIGH_MIN` → 更保守，盈利空间缩小，但更安全；
 - 调高 `LOW_MAX` → 更多样本归入 LOW（收益 ×1.2、风险 ×0.8）→ 中等风速被鼓励多发。
+
+> **SOC 贴边折减已取消**（`WB_SOC_OUTSIDE`: 0.7 → 1.0，与 `td3prle` 对齐）：
+> 原机制会让上层在 SOC 贴边时低估套利收益（软刹车）。现在这套约束由 SOC 目标机制
+> 接管 —— H 给目标、下层规则跟踪、H 在块末按 `|目标−实际|` 计 `gap_pen` 付费，
+> 收益侧不再额外打折。安全带判定 `SOC_SAFE_RANGES` 与其分支保留，把常量改回 `0.7`
+> 即一键恢复（改回后 relabel 仍精确，因为 context 里保留了每子步的决策时刻 SOC）。
 
 ### 2.2 调整循环（默认每 7200 步 = 5 天一次）
 
@@ -100,8 +111,12 @@ LOW/MEDIUM/HIGH 三档的步数占比、`r1_avg`、`profit_avg`、越限率。
 
 其中 `turbine_raw = pr·ptur·dt`、`bess_raw = −pr·pbrule·dt`、`degradation`、
 `penalty_NN_H`、`P_F` 项、`unfeasible_gap`、`gap_pen` 都与阈值无关（原样带回），
-只有**分档权重**与**风险系数**需要重算。`SOC`（决策时刻）必须缓存，因为本项目的
-`wB` 保留了"SOC 贴边 ×0.7"的机制，而"贴在哪个带内"由 `wind_level` 决定。
+只有**分档权重 `wT`** 与**风险系数 `C1_RISK`** 需要重算（`wB` 自贴边折减取消后
+也已与阈值无关，但重算 `wT` 仍然必要）。
+
+`SOC`（决策时刻）字段保留在 context 里：当前 `WB_SOC_OUTSIDE = 1.0` 下它对结果没有
+影响，但**不要删** —— 一是与 `td3prle` 的 relabel 签名保持一致，二是让"把折减改回
+0.7"这条回退路径依然精确（那时 `wB` 会重新依赖 SOC 落在哪一档安全带上）。
 
 relabel 之后所有优先级重置为 `max_priority` —— 原来存在 PER 树里的 TD error 是在旧奖励
 下算出来的，已失效，重置后先均匀采样，等 TD error 在新奖励下重新收敛。
@@ -173,7 +188,10 @@ TensorBoard 新增标量：`seg/wind_low_max`、`seg/wind_high_min`（逐步阈�
 | **`td3leprrlrb`** | **规则** SocTracker | **动态阈值**（`--seg` 定起点，LLM 在线微调） | 每 `--llm_window` 步调阈值 + relabel |
 
 `td3leprrlrb` 与 `td3prrlrb` 的差异 = `td3prle` 与 `td3prrbb` 的差异（LLM 分段微调层），
-唯一额外修正的是 relabel 的块末 SOC 罚口径（见 2.3 注）。
+另有两处刻意对齐/修正：
+
+1. `WB_SOC_OUTSIDE` 0.7 → 1.0（取消 wB 的 SOC 贴边折减，与 `td3prle` 对齐，见 §2.1 注）；
+2. relabel 的块末 SOC 罚口径（`gap_pen` 进 context，见 §2.3 注；`td3prle` 会丢这一项）。
 
 ## 6. 待标定 / 风险点
 
@@ -204,7 +222,10 @@ TensorBoard 新增标量：`seg/wind_low_max`、`seg/wind_high_min`（逐步阈�
 - **relabel 精确性**：`relabel_r1_substep` / `relabel_c1_substep` 在 400 组随机
   (u, pr, E, P_G, ptur, pb, penalty) 上与在线奖励逐位一致（|Δ| < 1e-9）；
   阈值移动引起的 LOW↔MEDIUM↔HIGH 换档，其权重变化与手算一致
-  （wT 1.2→1.0、wB 的 SOC 贴边、`C1_RISK` 0.8→1.0）。
+  （wT 1.2→1.0、`C1_RISK` 0.8→1.0）。
+- **`wB` 与 SOC/风速档解耦**（贴边折减取消后的新不变量）：遍历 3 个电价档 × 3 个
+  风速档 × SOC 全量程，`get_wB` 只随电价档变化；`relabel_r1_substep` 传入不同 SOC
+  得到完全相同的结果。
 - **上下文完备性**：真实 5 步块（目标 SOC 刻意不可达 → `gap_pen = 15.83 > 0`）入池后，
   `relabel_check()` 报 `|Δr| = 3.4e-13`、`|Δc| = 0`；阈值移动后能检出陈旧
   （`|Δr| = 137.2`、`|Δc| = 0.04`）；`relabel_all()` 后重新一致。

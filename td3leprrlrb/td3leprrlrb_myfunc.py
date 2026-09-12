@@ -12,7 +12,8 @@ Upper layer (H, RL):
   r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
        - 490*max(-pbrule,0)*time            (电池退化, 由命令方 H 付费)
        - penalty_NN_H
-       wT = wT_u(u) × wT_p(pr),  wB = wB_p(pr) × wB_soc(SOC, wind)
+       wT = wT_u(u) × wT_p(pr),  wB = wB_p(pr) × w_soc
+       (w_soc 的 SOC 贴边折减已取消: WB_SOC_OUTSIDE = 1.0 ⇒ wB 只由电价档决定)
 
   c1 = C1_RISK[wind] * [ 10*(P_F-3)+ + 0.1*P_F ]      (波动越限 + 平滑)
        + W_GAP * unfeasible_gap                       (平抑可行性缺口)
@@ -117,12 +118,21 @@ def get_wind_level(u):
 # =============================================================================
 # 2. Segmented weight lookup (multiplicative decomposition)
 # =============================================================================
-# 机会侧（利润）与风险侧（c1）分离: wT = wT_u(u)×wT_p(pr), wB = wB_p(pr)×wB_soc(SOC,wind)
+# 机会侧（利润）与风险侧（c1）分离: wT = WT_WIND(u)×WT_PRICE(pr), wB = WB_PRICE(pr)×w_soc
+# 【本轮变更】w_soc 的 SOC 贴边折减已取消 (WB_SOC_OUTSIDE 0.7 → 1.0),
+# 与 td3prle 对齐: wB 只由电价档决定, SOC 位置不再影响上层 BESS 盈利权重。
 
 WT_WIND = {'LOW': 1.2, 'MEDIUM': 1.0, 'HIGH': 0.9}
 WT_PRICE = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.05}
 WB_PRICE = {'LOW': 0.8, 'MEDIUM': 1.0, 'HIGH': 1.2}
-WB_SOC_OUTSIDE = 0.7
+# BESS 收益: SOC 贴边 (超出当前风速档安全带) 时的折减系数。
+# 【本轮变更】取消该机制: 0.7 → 1.0 ⇒ 上层 BESS 盈利不再随 SOC 位置打折。
+#   原值 0.7 会让 H 在 SOC 贴边时低估套利收益 (软刹车); 现由 SOC 目标机制接管
+#   (H 给目标 → 下层规则跟踪 → H 块末按 |目标−实际| 计 gap 罚), 收益侧不再额外打折。
+#   改回 0.7 即一键恢复原行为 —— 注意: 恢复后 relabel 仍精确, 因为 relabel 上下文
+#   已缓存每子步的决策时刻 SOC (见 main 的 block_ctx_H 与 relabel_r1_substep),
+#   千万不要为"省一个字段"把 context 里的 SOC 删掉。
+WB_SOC_OUTSIDE = 1.0
 
 # c1 风险系数：三档
 C1_RISK = {'LOW': 0.8, 'MEDIUM': 1.0, 'HIGH': 1.2}
@@ -149,15 +159,26 @@ def get_wT(wind_level, price_level):
 
 
 def get_wB(price_level, wind_level, SOC):
-    """BESS revenue weight: price × SOC-margin decomposition."""
+    """BESS revenue weight: price × SOC-margin decomposition.
+
+    【本轮变更】SOC 贴边折减已取消 (WB_SOC_OUTSIDE = 1.0): wB 只由电价档决定,
+    即 wB = WB_PRICE[price_level] * 1.0, SOC 位置与风速档都不再影响上层
+    BESS 盈利权重。安全带判定 (SOC_SAFE_RANGES) 与其分支保留: 把
+    WB_SOC_OUTSIDE 改回 0.7 即一键恢复"带外 ×0.7"。
+    wind_level / SOC 参数继续保留以保证调用签名不变 (relabel 也按位置传参)。
+    """
     soc_min, soc_max = SOC_SAFE_RANGES[wind_level]
     w_soc = 1.0 if soc_min <= SOC <= soc_max else WB_SOC_OUTSIDE
     return WB_PRICE[price_level] * w_soc
 
 
 # =============================================================================
-# 3. SOC 安全带 (仅用于日志指标; 新设计下不参与任何成本)
+# 3. SOC 安全带 (仅用于日志指标; 不参与任何成本)
 # =============================================================================
+# 注意: SOC 贴边折减取消后, 这条安全带【只】用于 Cal_soc_deviation 日志指标。
+# 唯一的例外是 get_wB: 它仍按安全带分支取值, 但两分支在 WB_SOC_OUTSIDE=1.0 下
+# 等价 —— 保留该分支是为了"改回 0.7"的一键回退。SOC 的硬约束由 RBB 可行窗口
+# (min_E=0 / max_E=6) 保证, 软约束由 H 的块末 gap 罚承担。
 SOC_SAFE_RANGES = {
     'LOW':    (0.5, 5.5),
     'MEDIUM': (1.0, 5.0),
@@ -204,10 +225,15 @@ def Cal_r1_PRRBB(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
 # =============================================================================
 # 阈值改动只影响两处乘法因子:
 #   (a) 收益权重 wT = WT_WIND[wind(u)] × WT_PRICE[price]
-#                 wB = WB_PRICE[price] × wB_soc(SOC, SOC_SAFE_RANGES[wind(u)])
+#                 wB = WB_PRICE[price] × w_soc   (w_soc≡1.0, 见 WB_SOC_OUTSIDE)
 #   (b) 风险系数 C1_RISK[wind(u)]
 # 其余项 (pr·ptur·dt, −pr·pbrule·dt, 退化, penalty_NN_H, P_F 项, W_GAP·gap)
 # 都与阈值无关, 因此缓存"与阈值无关的原料"(raw) + 少数上下文标量即可精确重算。
+#
+# 【关于 SOC】折减取消后 wB 已不依赖 SOC, 但 relabel 仍然接收并使用缓存的
+# SOC: 一是保持与 td3prle 的 relabel 签名一致; 二是让"把 WB_SOC_OUTSIDE 改回
+# 0.7"这条一键回退路径依然精确 (回退后 wB 重新依赖 SOC 与 wind 档)。因此
+# context 里的 'SOC' 字段必须保留。
 
 def relabel_r1_substep(u, pr, turbine_raw, bess_raw, degradation, penalty_NN_H,
                        SOC=3.0):
@@ -221,11 +247,11 @@ def relabel_r1_substep(u, pr, turbine_raw, bess_raw, degradation, penalty_NN_H,
     bess_raw : float              -pr * pbrule * dt     (与阈值无关)
     degradation : float           退化成本             (与阈值无关)
     penalty_NN_H : float          上层动作越界罚        (与阈值无关)
-    SOC : float                   决策时刻 SOC (MWh) —— 因为本项目保留了
-                                  "BESS 收益按 SOC 贴边折减"(WB_SOC_OUTSIDE=0.7),
-                                  wB 仍依赖 SOC 落在哪一档安全带上, 而安全带
-                                  又由 wind_level 决定, 故 SOC 必须随原料一起
-                                  缓存, 否则 relabel 不精确。
+    SOC : float                   决策时刻 SOC (MWh). 当前 WB_SOC_OUTSIDE = 1.0,
+                                  该参数【不影响结果】(wB 只由电价档决定);
+                                  保留它是为了兼容 td3prle 的调用签名, 以及让
+                                  恢复 0.7 折减后 relabel 仍然精确 (那时 wB 会
+                                  重新依赖 SOC 落在哪一档安全带上)。
 
     Returns
     -------
@@ -357,7 +383,8 @@ def Cal_Rew_RLRB(observation, observation2, action_rbb, rbb_info,
         'soc_target': soc_target,
         'soc_delta': SOC_new - soc_target,
         'soc_tol': SOC_TOL,
-        # 决策时刻 SOC: wB 的 SOC 贴边折减以此为准 → relabel 需要缓存它
+        # 决策时刻 SOC: 目前 wB 已不依赖它 (贴边折减取消), 但仍随 context 缓存,
+        # 以便把 WB_SOC_OUTSIDE 改回 0.7 时 relabel 依然精确
         'SOC_decision': SOC_decision,
         'soc_deviation': soc_dev,
         'ptur': ptur,
