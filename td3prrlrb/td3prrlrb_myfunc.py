@@ -414,10 +414,10 @@ def nine_case_test(agent_H, tracker, env_test, rbb_system,
             ptur=ptur, pb_cmd=pb_cmd,
         )
 
-        # 块末: SOC 目标可行性罚
+        # 块末: SOC 目标可行性罚 (tol 与下层规则死区同源)
         gap_pen = 0.0
         if step % 5 == 4:
-            gap_pen = gap_penalty(soc_target, float(obs2[2]))
+            gap_pen = gap_penalty(soc_target, float(obs2[2]), tol=tracker.soc_tol)
         c1 = c1_step + gap_pen
 
         bi = step // 5

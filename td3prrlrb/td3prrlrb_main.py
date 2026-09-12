@@ -218,15 +218,18 @@ def train(num_iterations_H,
         gap_pen = 0.0
         target_feasible = True
         if episode_steps % 5 == 4:
-            gap_pen = gap_penalty(soc_target, float(observation2[2]))
+            # tol 必须与下层规则死区同源 (tracker.soc_tol), 否则 --soc_tol 改动后
+            # 规则停在死区边缘时上层会被收一笔永远消不掉的"幽灵税"。
+            gap_pen = gap_penalty(soc_target, float(observation2[2]),
+                                  tol=tracker.soc_tol)
             sum_c1 += gap_pen
             sum_gap_pen += gap_pen
 
         # ---- 可达性诊断: 规则控制在本块的最大能力 ----
         cap_c = block_cap_charge(rbb_info_obs['pbrulemax'], eta_c=0.98, time=time)
         cap_d = block_cap_discharge(rbb_info_obs['pbrulemin'], eta_d=0.98, time=time)
-        target_feasible = (soc_target <= E_current + cap_c + SOC_TOL) and \
-                          (soc_target >= E_current - cap_d - SOC_TOL)
+        target_feasible = (soc_target <= E_current + cap_c + tracker.soc_tol) and \
+                          (soc_target >= E_current - cap_d - tracker.soc_tol)
 
         clip_amount = rbb_info['clip_amount']
         is_infeasible = rbb_info['is_infeasible']
@@ -242,7 +245,7 @@ def train(num_iterations_H,
         prGreen('soc_signal={:.4f} soc_target={:.3f} SOC={:.3f} gap_raw={:.3f} '
                 '(tol={}, feasible={})'.format(
                     soc_signal, soc_target, reward_details['SOC'],
-                    gap_raw, SOC_TOL, target_feasible))
+                    gap_raw, tracker.soc_tol, target_feasible))
         prGreen('price={} p_level={} wind={:.1f} w_level={} (wT={}, wB={})'.format(
             reward_details['pr'], reward_details['price_level'],
             reward_details['u'], reward_details['wind_level'],
