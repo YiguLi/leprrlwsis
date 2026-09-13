@@ -57,12 +57,15 @@ from env import WindBattery
 from td3leprrlrb.td3leprrlrb_ddpg import SP_TD3_LEPRRLRB
 from util import *
 from td3leprrlrb.td3leprrlrb_myfunc import (
-    CheckAction, Normalize,
+    CheckAction, Normalize, Normalize_H,
     Cal_Rew_RLRB, gap_penalty, soc_target_from_signal, nine_case_test,
     SOC_TOL,
     get_wind_thresholds, set_wind_thresholds,
     relabel_r1_substep, relabel_c1_substep,
     WT_WIND, WT_PRICE, WB_PRICE, WB_SOC_OUTSIDE,
+    REP_MINUTE, PHASE_DIM, phase_dim, phase_features, phase_log_fields,
+    phase_daily_table, day_price_schedule, representative_phase_minute,
+    PHASE_REP_MINUTE,
 )
 from td3leprrlrb.td3leprrlrb_llm import (
     WindowStats, llm_analyze_thresholds, create_llm_call_fn, load_llm_config,
@@ -105,6 +108,129 @@ def _flush_csv(path, rows, written):
     return written + len(rows)
 
 
+# =============================================================================
+# P0.1: 训练起始点 —— 把 H 层 actor 输出层 bias 覆写到 Cp 高效区
+# =============================================================================
+# 病因: model.Actor.init_weights() 只初始化 fc1/fc2/fc3 的 weight 与 fc4.weight
+#   (±init_w=0.003), fc4.bias 仍是 PyTorch 默认 U(±1/√fan_in), fan_in = hidden1 = 16
+#   ⇒ U(±0.25)。而 WFSim_port.m 的 Cp = 4a(1−a)² 在 a=0 时 = 0 ⇒ a≈0 就是停机。
+#   初始策略的"基准工作点"≈ bias 本身, 实测初始 ΣCp 只有 ~0.4 (≈14% 效率),
+#   5 个种子里 2~4 台机被推到 a<0 (CheckAction 夹到 0) = 永久停机, 策略得先从
+#   "停机"这个病态起点自己爬出来。
+# 处方: 前 5 维 (风机桨距) bias 采在 U(0.25, 0.40) —— Cp 的高效区 (a=1/3 时
+#   Cp=16/27≈0.5926 最优, 该区间正好夹住它); 第 6 维 (SOC 目标信号) 置 0
+#   ⇒ 初始目标 SOC = 3.0, 中性且不泄露策略。
+# 不动共享的 model.py; fc4.weight 仍是 ±0.003, 所以"策略强度"依然随机, 只是
+#   "基准工作点"落在高效区。
+
+WT_BIAS_LOW = 0.25
+WT_BIAS_HIGH = 0.40
+CP_MAX_PER_TURBINE = 16.0 / 27.0        # a=1/3 处的 Cp 上限 4a(1−a)²
+
+
+def wt_cp_summary(bias, n_wt=5, a_lo=0.0, a_hi=0.5):
+    """由 fc4.bias 的前 n_wt 维评估【初始工作点】.
+
+    a 先按 env.PowerOutput 的口径 clip 到 [a_lo, a_hi] (a<0 被夹到 0 ⇒ Cp=0 = 停机),
+    再算 Cp = 4a(1−a)²。返回 dict:
+        sum_cp    : Σ Cp (物理口径, 与风机实际出力对应)
+        eff_pct   : Σ Cp 占 5×(a=1/3 最优 Cp=16/27) 的百分比
+        cp        : 逐台 Cp
+        n_stopped : a<0 的台数 (被夹到 0 = 停机)
+        sum_cp_raw: 不做 clip 的原始 Σ 4a(1−a)² (负 bias 会给出负 Cp, 仅作对照)
+    """
+    a_raw = np.asarray(bias[:n_wt], dtype=float)
+    a = np.clip(a_raw, a_lo, a_hi)
+    cp = 4.0 * a * (1.0 - a) ** 2
+    total = float(cp.sum())
+    return {
+        'sum_cp': total,
+        'eff_pct': 100.0 * total / (n_wt * CP_MAX_PER_TURBINE),
+        'cp': cp,
+        'n_stopped': int(np.sum(a_raw < 0.0)),
+        'sum_cp_raw': float(np.sum(4.0 * a_raw * (1.0 - a_raw) ** 2)),
+    }
+
+
+def init_wt_action_bias(agent, low=WT_BIAS_LOW, high=WT_BIAS_HIGH, n_wt=5,
+                        verbose=True):
+    """覆写 H 层 actor / actor_target 的 fc4.bias (前 n_wt 维 U(low,high), 末维 0).
+
+    Returns
+    -------
+    bias : np.ndarray  实际写入的 bias 向量 (便于打印/留档)
+    """
+    if agent is None:
+        return None
+    if not hasattr(agent, "actor") or not hasattr(agent.actor, "fc4"):
+        raise ValueError("init_wt_action_bias: agent.actor.fc4 不存在")
+    with torch.no_grad():
+        for net in (agent.actor, agent.actor_target):
+            b = net.fc4.bias
+            if b.numel() != n_wt + 1:
+                raise ValueError(
+                    "init_wt_action_bias: fc4.bias 长度 {} != 预期 {} "
+                    "(5 桨距 + 1 信号)".format(b.numel(), n_wt + 1))
+            b[:n_wt].uniform_(float(low), float(high))
+            b[n_wt] = 0.0
+        # target 必须与 actor 完全一致 (构造函数里的 hard_update 之后又被改过)
+        agent.actor_target.fc4.bias.copy_(agent.actor.fc4.bias)
+    bias = agent.actor.fc4.bias.detach().cpu().numpy().copy()
+    if verbose:
+        s = wt_cp_summary(bias, n_wt)
+        prCyan('LEPRRLRB[P0.1]: WT bias <- U({:.2f},{:.2f}) x{} + 信号维 0; '
+               '初始 sum_Cp = {:.3f} (效率 {:.1f}%, 最优 {:.3f}), 死机 {}/{} 台; '
+               '逐台 Cp = {}'.format(
+                   low, high, n_wt, s['sum_cp'], s['eff_pct'],
+                   n_wt * CP_MAX_PER_TURBINE, s['n_stopped'], n_wt,
+                   np.round(s['cp'], 4).tolist()))
+    return bias
+
+
+# =============================================================================
+# P0.3 自检: 电价时钟一致性 (相位特征依赖"第几步 = 当日第几分钟")
+# =============================================================================
+
+def price_clock_check(env, verbose=True):
+    """用 env.CalPrice 走满一天, 与 day_price_schedule() 对比.
+
+    env.CalPrice 是"先自增再判档"(count_price 从 0 起), 其第 k 次调用对应
+    当日第 k 分钟 (k=1..1440, 表索引 k%1440)。训练第 j 步 (0-based) 用的正是
+    第 j+1 分钟的电价, 即相位特征相对 env 时钟"领先 1 分钟"(1/480 的段内比例
+    偏差, 对择时无实质影响) —— 该偏差在此一并报出。
+
+    Returns
+    -------
+    mismatches : list of (k, env_price, schedule_price)
+    """
+    sched = day_price_schedule()
+    saved = (env.count_price, env.pr)
+    mismatches = []
+    env.count_price = 0
+    try:
+        for k in range(1, REP_MINUTE + 1):
+            p = env.CalPrice()
+            exp = sched[k % REP_MINUTE]
+            if p != exp:
+                mismatches.append((k, p, exp))
+    finally:
+        env.count_price, env.pr = saved      # 复原 (episode 开始时 reset() 会重设)
+    if verbose:
+        known = [m for m in mismatches if m[0] == REP_MINUTE]
+        unknown = [m for m in mismatches if m[0] != REP_MINUTE]
+        if not unknown:
+            prGreen('LEPRRLRB[P0.3]: 电价时钟自检 {}/{} 分钟与日程表一致; '
+                    '唯一例外在第 {} 分钟 (env.CalPrice 在 count_price==1440 时落入 '
+                    'else 档 → 980, 属 env 已知怪癖, 落在 episode 最后一步)'.format(
+                        REP_MINUTE - len(mismatches), REP_MINUTE, REP_MINUTE))
+        else:
+            prRed('LEPRRLRB[P0.3]: 电价时钟自检发现 {} 处【非预期】不一致 (共 {} 处): '
+                  '{}'.format(len(unknown), len(mismatches), unknown[:6]))
+        prCyan('LEPRRLRB[P0.3]: 相位特征用人类时钟 (index = 当日第几分钟); '
+               'env 时钟领先 1 分钟 (训练第 j 步 = 日程表第 j+1 分钟)')
+    return mismatches
+
+
 # TD3LEPRRLRB: TD3 + 分段奖励 + 规则下层 + LLM 分段微调
 def train(num_iterations_H,
           agent_H,
@@ -118,7 +244,8 @@ def train(num_iterations_H,
           upload=False,
           use_csv=False,
           adj_bounds=None,
-          llm_call_fn=None):
+          llm_call_fn=None,
+          phase_feat=0):
 
     agent_H.is_training = True
     step = episode = episode_steps = 0
@@ -128,6 +255,7 @@ def train(num_iterations_H,
     episode_deg_charge = episode_deg_discharge = 0.
     observation = None
     time = 1/60
+    phase_feat = int(phase_feat)
     # Curriculum learning: consecutive blocks where EMA cost <= d_block_H
     consecutive_satisfied_H = 0
     # H 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_H (与 sum_c1 同口径)
@@ -171,13 +299,17 @@ def train(num_iterations_H,
     while step < num_iterations_H:
         # start of episode 重置环境
         prYellow('########### step:{} ###########'.format(step))
+        # P0.3 相位: episode 恰好 1440 步 (env.reset 里 count_price=0, step 恒 done=False)
+        #   ⇒ 当日分钟 = episode_steps % 1440; 下一步的相位 = (episode_steps+1) % 1440
+        phase_minute = episode_steps % REP_MINUTE
+        phase_minute2 = (episode_steps + 1) % REP_MINUTE
         if observation is None:
             observation = deepcopy(env.reset())  # [Pr,U,E,P_last]
             # SOC 随机化: 每个 episode(1440步) 从 U[0.5,5.5] 重新采样
             reset_E = float(np.random.uniform(0.5, 5.5))
             env.E = reset_E
             observation[2] = reset_E
-            norm_observation = Normalize(observation)
+            norm_observation = Normalize_H(observation, phase_minute, phase_feat)
             agent_H.reset(norm_observation)
 
         # ================================================================
@@ -239,7 +371,7 @@ def train(num_iterations_H,
             env.step(action_rbb[:6], action_rbb[6:], pw_tru)
         action_rbb[6:] = action_L_env
         prGreen('Applied action = {}.'.format(round_list(action_rbb, 3)))
-        norm_observation2 = Normalize(observation2)
+        norm_observation2 = Normalize_H(observation2, phase_minute2, phase_feat)
 
         # ================================================================
         # PRRBB 分段奖励 (机会/风险分离; 仅 H 层)
@@ -376,7 +508,8 @@ def train(num_iterations_H,
             # Test: 9-case segmented evaluation every 480 episode steps
             if episode_steps % 480 == 0:
                 case_metrics, overall = nine_case_test(
-                    agent_H, tracker, env_test, rbb_system, seed=42)
+                    agent_H, tracker, env_test, rbb_system, seed=42,
+                    phase_feat=phase_feat)
                 if use_csv:
                     for m in case_metrics:
                         df_test_rows.append({
@@ -394,6 +527,8 @@ def train(num_iterations_H,
                                 ','.join(m['project_wind_levels']),
                             'wind_low_max': overall['wind_low_max'],
                             'wind_high_min': overall['wind_high_min'],
+                            # P0.3: 该 case 使用的代表相位
+                            'phase_minute': m['phase_minute'],
                         })
                     df_test_rows.append({
                         'step': step,
@@ -408,6 +543,7 @@ def train(num_iterations_H,
                         'project_wind_levels': '',
                         'wind_low_max': overall['wind_low_max'],
                         'wind_high_min': overall['wind_high_min'],
+                        'phase_minute': -1,
                     })
                     df_test_written = _flush_csv(
                         '{}/df_test9.csv'.format(output),
@@ -496,6 +632,8 @@ def train(num_iterations_H,
                 'P_F': reward_details['P_F'],
                 'soc_next': float(observation2[2]),
                 'bess_profit_net': reward_details['bess_profit'] - reward_details['degradation'],
+                # ---- P0.3 相位记录 (+6 列): 供事后核对"择时"是否真的发生 ----
+                **phase_log_fields(phase_minute),
             })
             if step % 50 == 0:
                 df_written = _flush_csv(
@@ -537,6 +675,16 @@ def train(num_iterations_H,
             # LEPRRLRB: 当前动态阈值 (LLM 分段微调轨迹)
             writer.add_scalar('seg/wind_low_max', get_wind_thresholds()[0], step)
             writer.add_scalar('seg/wind_high_min', get_wind_thresholds()[1], step)
+
+            # P0.3 相位 (24h 电价时钟)
+            _pf = phase_log_fields(phase_minute)
+            writer.add_scalar('phase/minute', _pf['phase_minute'], step)
+            writer.add_scalar('phase/sin', _pf['phase_sin'], step)
+            writer.add_scalar('phase/cos', _pf['phase_cos'], step)
+            writer.add_scalar('phase/seg_remain_frac', _pf['seg_remain_frac'], step)
+            writer.add_scalar('phase/seg_remain_hours', _pf['seg_remain_hours'], step)
+            writer.add_scalar('phase/next_price', _pf['next_price'], step)
+            writer.add_scalar('phase/n_states', agent_H.nb_states, step)
 
             # 收益分解
             writer.add_scalar('reward_upper/turbine_profit', reward_details['turbine_profit'], step)
@@ -917,6 +1065,15 @@ if __name__ == "__main__":
                         help='风速分段【起点】方法: percentile | kmeans | expert '
                              '(默认 expert); 起点确定后由 LLM 在 原设定 ±1 m/s 内在线微调')
 
+    # ---- P0.1 / P0.3: 起始点与 24h 相位 ----
+    parser.add_argument('--wt_bias_init', default=1, type=int, choices=[0, 1],
+                        help='P0.1 起始点: 1(默认)=把 H 层 actor 输出层 bias 覆写为 '
+                             'WT∈U(0.25,0.40) + 信号维 0 (Cp 高效区, 消除"初始停机"病态); '
+                             '0=保留 PyTorch 默认 bias U(±0.25) (复现旧 run)')
+    parser.add_argument('--phase_feat', default=1, type=int, choices=[0, 1, 2],
+                        help='P0.3 24h 相位特征: 0=无(4 维) / 1(默认)=sin,cos(6 维) / '
+                             '2=+[段内剩余比例, 剩余小时/8, 下一段电价/1000] (9 维)')
+
     args = parser.parse_args()
     args.output = get_output_folder(args.output, args.env)
     if args.resume == 'default':
@@ -1008,6 +1165,9 @@ if __name__ == "__main__":
     env = WindBattery(max_E, args.nb_turbine, upload, engine)
     env_test = WindBattery(max_E, args.nb_turbine, upload, engine)
 
+    # ---- P0.3: 电价时钟一致性自检 (相位特征的前提) ----
+    price_clock_check(env)
+
     if args.seed > 0:
         np.random.seed(args.seed)
 
@@ -1027,7 +1187,13 @@ if __name__ == "__main__":
                          time=1.0 / 60, rated_power=args.rbb_rated_power)
 
     # 上层: TD3 + EMA 实际成本对偶 (lam1 ∈ [3, 100], 初始 5.0)
-    agent_H = SP_TD3_LEPRRLRB(nb_states=4, nb_actions=6, args=args,
+    # P0.3: 观测维数 = 4 (pr,u,E,P_G) + 相位特征 (0/2/5)
+    _phase_dim = phase_dim(args.phase_feat)
+    prCyan('LEPRRLRB[P0.3]: --phase_feat={} ⇒ 相位特征 {} 维, H 观测 {} 维 '
+           '(代表相位: {}; 相位周期 {} 步)'.format(
+               args.phase_feat, _phase_dim, 4 + _phase_dim,
+               PHASE_REP_MINUTE, REP_MINUTE))
+    agent_H = SP_TD3_LEPRRLRB(nb_states=4 + _phase_dim, nb_actions=6, args=args,
                               lam_max=100.0, lam_min=3.0,
                               ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                               record_update_stats=True,
@@ -1036,6 +1202,17 @@ if __name__ == "__main__":
                               noise_clip=args.noise_clip,
                               cost_critic_mode=args.cost_critic_mode)
     agent_H.lam = 5.0
+
+    # ---- P0.1: 起始点 (覆写 actor/actor_target 输出层 bias) ----
+    if args.wt_bias_init:
+        init_wt_action_bias(agent_H)
+    else:
+        _b = agent_H.actor.fc4.bias.detach().cpu().numpy()
+        _s = wt_cp_summary(_b)
+        prYellow('LEPRRLRB[P0.1]: --wt_bias_init 0 -> 保留 PyTorch 默认起点; '
+                 '初始 sum_Cp = {:.3f} (效率 {:.1f}%), 死机 {}/5 台; bias = {}'.format(
+                     _s['sum_cp'], _s['eff_pct'], _s['n_stopped'],
+                     np.round(_b, 4).tolist()))
 
     if args.mode == 'train':
         train(args.train_iter_H,
@@ -1050,7 +1227,8 @@ if __name__ == "__main__":
               upload=upload,
               use_csv=use_csv,
               adj_bounds=adj_bounds,
-              llm_call_fn=llm_call_fn)
+              llm_call_fn=llm_call_fn,
+              phase_feat=args.phase_feat)
         if upload:
             writer.close()
 
