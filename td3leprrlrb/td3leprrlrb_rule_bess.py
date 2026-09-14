@@ -214,15 +214,29 @@ class SocTracker:
     eta_c, eta_d : float  充/放效率。
     time : float  步长 (小时)。
     rated_power : float  额定功率 (MW), 用于把指令先限幅到 [-rated, rated]。
+    pb_cap : float or None
+        自愿指令的绝对值上限 (MW)。推荐传 RBB 的 fluctuation_limit (=3):
+        这样"自己的动作不会把下一步的可行窗口推出 0", 下一步总能停在目标上,
+        从而消除**自致过冲** (为 0.01 MWh 的差值用大功率、却造成 0.16 MWh
+        SOC 跳变的那类现象)。None / <=0 = 不限制 (旧行为, 追得更快但可能过冲)。
     """
 
     def __init__(self, soc_tol=0.0, eta_c=0.98, eta_d=0.98, time=1.0 / 60,
-                 rated_power=10.0):
+                 rated_power=10.0, pb_cap=None):
         self.soc_tol = soc_tol
         self.eta_c = eta_c
         self.eta_d = eta_d
         self.time = time
         self.rated_power = rated_power
+        # 自愿吞吐上限 (MW)。设成 RBB 的 fluctuation_limit 时, 可保证
+        # "自己的动作不会把下一步的可行窗口推出 0" (推导见 act 文档) ⇒
+        # 下一步总能停下 ⇒ 不会出现"为了 0.01 MWh 的差值用了 10 MW、
+        # 结果 SOC 变化 0.16 MWh"这类**自致过冲**。
+        # None / <=0 表示不限制 (旧行为: 追得更快, 但可能被自己推走的窗口逼着过冲)。
+        self.pb_cap = pb_cap
+        # 诊断侧信道: act() 每次更新, 供主循环记录 (不影响返回值)
+        self.last_pb_voluntary = 0.0   # 按残差需要量限幅后的自愿指令 (MW)
+        self.last_pb_forced = 0.0      # 被窗口/不可行兜底额外强加的部分 (MW)
 
     # ---- 每 MW 电力在一步内改变多少 SOC (MWh) ----
     def gain_charge(self):
@@ -231,12 +245,30 @@ class SocTracker:
     def gain_discharge(self):
         return self.time / self.eta_d          # 放电: pb<0
 
+    def effective_pb_cap(self):
+        """自愿指令的有效上限 (MW)。"""
+        if self.pb_cap is None or self.pb_cap <= 0:
+            return float(self.rated_power)
+        return float(min(self.rated_power, self.pb_cap))
+
     def act(self, E, soc_target, pbrulemin, pbrulemax):
         """返回本步 BESS 功率指令 pb (MW, 正=充电).
 
         E          : 当前 SOC (MWh)
         soc_target : 上层给出的目标 SOC (MWh)
         pbrulemin/max : 本步 RBB 可行窗口 (MW)
+
+        【为什么自愿指令要受 pb_cap 限幅】
+        窗口位置 = ptur − pg_prev ± 3, 而本步 pb 会成为下一步的 pg_prev 分量:
+            pg_prev' = ptur − pb
+        下一步窗口下沿 = ptur' − pg_prev' − 3 = pb + (ptur' − ptur) − 3
+        因此只要 |pb| ≤ 3 (= fluctuation_limit) 且风速无阶跃 (ptur' = ptur),
+        下一步窗口必含 0 ⇒ 规则下一步总能停在目标上 (不会被迫继续同向吞吐)。
+        反之 |pb| > 3 会把窗口推离 0, 下一步被逼继续吞吐, 于是**过冲**目标
+        (实测 δ=0.30 的块: 第 2 步自愿充 9 MW → 第 3 步窗口 [6,10], 只需 0.37 MW
+         却被逼充 6 MW → 块末残差从 0.006 涨到 0.141)。
+        风阶跃 (|ptur' − ptur| > 3) 造成的窗口偏移无法由本规则消除 —— 那属于
+        外部强制吞吐, 规则只能取其最小值 (窗口内离 0 最近的点)。
         """
         delta = float(soc_target) - float(E)
 
@@ -247,20 +279,32 @@ class SocTracker:
         #     soc_tol > 0 时复现旧行为 (δ 在死区内一律不追)。
         if abs(delta) <= self.soc_tol:
             if pbrulemin > pbrulemax:
+                self.last_pb_voluntary = 0.0
+                self.last_pb_forced = 0.0
                 return 0.0
-            return float(np.clip(0.0, pbrulemin, pbrulemax))
+            pb = float(np.clip(0.0, pbrulemin, pbrulemax))
+            self.last_pb_voluntary = 0.0
+            self.last_pb_forced = pb
+            return pb
 
         # (2) 约束死拍: 一步补齐所需功率 (残差 0.01 MWh 也照追)
         g = self.gain_charge() if delta > 0 else self.gain_discharge()
         pb = delta / g
 
-        # (3) 先按额定功率限幅 (与 CheckAction 的 ±rated 口径一致)
-        pb = float(np.clip(pb, -self.rated_power, self.rated_power))
+        # (3) 自愿限幅: 先按额定, 再按 pb_cap (防自致过冲, 见上)
+        cap = self.effective_pb_cap()
+        pb = float(np.clip(pb, -cap, cap))
+        pb_vol = pb
 
         # (4) 不可行窗口 (pbrulemin > pbrulemax): 交由 RBB 的不可行处理逻辑
         if pbrulemin > pbrulemax:
+            self.last_pb_voluntary = pb_vol
+            self.last_pb_forced = 0.0
             return pb
 
         # (5) 饱和进可行窗口: 贴边界行动 = 用满可用权限
-        return float(np.clip(pb, pbrulemin, pbrulemax))
+        pb = float(np.clip(pb, pbrulemin, pbrulemax))
+        self.last_pb_voluntary = pb_vol
+        self.last_pb_forced = pb - pb_vol        # >0 = 被迫多做的量
+        return pb
 
