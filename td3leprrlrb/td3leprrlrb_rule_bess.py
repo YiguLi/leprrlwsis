@@ -186,24 +186,37 @@ class SocTracker:
     设计依据 (见项目文档):
       * 下层任务优先级: 物理可行 > 平抑波动 > 追踪上层目标;
       * 前两项由 RBB 可行窗口 [pbrulemin, pbrulemax] 硬保证;
-      * 追踪目标 = "约束死拍": 在窗口内用最大可用能力把 SOC 拉向目标;
-      * SOC_TOL (0.1 MWh = 6 MW·min) 为死区/平抑作业余量:
-          死区内【不动作】(最小吞吐原则: 绝不自愿消耗电池吞吐, 避免无谓退化);
-          死区外死拍跟踪, 并饱和进窗口 (贴边界 = 用满可用权限)。
+      * 追踪目标 = "约束死拍": 在窗口内用最大可用能力把 SOC 拉向目标,
+        且**不做死区豁免** —— 残差 0.01 MWh 也照追 (见 soc_tol 说明)。
+
+    【死区归属 (本轮修正)】0.1 MWh 的豁免【只属于上层罚项】, 不属于下层:
+      * 上层 `gap_penalty = 10·max(0, |target−SOC_末| − SOC_TOL)` —— H 只对超过
+        0.1 MWh 的残差付费 (这是"H 不必为零头付费"的**记账约定**);
+      * 下层 `soc_tol` 默认 **0.0** —— 只要 δ≠0 就用满窗口能力去追, δ=0 时只做
+        窗口允许的最小被迫吞吐 (不主动制造吞吐, 但也不放弃任何可达残差)。
+      这样不对称的方向是**安全**的: 下层能消掉的残差总是多于上层豁免的
+      (0 < 0.1), 不会出现"规则停在某处不动、上层却照罚"的幽灵税。
+      ⚠ 若把 `soc_tol` 调回 >0 (复现旧的"最小吞吐"行为), 必须保证
+        `tracker.soc_tol ≤ --soc_tol`, 否则幽灵税回归。
 
     由于 SOC 是纯积分器、代价对 |目标-实际| 单调, 该规则即 5 步块内的
     最优努力策略 (best effort); 因此上层在块末观察到的残差 |target - SOC|
     近似等于"不可行量"—— 上层只需为不可行付费 (见 main 的 gap 惩罚)。
 
+    注意: 块末残差未必归零。风阶跃迫使的吞吐 (窗口不含 0 时 `clip(0, 窗口)`)
+    可以**过冲**目标, 也可能把残差推过 0.1 —— 那部分不是"目标不可行", 而是
+    "停不下来", 属于 gap 罚口径的已知不精确处。
+
     Parameters
     ----------
-    soc_tol : float  死区 (MWh), 与上层 gap 惩罚的裕度必须同源。
+    soc_tol : float  下层跟踪死区 (MWh)。默认 0.0 = 尽力追随 (推荐);
+                     设为 >0 复现旧的"死区内不动作"行为 (仅用于 A/B 对照)。
     eta_c, eta_d : float  充/放效率。
     time : float  步长 (小时)。
     rated_power : float  额定功率 (MW), 用于把指令先限幅到 [-rated, rated]。
     """
 
-    def __init__(self, soc_tol=0.1, eta_c=0.98, eta_d=0.98, time=1.0 / 60,
+    def __init__(self, soc_tol=0.0, eta_c=0.98, eta_d=0.98, time=1.0 / 60,
                  rated_power=10.0):
         self.soc_tol = soc_tol
         self.eta_c = eta_c
@@ -227,16 +240,17 @@ class SocTracker:
         """
         delta = float(soc_target) - float(E)
 
-        # (1) 死区: 不主动动作 (最小吞吐原则)
-        #     但仍须落在可行窗口内: 风速阶跃 >3 MW/min 时窗口可能不含 0,
-        #     此时必须做最小幅度的被迫吞吐 —— 规则自己完成该裁剪,
-        #     使 RBB 的 clip_amount 恒为 0 (只做真正的安全兜底).
+        # (1) 已在目标上 (δ == 0; soc_tol 默认 0 ⇒ 该分支仅在此触发):
+        #     不主动制造吞吐, 但仍须落在可行窗口内 —— 风速阶跃 >3 MW/min 时
+        #     窗口可能不含 0, 此时做最小幅度的**被迫**吞吐。规则自己完成该裁剪,
+        #     使 RBB 的 clip_amount 恒为 0 (只做真正的安全兜底)。
+        #     soc_tol > 0 时复现旧行为 (δ 在死区内一律不追)。
         if abs(delta) <= self.soc_tol:
             if pbrulemin > pbrulemax:
                 return 0.0
             return float(np.clip(0.0, pbrulemin, pbrulemax))
 
-        # (2) 约束死拍: 一步补齐所需功率
+        # (2) 约束死拍: 一步补齐所需功率 (残差 0.01 MWh 也照追)
         g = self.gain_charge() if delta > 0 else self.gain_discharge()
         pb = delta / g
 

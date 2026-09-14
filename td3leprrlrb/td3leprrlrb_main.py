@@ -10,9 +10,14 @@ H (RL, 6 维动作 = 5 台风机桨距 + 1 个 SOC 目标信号):
     * a6 ∈ [-0.5, 0.5] → soc_target = 3 + 5*a6 ∈ [0.5, 5.5], 块级(5 步)固定。
 L (规则, SocTracker, 1 维动作 pb):
     * 在 RBB 可行窗口 [pbrulemin, pbrulemax] 内以【最大能力】跟踪 soc_target,
-      死区 0.1 MWh (=6 MW·min, 与控制波动裕度同源)。
+      **无跟踪死区** (默认 tracker_dead_zone ∈ 0): 残差 0.01 MWh 也追;
+      δ=0 时只做窗口允许的最小被迫吞吐。
     * 物理可行 + 平抑波动由窗口硬保证 → clip_amount ≡ 0;
       因此块末残差 |soc_target - SOC_end| ≈ 不可行量。
+
+【死区归属】0.1 MWh 的豁免只给上层: 上层 gap 罚按 --soc_tol 豁免 0.1 MWh
+  (H 不必为零头付费), 下层则尽力追到 0。不对称方向安全, 无幽灵税;
+  只有把 --tracker_dead_zone 调成 > --soc_tol 时幽灵税才会回归。
 
 奖励 / 成本
 -----------
@@ -245,7 +250,8 @@ def train(num_iterations_H,
           use_csv=False,
           adj_bounds=None,
           llm_call_fn=None,
-          phase_feat=0):
+          phase_feat=0,
+          soc_tol_upper=SOC_TOL):
 
     agent_H.is_training = True
     step = episode = episode_steps = 0
@@ -390,18 +396,20 @@ def train(num_iterations_H,
         gap_pen = 0.0
         target_feasible = True
         if episode_steps % 5 == 4:
-            # tol 必须与下层规则死区同源 (tracker.soc_tol), 否则 --soc_tol 改动后
-            # 规则停在死区边缘时上层会被收一笔永远消不掉的"幽灵税"。
+            # 【死区归属】0.1 MWh 豁免只给上层: 下层 SocTracker 默认死区 0
+            # (尽力追随), 这里按 --soc_tol 只对"超过豁免带"的残差收费。
+            # 不对称方向是安全的 (L 能消的残差 ⊇ H 豁免的), 不会产生幽灵税;
+            # 但若把 --tracker_dead_zone 调成 > --soc_tol, 幽灵税会回归。
             gap_pen = gap_penalty(soc_target, float(observation2[2]),
-                                  tol=tracker.soc_tol)
+                                  tol=soc_tol_upper)
             sum_c1 += gap_pen
             sum_gap_pen += gap_pen
 
         # ---- 可达性诊断: 规则控制在本块的最大能力 ----
         cap_c = block_cap_charge(rbb_info_obs['pbrulemax'], eta_c=0.98, time=time)
         cap_d = block_cap_discharge(rbb_info_obs['pbrulemin'], eta_d=0.98, time=time)
-        target_feasible = (soc_target <= E_current + cap_c + tracker.soc_tol) and \
-                          (soc_target >= E_current - cap_d - tracker.soc_tol)
+        target_feasible = (soc_target <= E_current + cap_c + soc_tol_upper) and \
+                          (soc_target >= E_current - cap_d - soc_tol_upper)
 
         clip_amount = rbb_info['clip_amount']
         is_infeasible = rbb_info['is_infeasible']
@@ -417,7 +425,7 @@ def train(num_iterations_H,
         prGreen('soc_signal={:.4f} soc_target={:.3f} SOC={:.3f} gap_raw={:.3f} '
                 '(tol={}, feasible={})'.format(
                     soc_signal, soc_target, reward_details['SOC'],
-                    gap_raw, tracker.soc_tol, target_feasible))
+                    gap_raw, soc_tol_upper, target_feasible))
         prGreen('price={} p_level={} wind={:.1f} w_level={} (wT={}, wB={})'.format(
             reward_details['pr'], reward_details['price_level'],
             reward_details['u'], reward_details['wind_level'],
@@ -509,7 +517,7 @@ def train(num_iterations_H,
             if episode_steps % 480 == 0:
                 case_metrics, overall = nine_case_test(
                     agent_H, tracker, env_test, rbb_system, seed=42,
-                    phase_feat=phase_feat)
+                    phase_feat=phase_feat, soc_tol_upper=soc_tol_upper)
                 if use_csv:
                     for m in case_metrics:
                         df_test_rows.append({
@@ -1046,7 +1054,14 @@ if __name__ == "__main__":
     parser.add_argument('--rbb_rated_power', default=10.0, type=float,
                         help='BESS rated charge/discharge power (MW)')
     parser.add_argument('--soc_tol', default=SOC_TOL, type=float,
-                        help='SOC 目标死区 (MWh), 与规则下层死区同源')
+                        help='【上层】gap 罚的豁免带 (MWh): H 只对超过该带的目标残差付费。'
+                             '默认 0.1 (=6 MW·min)。与下层跟踪死区已解耦 —— '
+                             '下层用什么死区由 --tracker_dead_zone 决定')
+    parser.add_argument('--tracker_dead_zone', default=0.0, type=float,
+                        help='【下层】SocTracker 的跟踪死区 (MWh)。默认 0.0 = 尽力追随'
+                             '(残差 0.01 MWh 也追, δ=0 时只做窗口允许的最小被迫吞吐); '
+                             '设为 >0 复现旧的"死区内不动作"行为, 但必须 ≤ --soc_tol, '
+                             '否则会出现规则停住、上层照罚的幽灵税')
 
     # ---- LEPRRLRB: LLM 分段微调 ----
     parser.add_argument('--llm_provider', default=None, type=str,
@@ -1183,8 +1198,16 @@ if __name__ == "__main__":
     )
 
     # 下层: 规则控制器 (无 RL, 无 lam2)
-    tracker = SocTracker(soc_tol=args.soc_tol, eta_c=0.98, eta_d=0.98,
+    #   跟踪死区默认 0 (尽力追随): 0.1 MWh 的豁免只给上层的 gap 罚 (--soc_tol)。
+    tracker = SocTracker(soc_tol=args.tracker_dead_zone, eta_c=0.98, eta_d=0.98,
                          time=1.0 / 60, rated_power=args.rbb_rated_power)
+    prCyan('LEPRRLRB: SOC 死区归属 — 下层 tracker_dead_zone={} MWh '
+           '(0=尽力追随) / 上层 gap 豁免 --soc_tol={} MWh'.format(
+               args.tracker_dead_zone, args.soc_tol))
+    if args.tracker_dead_zone > args.soc_tol:
+        prRed('LEPRRLRB: ⚠ tracker_dead_zone ({}) > --soc_tol ({}) → '
+              '规则会停在上层仍在收费的区间里 (幽灵税)'.format(
+                  args.tracker_dead_zone, args.soc_tol))
 
     # 上层: TD3 + EMA 实际成本对偶 (lam1 ∈ [3, 100], 初始 5.0)
     # P0.3: 观测维数 = 4 (pr,u,E,P_G) + 相位特征 (0/2/5)
@@ -1228,7 +1251,8 @@ if __name__ == "__main__":
               use_csv=use_csv,
               adj_bounds=adj_bounds,
               llm_call_fn=llm_call_fn,
-              phase_feat=args.phase_feat)
+              phase_feat=args.phase_feat,
+              soc_tol_upper=args.soc_tol)
         if upload:
             writer.close()
 

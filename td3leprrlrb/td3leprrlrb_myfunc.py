@@ -25,8 +25,13 @@ Upper layer (H, RL):
 Lower layer (L, 规则): SocTracker (见 td3leprrlrb_rule_bess.py)
   在 RBB 可行窗口内以最大能力跟踪 soc_target:
     * 物理可行 + 平抑波动 = 窗口硬保证 → clip_amount ≡ 0
-    * 死区 SOC_TOL (=0.1 MWh = 6 MW·min) 内不动作, 保留平抑作业余量
+    * **无跟踪死区** (tracker soc_tol 默认 0): 残差 0.01 MWh 也追;
+      δ=0 时只做窗口允许的最小被迫吞吐。
   因此下层无需 RL; 块末残差 |soc_target - SOC| 近似等于"不可行量"。
+
+【死区归属】0.1 MWh 的豁免**只属于上层罚项** (`SOC_TOL`, 见 gap_penalty):
+  H 只对超过 0.1 MWh 的目标残差付费, 下层则尽力追到 0 —— 不对称方向安全
+  (L 能消的残差 ⊇ H 豁免的), 不会产生幽灵税。
 
 【阈值依赖面】风速档 wind_level(u) 同时进入
   (a) 收益权重 wT = WT_WIND[wind]×WT_PRICE[price] 与 wB (经 SOC_SAFE_RANGES[wind])
@@ -141,9 +146,11 @@ C1_RISK = {'LOW': 0.8, 'MEDIUM': 1.0, 'HIGH': 1.2}
 # unfeasible_gap（平抑可行性缺口, MW）进入 c1 的系数
 W_GAP = 10.0
 
-# SOC 目标跟踪死区 (MWh): 0.1 MWh = 6 MW × 1 min
-#   —— 下层规则控制器的死区与该裕度【必须同源】: 否则规则停在死区边缘时,
-#      上层会被收一笔永远消不掉的"幽灵税"。
+# 【上层】SOC 目标 gap 罚的豁免带 (MWh): 0.1 MWh = 6 MW × 1 min
+#   —— 这是"H 不必为零头付费"的记账约定, 只作用于上层罚项;
+#      下层的 SocTracker 默认没有死区 (尽力追随), 因此不会出现
+#      "规则停住、上层却照罚"的幽灵税 (不对称方向是安全的)。
+#      仅当把 --tracker_dead_zone 调成 > 本值时, 幽灵税才会回归。
 SOC_TOL = 0.1
 # SOC 目标映射: a6 ∈ [-0.5, 0.5] → soc_target ∈ [0.5, 5.5]
 SOC_TARGET_CENTER = 3.0
@@ -299,8 +306,11 @@ def soc_target_from_signal(a6):
 def gap_penalty(soc_target, SOC_end, tol=SOC_TOL):
     """上层可行性罚 (块末结算): 10 * max(0, |soc_target - SOC_end| - tol).
 
-    由于下层规则是"最大能力跟踪", 块末残差 ≈ 不可行量;
-    tol 与下层死区同源 → 只罚真正的不可行部分。
+    由于下层规则是"最大能力跟踪 + 无死区", 块末残差 ≈ 不可行量;
+    tol 是**上层自己的记账豁免带** (--soc_tol, 默认 0.1): 残差不超过它就不收费,
+    与下层跟踪死区无关 (下层默认 0, 尽力追到零)。
+    ⚠ 只罚真正的不可行部分 —— 若残差里混入了"风阶跃迫使的吞吐"造成的过冲,
+      那部分也在此被收费, 属口径的已知不精确处 (见 SocTracker 文档)。
     """
     return W_GAP * max(0.0, abs(float(soc_target) - float(SOC_end)) - tol)
 
@@ -623,7 +633,7 @@ except ImportError:
 
 def nine_case_test(agent_H, tracker, env_test, rbb_system,
                    scenario=None, test_csv=False, output=None, seed=None,
-                   phase_feat=0):
+                   phase_feat=0, soc_tol_upper=SOC_TOL):
     """
     TD3LEPRRLRB 45-step 9-case in-training test (下层 = 规则控制器).
 
@@ -713,10 +723,11 @@ def nine_case_test(agent_H, tracker, env_test, rbb_system,
             ptur=ptur, pb_cmd=pb_cmd,
         )
 
-        # 块末: SOC 目标可行性罚 (tol 与下层规则死区同源)
+        # 块末: SOC 目标可行性罚 (豁免带 = 上层 --soc_tol, 与下层跟踪死区解耦)
         gap_pen = 0.0
         if step % 5 == 4:
-            gap_pen = gap_penalty(soc_target, float(obs2[2]), tol=tracker.soc_tol)
+            gap_pen = gap_penalty(soc_target, float(obs2[2]),
+                                  tol=soc_tol_upper)
         c1 = c1_step + gap_pen
 
         bi = step // 5
