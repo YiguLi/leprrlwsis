@@ -186,8 +186,9 @@ class SocTracker:
     设计依据 (见项目文档):
       * 下层任务优先级: 物理可行 > 平抑波动 > 追踪上层目标;
       * 前两项由 RBB 可行窗口 [pbrulemin, pbrulemax] 硬保证;
-      * 追踪目标 = "约束死拍": 在窗口内用最大可用能力把 SOC 拉向目标,
-        且**不做死区豁免** —— 残差 0.01 MWh 也照追 (见 soc_tol 说明)。
+      * 追踪目标 = 一条规则: `pb = clip(ΔSOC/gain, pbrulemin, pbrulemax)`
+        (即"一步填平所需功率"投影到可行窗口上), 且**不做死区豁免** ——
+        残差 0.01 MWh 也照追 (见 soc_tol 说明)。
 
     【死区归属 (本轮修正)】0.1 MWh 的豁免【只属于上层罚项】, 不属于下层:
       * 上层 `gap_penalty = 10·max(0, |target−SOC_末| − SOC_TOL)` —— H 只对超过
@@ -213,30 +214,18 @@ class SocTracker:
                      设为 >0 复现旧的"死区内不动作"行为 (仅用于 A/B 对照)。
     eta_c, eta_d : float  充/放效率。
     time : float  步长 (小时)。
-    rated_power : float  额定功率 (MW), 用于把指令先限幅到 [-rated, rated]。
-    pb_cap : float or None
-        自愿指令的绝对值上限 (MW)。推荐传 RBB 的 fluctuation_limit (=3):
-        这样"自己的动作不会把下一步的可行窗口推出 0", 下一步总能停在目标上,
-        从而消除**自致过冲** (为 0.01 MWh 的差值用大功率、却造成 0.16 MWh
-        SOC 跳变的那类现象)。None / <=0 = 不限制 (旧行为, 追得更快但可能过冲)。
+    rated_power : float  额定功率 (MW)。非空窗口下规则不必用它限幅 —— RBB 物理
+                     边界已含 ±rated, "夹进窗口"天然满足额定约束; 只在窗口为空
+                     (RBB 将忽略指令) 时用它把请求量压回执行器范围。
     """
 
     def __init__(self, soc_tol=0.0, eta_c=0.98, eta_d=0.98, time=1.0 / 60,
-                 rated_power=10.0, pb_cap=None):
+                 rated_power=10.0):
         self.soc_tol = soc_tol
         self.eta_c = eta_c
         self.eta_d = eta_d
         self.time = time
         self.rated_power = rated_power
-        # 自愿吞吐上限 (MW)。设成 RBB 的 fluctuation_limit 时, 可保证
-        # "自己的动作不会把下一步的可行窗口推出 0" (推导见 act 文档) ⇒
-        # 下一步总能停下 ⇒ 不会出现"为了 0.01 MWh 的差值用了 10 MW、
-        # 结果 SOC 变化 0.16 MWh"这类**自致过冲**。
-        # None / <=0 表示不限制 (旧行为: 追得更快, 但可能被自己推走的窗口逼着过冲)。
-        self.pb_cap = pb_cap
-        # 诊断侧信道: act() 每次更新, 供主循环记录 (不影响返回值)
-        self.last_pb_voluntary = 0.0   # 按残差需要量限幅后的自愿指令 (MW)
-        self.last_pb_forced = 0.0      # 被窗口/不可行兜底额外强加的部分 (MW)
 
     # ---- 每 MW 电力在一步内改变多少 SOC (MWh) ----
     def gain_charge(self):
@@ -245,66 +234,56 @@ class SocTracker:
     def gain_discharge(self):
         return self.time / self.eta_d          # 放电: pb<0
 
-    def effective_pb_cap(self):
-        """自愿指令的有效上限 (MW)。"""
-        if self.pb_cap is None or self.pb_cap <= 0:
-            return float(self.rated_power)
-        return float(min(self.rated_power, self.pb_cap))
-
     def act(self, E, soc_target, pbrulemin, pbrulemax):
         """返回本步 BESS 功率指令 pb (MW, 正=充电).
 
-        E          : 当前 SOC (MWh)
-        soc_target : 上层给出的目标 SOC (MWh)
-        pbrulemin/max : 本步 RBB 可行窗口 (MW)
+        规则只有一条 (不含任何限幅/死区附加机制):
 
-        【为什么自愿指令要受 pb_cap 限幅】
-        窗口位置 = ptur − pg_prev ± 3, 而本步 pb 会成为下一步的 pg_prev 分量:
-            pg_prev' = ptur − pb
-        下一步窗口下沿 = ptur' − pg_prev' − 3 = pb + (ptur' − ptur) − 3
-        因此只要 |pb| ≤ 3 (= fluctuation_limit) 且风速无阶跃 (ptur' = ptur),
-        下一步窗口必含 0 ⇒ 规则下一步总能停在目标上 (不会被迫继续同向吞吐)。
-        反之 |pb| > 3 会把窗口推离 0, 下一步被逼继续吞吐, 于是**过冲**目标
-        (实测 δ=0.30 的块: 第 2 步自愿充 9 MW → 第 3 步窗口 [6,10], 只需 0.37 MW
-         却被逼充 6 MW → 块末残差从 0.006 涨到 0.141)。
-        风阶跃 (|ptur' − ptur| > 3) 造成的窗口偏移无法由本规则消除 —— 那属于
-        外部强制吞吐, 规则只能取其最小值 (窗口内离 0 最近的点)。
+            need = ΔSOC / gain        # "一步填平 SOC 残差"所需功率 (ΔSOC×60/η)
+            pb   = clip(need, pbrulemin, pbrulemax)
+
+        即: **在可行窗口 pbrule 内取最接近目标的动作** —— need 落在窗口外时贴窗口
+        边界 (用满可用权限), 落在窗口内时就是 need 本身 (一步到位)。
+        非空窗口下 `rated_power` 不必单独限幅: RBB 的物理边界 pbphysicsmin/max 已含
+        ±rated, 所以"夹进窗口"天然满足额定约束。
+
+        【窗口为空时】(pbrulemin > pbrulemax = 物理与波动约束无交集) RBB 会忽略指令,
+        直接取物理边界中"最靠近波动窗口"的一端出力; 这里只把请求量压回 ±rated_power
+        (执行器上限), 免得日志里留下物理上给不出的指令值。此时 RBB 的 clip_amount
+        可能非零 —— 那是"指令被忽略"的标记, 不是平抑约束被破坏 (|ΔP_G| ≤ 3 在这类
+        风阶跃下物理上不可达, 已由 inevitable_violation 单列)。
+
+        【已知行为: 窗口可以把动作顶离 need】
+        窗口位置 = ptur − pg_prev ± 3, 而本步 pb 会成为下一步 pg_prev 的一部分。
+        因此 |pb| > 波动限值时, 动作会把下一步窗口推离 0, 下一步的 clip 又会把它
+        顶回窗口边界 —— 表现为**被迫同向吞吐**, 可能过冲目标 (实测 δ=0.30 的块:
+        第 2 步 need=9.37 → 充 9 MW; 第 3 步窗口变 [6,10], need 仅 0.37 却被顶到
+        6 MW → 块末残差 0.006 → 0.141)。风阶跃使 |ptur − pg_prev| > 13 时窗口被
+        压成单点 {10}, 同理强制 10 MW 吞吐 (SOC 变 0.163 MWh)。
+        这是"波动约束优先于 SOC 目标"的直接后果, 不是本规则的缺陷; 要改只能重排
+        优先级 (会破坏 |ΔP_G| ≤ 3)。
         """
         delta = float(soc_target) - float(E)
 
-        # (1) 已在目标上 (δ == 0; soc_tol 默认 0 ⇒ 该分支仅在此触发):
-        #     不主动制造吞吐, 但仍须落在可行窗口内 —— 风速阶跃 >3 MW/min 时
-        #     窗口可能不含 0, 此时做最小幅度的**被迫**吞吐。规则自己完成该裁剪,
-        #     使 RBB 的 clip_amount 恒为 0 (只做真正的安全兜底)。
-        #     soc_tol > 0 时复现旧行为 (δ 在死区内一律不追)。
+        # 已在目标上: need = 0, 于是 clip(0, 窗口) —— 不主动制造吞吐, 但仍须落在
+        # 可行窗口内 (风速阶跃使窗口不含 0 时, 做最小幅度的被迫吞吐; 规则自己完成
+        # 该裁剪, 非空窗口下使 RBB 的 clip_amount 恒为 0, 只做真正的安全兜底)。
+        # soc_tol > 0 时在 |δ| ≤ soc_tol 内同样按 need=0 处理 (复现旧的"最小吞吐"行为)。
         if abs(delta) <= self.soc_tol:
             if pbrulemin > pbrulemax:
-                self.last_pb_voluntary = 0.0
-                self.last_pb_forced = 0.0
                 return 0.0
-            pb = float(np.clip(0.0, pbrulemin, pbrulemax))
-            self.last_pb_voluntary = 0.0
-            self.last_pb_forced = pb
-            return pb
+            return float(np.clip(0.0, pbrulemin, pbrulemax))
 
-        # (2) 约束死拍: 一步补齐所需功率 (残差 0.01 MWh 也照追)
+        # 一步填平 SOC 残差所需的功率
         g = self.gain_charge() if delta > 0 else self.gain_discharge()
-        pb = delta / g
+        need = delta / g
 
-        # (3) 自愿限幅: 先按额定, 再按 pb_cap (防自致过冲, 见上)
-        cap = self.effective_pb_cap()
-        pb = float(np.clip(pb, -cap, cap))
-        pb_vol = pb
-
-        # (4) 不可行窗口 (pbrulemin > pbrulemax): 交由 RBB 的不可行处理逻辑
+        # 不可行窗口: 交给 RBB 兜底 (该分支 RBB 会忽略指令, 直接贴物理边界出力)。
+        # 指令本身压回 ±额定: 否则日志里会出现 17.98 MW 这种执行器给不出的数字,
+        # 且 RBB 的 clip_amount 诊断会被无意义的原始量污染。
         if pbrulemin > pbrulemax:
-            self.last_pb_voluntary = pb_vol
-            self.last_pb_forced = 0.0
-            return pb
+            return float(np.clip(need, -self.rated_power, self.rated_power))
 
-        # (5) 饱和进可行窗口: 贴边界行动 = 用满可用权限
-        pb = float(np.clip(pb, pbrulemin, pbrulemax))
-        self.last_pb_voluntary = pb_vol
-        self.last_pb_forced = pb - pb_vol        # >0 = 被迫多做的量
-        return pb
+        # 夹进可行窗口 = 在 pbrule 内取最接近目标的动作
+        return float(np.clip(need, pbrulemin, pbrulemax))
 

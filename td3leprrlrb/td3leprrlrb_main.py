@@ -9,11 +9,11 @@ H (RL, 6 维动作 = 5 台风机桨距 + 1 个 SOC 目标信号):
     * 唯一决策者: 追求收益, 并为一个"不可行的 SOC 目标"付费。
     * a6 ∈ [-0.5, 0.5] → soc_target = 3 + 5*a6 ∈ [0.5, 5.5], 块级(5 步)固定。
 L (规则, SocTracker, 1 维动作 pb):
-    * 在 RBB 可行窗口 [pbrulemin, pbrulemax] 内以【最大能力】跟踪 soc_target,
-      **无跟踪死区** (默认 tracker_dead_zone ∈ 0): 残差 0.01 MWh 也追;
-      δ=0 时只做窗口允许的最小被迫吞吐。
-    * 物理可行 + 平抑波动由窗口硬保证 → clip_amount ≡ 0;
-      因此块末残差 |soc_target - SOC_end| ≈ 不可行量。
+    * 规则只有一条: pb = clip(ΔSOC/gain, pbrulemin, pbrulemax) —— "一步填平 SOC
+      残差"所需功率投影到 RBB 可行窗口, **无跟踪死区、无附加限幅机制**:
+      残差 0.01 MWh 也追 (pb 仅 0.61 MW); 窗口不含 0 时只做窗口允许的最小被迫吞吐。
+    * 物理可行 + 平抑波动由窗口硬保证 → 可行窗口步 clip_amount ≡ 0;
+      因此块末残差 |soc_target - SOC_end| ≈ 不可行量 (窗口行走造成的过冲除外, 见 README §9)。
 
 【死区归属】0.1 MWh 的豁免只给上层: 上层 gap 罚按 --soc_tol 豁免 0.1 MWh
   (H 不必为零头付费), 下层则尽力追到 0。不对称方向安全, 无幽灵税;
@@ -406,13 +406,9 @@ def train(num_iterations_H,
             sum_gap_pen += gap_pen
 
         # ---- 可达性诊断: 规则控制在本块的最大能力 ----
-        # 上限取 min(窗口, 自愿限幅) —— 与 tracker 的实际行为一致 (cap 之后
-        # 单块可达跨度 ≈ 5·cap·η_c·dt ≈ 0.245 MWh, 不再是窗口给的乐观值)。
-        _pcap = tracker.effective_pb_cap()
-        cap_c = block_cap_charge(min(rbb_info_obs['pbrulemax'], _pcap),
-                                 eta_c=0.98, time=time)
-        cap_d = block_cap_discharge(max(rbb_info_obs['pbrulemin'], -_pcap),
-                                    eta_d=0.98, time=time)
+        # 上限就是窗口本身 (tracker 的动作 = clip(need, 窗口), 无附加限幅)
+        cap_c = block_cap_charge(rbb_info_obs['pbrulemax'], eta_c=0.98, time=time)
+        cap_d = block_cap_discharge(rbb_info_obs['pbrulemin'], eta_d=0.98, time=time)
         target_feasible = (soc_target <= E_current + cap_c + soc_tol_upper) and \
                           (soc_target >= E_current - cap_d - soc_tol_upper)
 
@@ -595,8 +591,6 @@ def train(num_iterations_H,
                 'original_action_H': original_action_H,
                 'applied_action_H': applied_action_H,
                 'action_pb_cmd': pb_cmd,
-                'pb_voluntary': float(tracker.last_pb_voluntary),
-                'pb_forced': float(tracker.last_pb_forced),
                 'action_rbb': action_rbb,
                 'r1': r1, 'c1_step': c1_step,
                 'c1': c1_step + gap_pen,
@@ -718,9 +712,6 @@ def train(num_iterations_H,
 
             # RBB-specific metrics
             writer.add_scalar('rbb/clip_amount', clip_amount, step)
-            writer.add_scalar('rbb/pb_voluntary',
-                              float(tracker.last_pb_voluntary), step)
-            writer.add_scalar('rbb/pb_forced', float(tracker.last_pb_forced), step)
             writer.add_scalar('rbb/pbrule', float(pbrule), step)
             writer.add_scalar('rbb/pb_original', pb_original, step)
             writer.add_scalar('rbb/unfeasible_gap', rbb_info['unfeasible_gap'], step)
@@ -1069,15 +1060,10 @@ if __name__ == "__main__":
                              '下层用什么死区由 --tracker_dead_zone 决定')
     parser.add_argument('--tracker_dead_zone', default=0.0, type=float,
                         help='【下层】SocTracker 的跟踪死区 (MWh)。默认 0.0 = 尽力追随'
-                             '(残差 0.01 MWh 也追, δ=0 时只做窗口允许的最小被迫吞吐); '
+                             '(pb = clip(ΔSOC/gain, 可行窗口), 残差 0.01 MWh 也追; '
+                             'δ=0 时只做窗口允许的最小被迫吞吐); '
                              '设为 >0 复现旧的"死区内不动作"行为, 但必须 ≤ --soc_tol, '
                              '否则会出现规则停住、上层照罚的幽灵税')
-    parser.add_argument('--tracker_pb_cap', default=0.0, type=float,
-                        help='【下层】自愿指令绝对值上限 (MW)。默认 0 = 自动取 '
-                             '--rbb_fluctuation_limit (=3): 保证自己的动作不会把下一步的'
-                             '可行窗口推出 0 ⇒ 不会出现"为小残差用大功率、导致 SOC 过冲"'
-                             '的自致过冲 (代价: 单块可达 SOC 跨度降到 ≈±0.245 MWh)。'
-                             '负值 = 不限制 (旧行为, 追得快但可能过冲); 正值 = 用该值')
 
     # ---- LEPRRLRB: LLM 分段微调 ----
     parser.add_argument('--llm_provider', default=None, type=str,
@@ -1215,28 +1201,12 @@ if __name__ == "__main__":
 
     # 下层: 规则控制器 (无 RL, 无 lam2)
     #   跟踪死区默认 0 (尽力追随): 0.1 MWh 的豁免只给上层的 gap 罚 (--soc_tol)。
-    #   自愿指令默认限幅到波动限值 (--tracker_pb_cap 0 = auto): 防自致过冲。
-    if args.tracker_pb_cap < 0:
-        _pb_cap = None
-    elif args.tracker_pb_cap == 0:
-        _pb_cap = args.rbb_fluctuation_limit
-    else:
-        _pb_cap = args.tracker_pb_cap
+    #   动作规则: pb = clip(ΔSOC/gain, pbrulemin, pbrulemax) —— 无附加限幅机制。
     tracker = SocTracker(soc_tol=args.tracker_dead_zone, eta_c=0.98, eta_d=0.98,
-                         time=1.0 / 60, rated_power=args.rbb_rated_power,
-                         pb_cap=_pb_cap)
+                         time=1.0 / 60, rated_power=args.rbb_rated_power)
     prCyan('LEPRRLRB: SOC 死区归属 — 下层 tracker_dead_zone={} MWh '
            '(0=尽力追随) / 上层 gap 豁免 --soc_tol={} MWh'.format(
                args.tracker_dead_zone, args.soc_tol))
-    if _pb_cap is None:
-        prYellow('LEPRRLRB: 自愿指令不限幅 (--tracker_pb_cap -1): 追得快, 但 '
-                 '|pb|>波动限值 时会把下一步窗口推离 0 → 可能自致过冲')
-    else:
-        prCyan('LEPRRLRB: 自愿指令限幅 |pb_vol| ≤ {:.2f} MW '
-               '(≤ 波动限值 {:.2f} ⇒ 下一步窗口含 0 ⇒ 不会自致过冲; '
-               '代价: 单块可达 SOC 跨度 ≈ {:.3f} MWh)'.format(
-                   _pb_cap, args.rbb_fluctuation_limit,
-                   _pb_cap * 0.98 / 60 * 5))
     if args.tracker_dead_zone > args.soc_tol:
         prRed('LEPRRLRB: ⚠ tracker_dead_zone ({}) > --soc_tol ({}) → '
               '规则会停在上层仍在收费的区间里 (幽灵税)'.format(
