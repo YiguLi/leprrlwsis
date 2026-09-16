@@ -18,7 +18,10 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
       - 观测 (5 维蒸馏) = [pbrulemin/10, pbrulemax/10, **soc_target/10**, SOC/10, u/10]
         (第 3 维原为 shadow_price);
       - r2 = −100 · clip_amount            (原影子套利项随信号语义一起删除);
-      - c2 = 1000 · |soc_target − SOC'|    (追踪误差进拉格朗日约束口);
+      - c2 = 1000 · slack,  slack = max(0, |target−SOC'| − |target−SOC_best|),
+        SOC_best = SOC + g·clip(δ/g, RBB 窗口)  ← 规则 SocTracker 的动作;
+        只罚"本步能做到却没做"的部分 —— 块首够不着的目标跳变不计费, 零成本动作
+        恰好是规则下层 (见 td3per_myfunc.soc_track_slack);
       - lam2 ∈ [10, 500], d_block_L = 20 → 地板 2.5, 每块 10 次更新;
       - L 层折扣/探索按 td3per 原口径: --l_discount 0.98 (步级), --l_epsilon 50000。
 
@@ -164,10 +167,11 @@ def train(num_iterations_H,
     d_block_H = 50.0        # 初值: 每块 sum_c1 预算 (先松后紧; 与 td3perrb 一致)
     d_block_H_min = 5.0     # 地板: 10·max(0,|δ|−0.1) ≤ 5 → 含死区总 |δ| ≤ 0.6
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    #   sum_c2 = 1000·|soc_target − SOC'| 的块内累计
-    #   ⚠️ c2 口径已由"固定安全带越界"改为"SOC 目标追踪误差", 量级显著变大
-    #      (每步 ~100·|δ|), 而 d_block_L 仍沿用 td3per 的 20.0/2.5 —— 见
-    #      td3per_myfunc.lower_cost_soc_track 的标定提示 (lam2 可能长期贴顶)。
+    #   sum_c2 = 1000·slack 的块内累计, slack = "能力内追踪失败量" (见 myfunc)
+    #   * 尽力追的 L: sum_c2 ≡ 0;  完全不动而 |δ|≥A: 每步 ~50, 每块 ~250;
+    #     最坏 (反向满功率): 每步 ≤ 340。
+    #   * 于是 d_block_L = 20 现读作"允许每块浪费 ≈0.02 MWh 的可达量 (≈0.4 步能力)",
+    #     地板 2.5 为"≈0.05 步能力" —— 是一个**可满足**的约束, lam2 不再必然贴顶。
     d_block_L = 20.0        # 初值: 每块 sum_c2 预算
     d_block_L_min = 2.5     # curriculum 收紧地板
     if use_csv:
@@ -314,15 +318,21 @@ def train(num_iterations_H,
 
         # ================================================================
         # 下层 L 奖励/成本 (SOC 目标追踪口径)
-        #   r2 = −100·clip_amount              (RBB 硬裁剪量)
-        #   c2 = 1000·|soc_target − SOC'|      (追踪误差 → 拉格朗日约束)
+        #   r2 = −100·clip_amount                 (RBB 硬裁剪量)
+        #   c2 = 1000·slack, slack = max(0, |target−SOC'| − |target−SOC_best|)
+        #        SOC_best = SOC + g·clip(δ/g, 窗口) —— 规则 SocTracker 的动作;
+        #        只罚"本步能做到却没做"的部分 (块首够不着的跳变不计费)
         # ================================================================
         clip_amount = rbb_info['clip_amount']
         is_infeasible = rbb_info['is_infeasible']
         inevitable_violation = rbb_info['inevitable_violation']
 
         r2 = lower_reward(clip_amount)
-        c2 = lower_cost_soc_track(soc_target, float(observation2[2]))
+        c2, c2_info = lower_cost_soc_track(
+            soc_target, E_current, float(observation2[2]),
+            rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
+            return_info=True)
+        c2_slack = c2_info['d_next'] - c2_info['d_best']
         sum_c2 += c2
 
         # 下一状态 L 观测: 用下一状态重算可行域 (pb 无关; soc_target 块内固定)
@@ -343,9 +353,11 @@ def train(num_iterations_H,
                 '(tol_upper={})'.format(
                     soc_signal, soc_target, reward_details['SOC'],
                     gap_raw, soc_tol_upper))
-        prGreen('r2 = {} (clip_amount={}) | c2 = {} (soc_track_err={:.4f})'.format(
-            round(r2, 3), round(clip_amount, 3), round(c2, 3),
-            abs(soc_target - float(observation2[2]))))
+        prGreen('r2 = {} (clip_amount={}) | c2 = {} (slack={:.4f} MWh, '
+                'd_next={:.4f} vs d_best={:.4f}, pb_best={:.3f})'.format(
+                    round(r2, 3), round(clip_amount, 3), round(c2, 3),
+                    c2_slack, c2_info['d_next'], c2_info['d_best'],
+                    c2_info['pb_best']))
         prGreen('price={} p_level={} wind={:.1f} w_level={} (wT={}, wB={})'.format(
             reward_details['pr'], reward_details['price_level'],
             reward_details['u'], reward_details['wind_level'],
@@ -507,7 +519,10 @@ def train(num_iterations_H,
                 'applied_action_L': applied_action_L,
                 'action_rbb': action_rbb,
                 'r1': r1, 'c1_step': c1_step, 'c1': c1_step + gap_pen,
-                'r2': r2, 'c2': c2,
+                'r2': r2, 'c2': c2, 'c2_slack': c2_slack,
+                'pb_best': c2_info['pb_best'],
+                'd_best': c2_info['d_best'], 'd_next': c2_info['d_next'],
+                'window_infeasible': float(c2_info['infeasible_window']),
                 'gap_raw': gap_raw, 'gap_pen': gap_pen,
                 'soc_track_err': abs(soc_target - float(observation2[2])),
                 'lam1': agent_H.lam,
@@ -613,12 +628,16 @@ def train(num_iterations_H,
             writer.add_scalar('reward_upper/degradation', reward_details['degradation'], step)
             writer.add_scalar('reward_lower/r2', r2, step)
             writer.add_scalar('reward_lower/c2', c2, step)
+            writer.add_scalar('reward_lower/c2_slack', c2_slack, step)
 
-            # SOC 目标跟踪
+            # SOC 目标跟踪 / 下层可达性诊断
             writer.add_scalar('target/soc_target', soc_target, step)
             writer.add_scalar('target/soc_signal', soc_signal, step)
             writer.add_scalar('target/gap_raw', gap_raw, step)
             writer.add_scalar('target/gap_pen', gap_pen, step)
+            writer.add_scalar('target/pb_best', c2_info['pb_best'], step)
+            writer.add_scalar('target/d_best', c2_info['d_best'], step)
+            writer.add_scalar('target/d_next', c2_info['d_next'], step)
 
             # RBB-specific metrics
             writer.add_scalar('rbb/clip_amount', clip_amount, step)
@@ -980,7 +999,9 @@ if __name__ == "__main__":
                  args.l_policy_delay, args.l_policy_noise, args.policy_delay, args.policy_noise,
                  agent_L.discount, agent_H.discount, args.l_epsilon, args.epsilon))
     prCyan('下层奖励/成本口径: r2 = -100·clip_amount; '
-           'c2 = 1000·|soc_target − SOC\'|; L 观测第 3 维 = soc_target/10 (原 shadow_price)')
+           'c2 = 1000·slack, slack = max(0, |target-SOC\'| - |target-SOC_best|), '
+           'SOC_best = SOC + g·clip(δ/g, RBB窗口) (能力内追踪失败量); '
+           'L 观测第 3 维 = soc_target/10 (原 shadow_price)')
     #TODO 是否预训练
     # agent_H.load_weights('output/1_2310S-run18')
     # agent_L.load_weights('output/1_2310S-run18')

@@ -101,7 +101,10 @@ PRRBB ──(加 LLM)──→ PRLE          TD3PRRBB ──(加 LLM)──→ T
   上层 6 维动作第 6 维语义由"影子电价"改为 **SOC 目标信号**（与 td3perrb 逐项一致：
   非分段奖励、块末 gap 罚、相位观测、逐维探索噪声、`lam1∈[3,100]`、每块 2 次更新）；
   下层仍是 TD3+PER 的 RL BESS，但信号与追踪目标同为 SOC 目标
-  （观测第 3 维 `soc_target/10`、`r2 = −100·clip_amount`、`c2 = 1000·|soc_target − SOC'|`）。
+  （观测第 3 维 `soc_target/10`、`r2 = −100·clip_amount`、
+  `c2 = 1000·slack`，其中 `slack = max(0, |target−SOC'| − |target−SOC_best|)` 为
+  "能力内追踪失败量"、`SOC_best = SOC + g·clip(δ/g, 窗口)` 即规则下层的动作——
+  块首够不着的目标跳变不计费，零成本动作恰是规则 `SocTracker`）。
   ⚠️ 改造前的 `output/TD3PER-run*` 权重（4 维 H 观测 + 影子电价下层）与新代码不兼容。
 - `td3leprrlrb` ← `td3prrlrb`：增加 **LLM 在线微调风速分段阈值**（±1 m/s 硬约束）+ 回放池 relabel
 - `td3prle` ← `td3prrbb`：增加 LLM 元控制器；`prle` ← `prrbb` 同理
