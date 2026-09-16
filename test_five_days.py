@@ -919,6 +919,14 @@ def main():
     if os.path.isfile(step_csv):
         os.remove(step_csv)
 
+    # ---- TensorBoard（与 CSV 双份保存）----
+    writer = None
+    tb_dir = os.path.join(out_dir, 'tensorboard')
+    if not args.no_tensorboard:
+        from torch.utils.tensorboard import SummaryWriter
+        writer = SummaryWriter(tb_dir)
+        print('TensorBoard: {}'.format(tb_dir))
+
     run_args = _build_args(device, args.seed)
 
     all_days = []
@@ -928,20 +936,23 @@ def main():
     try:
         for key in keys:
             spec = PROJECTS[key]
+            label = spec['label']
             print('\n' + '-' * 96)
-            print('  项目 {}  ({})  <- {}'.format(spec['label'], key, paths[key]))
+            print('  项目 {}  ({})  <- {}'.format(label, key, paths[key]))
             print('-' * 96)
             runner = ProjectRunner(
                 key, paths[key], device, run_args, engine,
                 phase_feat=args.phase_feat, soc_init=args.soc_init,
                 rng=np.random.RandomState(args.seed), verbose=True)
 
+            proj_days = []
             for i, d in enumerate(days):
                 day_idx = i + 1
                 t0 = time.time()
                 day, rows = runner.run_day(
                     d['series'], day_idx, d['iloc'], d['col'])
                 all_days.append(day)
+                proj_days.append(day)
                 print('    第{}天 (iloc[:,{}], 均值{:5.2f} m/s): '
                       '越限 {:>4d} 次, 越限总量 {:>8.4f} MW, '
                       '利润 {:>12.2f} 元   [{:.0f}s]'
@@ -956,6 +967,30 @@ def main():
                     df_rows.to_csv(step_csv, mode='a',
                                    header=(n_step_rows == 0), index=False)
                     n_step_rows += len(df_rows)
+
+                # ---- TensorBoard: 每天三项指标 (step = 天序号 1..N) ----
+                if writer is not None:
+                    for m in DAY_METRICS:
+                        writer.add_scalar('test/{}/{}'.format(label, m),
+                                          float(day[m]), day_idx)
+                    # ---- TensorBoard: 逐步子曲线 (每 10 步抽 1 点) ----
+                    base = (day_idx - 1) * runner.episode_length
+                    for r in rows[::10]:
+                        gs = base + int(r['step'])
+                        writer.add_scalar('step/{}/P_F'.format(label),
+                                          float(r['P_F']), gs)
+                        writer.add_scalar('step/{}/SOC'.format(label),
+                                          float(r['SOC']), gs)
+                        writer.add_scalar('step/{}/profit_step'.format(label),
+                                          float(r['profit_step']), gs)
+
+            # ---- TensorBoard: 本项目 5 天均值 (单点, step=0) ----
+            if writer is not None and proj_days:
+                for m in DAY_METRICS:
+                    mean_v = float(np.mean([dd[m] for dd in proj_days]))
+                    writer.add_scalar('test_mean/{}/{}'.format(label, m),
+                                      mean_v, 0)
+                writer.flush()
 
             # 每个项目结束就落一次盘，避免中途崩掉丢结果
             df_days = pd.DataFrame(all_days)
@@ -973,6 +1008,8 @@ def main():
                            discharge_mwh_mean=('discharge_mwh', 'mean')))
             df_sum.to_csv(summary_csv, index=False)
     finally:
+        if writer is not None:
+            writer.close()
         quit_engine()
 
     df_days = pd.DataFrame(all_days)
