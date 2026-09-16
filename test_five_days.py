@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-五天随机风速测试脚本（单文件，兼容 8 个项目）
+五天随机风速测试脚本（单文件，兼容 9 个方法，每方法可多组模型）
 ================================================================
 
 功能
@@ -16,19 +16,34 @@
    （seed=64 的 random.sample，覆盖 1..194 全部列），所以"从训练序列里抽"
    与"从列池里抽"完全等价。抽取方式与 env 的取列方式一致：用 iloc 位置。
 
-2. 对每个项目跑 5 个 episode（每天 1 个 episode，1440 步 = 24h×60min），
-   逐项目复刻它自己训练时的推理路径，但 **只前向、不更新网络**：
+2. 对每个方法跑 5 个 episode（每天 1 个 episode，1440 步 = 24h×60min），
+   逐方法复刻它自己训练时的推理路径，但 **只前向、不更新网络**：
        agent.is_training = False  → 探索噪声恒为 0，动作完全确定
        agent.observe_jump / update_policy / lam 更新全部不调用
    其余形式与训练相同：H 每 5 步决策一次、L 每步决策、RBB 硬裁剪
    （action[-1] <- pbrule）、env.step() 动态电价（CalPrice 峰谷平）。
 
-3. 每天记录三项指标（另有每步明细 CSV）：
+3. 【每方法多组模型】一个方法可以给多个模型目录（配合实验方法"每个方法跑
+   3 组不同模型"）：按给出顺序依次跑完（run 1/2/3…），所有 run 共用同一批
+   5 天风速。CSV 与 TensorBoard 都带 run 维度，并自动给出两级汇总：
+       five_day_summary.csv         每方法 × 每组模型（5 天均值）
+       five_day_method_summary.csv  每方法跨「全部模型 × 全部天」的 mean ± std ★主表
+   给 1 个目录时行为与旧版一致（run 恒为 1）。
+
+4. 每天记录三项指标（另有每步明细 CSV，均带 run/model 列）：
    - viol_count       功率波动越限次数      Σ 1[ |ΔP_G| > 3 MW ]
    - viol_excess_mw   功率波动越限总量      Σ max(|ΔP_G| - 3, 0)      [MW]
    - profit_rmb       利润                  Σ (P_G·pr - 490·max(-pb,0))·Δt  [元]
        电价 pr 与训练同分布 = env.CalPrice()（峰谷平 300/580/980）；
        bessdeg = 490 元/MWh 放电量（util.BESS_DEG_RMB_PER_MWH）。
+
+5. 【CSV + TensorBoard 双份保存】默认同时写，`--no-tensorboard` 关闭。
+   TB tag 结构（step 语义已标注）：
+       test/{方法}/run{n}/{指标}          step = 天序号 1..N（本组模型的逐日曲线）
+       method/{方法}/{指标}               step = 天序号（跨 run 均值，横向对比用）
+       method/{方法}/{指标}_min|_max      step = 天序号（跨 run 极值带）
+       step/{方法}/run{n}/P_F|SOC|profit_step
+                                          step = 全局步（按 run 顺延，不重叠）
 
 兼容项目与各自的推理路径
 ------------------------
@@ -69,44 +84,49 @@
 耗时提示
 --------
 瓶颈是 MATLAB 的 WFSim 前向仿真（约 0.3~1 s/步，与训练主循环同速）。
-1 步 = 1 分钟电量，所以「1 天 × 1 项目」= 1440 步 ≈ 十几分钟到半小时；
-5 天 × 8 项目 ≈ 数小时~十几小时。想快速抽查就用
-`--projects <key>` / `--days N` / `--episode-length N` 缩小规模。
+1 步 = 1 分钟电量，所以「1 天 × 1 组模型」= 1440 步 ≈ 十几分钟到半小时；
+9 方法 × 3 组 × 5 天 = 135 个 episode ≈ 19.4 万步 ≈ 单机 30~55 小时。
+建议按方法拆成多个进程并行跑（--projects 只测子集，--output 分开写目录）。
+想快速抽查就用 `--projects` / `--days N` / `--episode-length N` 缩小规模。
 
 初始 SOC
 --------
-默认统一 3.0 MWh（env.reset() 的原值），便于 8 个项目跨项目公平对比。
-加 --soc-init train 可改回各项目训练时的重置方式：
+默认统一 3.0 MWh（env.reset() 的原值），便于跨方法公平对比。
+加 --soc-init train 可改回各方法训练时的重置方式：
 per/prrbb/prle 用 3.0；td3per/td3prrbb/td3prle/td3prrlrb/td3perrb/td3leprrlrb
 用 U(0.5, 5.5) 随机（用脚本自带 RNG，可复现）。
 
 用法
 ----
+    # 每方法 3 组模型：一个方法后面直接跟 3 个目录，依次跑 run1/run2/run3
     python test_five_days.py \\
-        --per        output/PER-run1 \\
-        --prrbb      output/PRRBB-run2 \\
-        --prle       output/PRLE-run3 \\
-        --td3per     output/TD3PER-run140 \\
-        --td3prrbb   output/TD3PRRBB-run145 \\
-        --td3prle    output/TD3PRLE-run169 \\
-        --td3prrlrb  output/TD3PRRLRB-run166 \\
-        --td3perrb   output/TD3PERRB-run1 \\
-        --td3leprrlrb output/TD3LEPRRLRB-run23
+        --td3per     output/TD3PER-run137 output/TD3PER-run139 output/TD3PER-run140 \\
+        --td3prrbb   output/TD3PRRBB-run143 output/TD3PRRBB-run145 \\
+        --td3prle    output/TD3PRLE-run167 output/TD3PRLE-run168 output/TD3PRLE-run169 \\
+        --td3prrlrb  output/TD3PRRLRB-run164 output/TD3PRRLRB-run166 \\
+        --td3perrb   output/TD3PERRB-run170 \\
+        --td3leprrlrb output/TD3LEPRRLRB-run5 output/TD3LEPRRLRB-run23 \\
+        --per        output/PER-run1 --prrbb output/PRRBB-run2 --prle output/PRLE-run3
 
-    也可写成 --models per=output/x td3per=output/y ...
-    不带任何模型参数 → 交互式逐个输入路径（直接回车跳过该项目）。
+    也可用 --models（同一 KEY 重复即为多组）：
+        --models td3per=output/a td3per=output/b td3per=output/c
+    不带任何模型参数 → 交互式输入（一个方法的多组路径用空格分隔）。
     其它：--days 5 --seed 42 --output output/test_five_days
-         --projects td3per td3prrlrb        # 只测其中几个
-         --episode-length 120              # 只跑前 120 步（冒烟测试用）
+         --projects td3per td3prrlrb        # 只测其中几个方法
+         --max-runs 3                      # 每方法最多取前 3 组（0=不限制）
+         --episode-length 120               # 只跑前 120 步（冒烟测试用）
          --viol-limit 3.0 --deg-cost 490
-         --no-save-steps                   # 不写每步明细
+         --no-save-steps                    # 不写每步明细
+         --no-tensorboard                   # 只写 CSV（默认两者都写）
          --list-projects
 
-输出
+输出（CSV 与 TensorBoard 双份；TB 关掉时只有 CSV）
 ----
-    <output>/five_day_days.csv    每天 × 每项目 的汇总（三项指标）
-    <output>/five_day_summary.csv 每项目的 5 天均值/标准差
-    <output>/five_day_steps.csv   每步明细（可 --no-save-steps 关闭）
+    <output>/five_day_days.csv             每天 × 每方法 × 每组模型（三项指标）
+    <output>/five_day_summary.csv          每方法 × 每组模型的 5 天均值/标准差
+    <output>/five_day_method_summary.csv   每方法跨「全部模型 × 全部天」mean±std ★主表
+    <output>/five_day_steps.csv            每步明细（可 --no-save-steps 关闭）
+    <output>/tensorboard/                  TB 日志（可 --no-tensorboard 关闭）
 """
 
 from __future__ import annotations
@@ -164,6 +184,9 @@ WIND_CSV = 'FFC_speed_noise_1.csv'
 PROJECT_ORDER = ['per', 'prrbb', 'prle',
                  'td3per', 'td3prrbb', 'td3prle',
                  'td3prrlrb', 'td3perrb', 'td3leprrlrb']
+
+# 每天的三项核心指标（CSV 列名 = TensorBoard tag 末级）
+DAY_METRICS = ('viol_count', 'viol_excess_mw', 'profit_rmb')
 
 
 # ----------------------------------------------------------------------------
@@ -731,16 +754,20 @@ def sample_days(df, pool, n_days, seed):
 # ----------------------------------------------------------------------------
 def parse_args():
     p = argparse.ArgumentParser(
-        description='五天随机风速测试（单文件，兼容 8 个项目）',
+        description='五天随机风速测试（单文件，兼容 9 个项目，每方法可多组模型）',
         formatter_class=argparse.RawDescriptionHelpFormatter)
     for key in PROJECT_ORDER:
-        p.add_argument('--' + key, default=None, metavar='MODEL_DIR',
-                       help='{} 模型目录（含 actor_6.pkl/actor_1.pkl/...）'
-                            .format(PROJECTS[key]['label']))
+        p.add_argument('--' + key, nargs='+', default=None, metavar='MODEL_DIR',
+                       help='{} 模型目录；给多个 = 多组模型（如 3 个 run）: '
+                            '--{} output/a output/b output/c'
+                            .format(PROJECTS[key]['label'], key))
     p.add_argument('--models', nargs='*', default=None, metavar='KEY=PATH',
-                   help='另一种写法: per=output/x td3per=output/y ...')
+                   help='另一种写法，同一 KEY 可重复以给多组模型: '
+                        'td3per=output/a td3per=output/b ...')
+    p.add_argument('--max-runs', type=int, default=0,
+                   help='每个方法最多取前 N 组模型（0 = 不限制，默认 0）')
     p.add_argument('--projects', nargs='*', default=None, choices=PROJECT_ORDER,
-                   help='只测这些项目（默认：所有给了模型路径的项目）')
+                   help='只测这些方法（默认：所有给了模型路径的方法）')
     p.add_argument('--days', type=int, default=DEFAULT_DAYS,
                    help='抽取天数（默认 5，每天 1 个 episode）')
     p.add_argument('--episode-length', type=int, default=EPISODE_LENGTH,
@@ -761,17 +788,27 @@ def parse_args():
     p.add_argument('--device', choices=['auto', 'cpu', 'cuda'], default='auto')
     p.add_argument('--no-save-steps', action='store_true',
                    help='不写每步明细 CSV')
+    p.add_argument('--no-tensorboard', action='store_true',
+                   help='不写 TensorBoard（默认 CSV 与 TB 双份保存）')
     p.add_argument('--list-projects', action='store_true',
-                   help='列出支持的项目后退出')
+                   help='列出支持的方法后退出')
     return p.parse_args()
 
 
 def resolve_model_paths(args):
+    """收集模型路径 → OrderedDict{key: [abs_dir, ...]}（每方法可多组模型）。
+
+    给路径的三种方式（可混用，同一方法的多组按给出顺序即为 run 顺序）：
+      1) --td3per a b c        （每方法可给多个目录）
+      2) --models td3per=a td3per=b ...（同一 KEY 重复即为多组）
+      3) 不带参数 → 交互式输入（多个路径用空格分隔）
+    """
     paths = {}
     for key in PROJECT_ORDER:
         val = getattr(args, key, None)
         if val:
-            paths[key] = val.strip().strip('"')
+            paths.setdefault(key, []).extend(val)
+
     if args.models:
         for item in args.models:
             if '=' not in item:
@@ -779,9 +816,9 @@ def resolve_model_paths(args):
             k, v = item.split('=', 1)
             k = k.strip()
             if k not in PROJECTS:
-                raise SystemExit('未知项目 key: {}（可选 {}）'
+                raise SystemExit('未知方法 key: {}（可选 {}）'
                                  .format(k, '/'.join(PROJECT_ORDER)))
-            paths[k] = v.strip().strip('"')
+            paths.setdefault(k, []).append(v)
 
     if args.projects:
         paths = {k: v for k, v in paths.items() if k in args.projects}
@@ -790,33 +827,44 @@ def resolve_model_paths(args):
     if not paths:
         print('=' * 74)
         print('  五天随机风速测试  未检测到模型参数，进入交互式输入')
-        print('  （直接回车跳过该项目）')
+        print('  （直接回车跳过该方法；一个方法要跑多组模型就一次给多个路径）')
         print('=' * 74)
         for key in PROJECT_ORDER:
             spec = PROJECTS[key]
             try:
-                ans = input('  {:>13s} ({:>8s}) 模型路径: '
+                ans = input('  {:>13s} ({:>9s}) 模型路径(可多个, 空格分隔): '
                             .format(key, spec['label'])).strip().strip('"')
             except EOFError:
                 ans = ''
             if ans:
-                paths[key] = ans
+                paths[key] = [a for a in ans.replace(';', ' ').split() if a]
 
     if not paths:
         raise SystemExit('未提供任何模型路径，退出。')
 
-    # 校验目录
+    # ---- 逐路径校验 / 去重 / 截断 ----
     for k in list(paths):
-        d = os.path.abspath(paths[k])
-        if not os.path.isdir(d):
-            print('[警告] {} 的路径不是目录，跳过: {}'.format(k, d))
+        cleaned = []
+        for raw in paths[k]:
+            d = os.path.abspath(str(raw).strip().strip('"'))
+            if not os.path.isdir(d):
+                print('[警告] {} 的路径不是目录，跳过: {}'.format(k, d))
+                continue
+            if not os.path.isfile(os.path.join(d, 'actor_6.pkl')):
+                print('[警告] {} 目录下没有 actor_6.pkl，跳过: {}'.format(k, d))
+                continue
+            if d in cleaned:
+                print('[警告] {} 重复路径，已忽略: {}'.format(k, d))
+                continue
+            cleaned.append(d)
+        if args.max_runs and len(cleaned) > args.max_runs:
+            print('[提示] {} 给了 {} 组模型，--max-runs={} → 只取前 {} 组'
+                  .format(k, len(cleaned), args.max_runs, args.max_runs))
+            cleaned = cleaned[:args.max_runs]
+        if cleaned:
+            paths[k] = cleaned
+        else:
             del paths[k]
-            continue
-        if not os.path.isfile(os.path.join(d, 'actor_6.pkl')):
-            print('[警告] {} 目录下没有 actor_6.pkl，跳过: {}'.format(k, d))
-            del paths[k]
-            continue
-        paths[k] = d
 
     if not paths:
         raise SystemExit('所有模型路径都无效，退出。')
@@ -825,31 +873,77 @@ def resolve_model_paths(args):
     return {k: paths[k] for k in ordered}
 
 
-def print_summary(df_days, keys):
+def _agg_days(df_days, by):
+    """按 by 分组聚合三项指标（+辅助量），供两级汇总复用。"""
+    return (df_days.groupby(by, as_index=False)
+            .agg(samples=('day_idx', 'count'),
+                 runs=('run', 'nunique'),
+                 viol_count_mean=('viol_count', 'mean'),
+                 viol_count_std=('viol_count', 'std'),
+                 viol_excess_mw_mean=('viol_excess_mw', 'mean'),
+                 viol_excess_mw_std=('viol_excess_mw', 'std'),
+                 profit_rmb_mean=('profit_rmb', 'mean'),
+                 profit_rmb_std=('profit_rmb', 'std'),
+                 profit_rmb_sum=('profit_rmb', 'sum'),
+                 soc_mean=('soc_mean', 'mean'),
+                 discharge_mwh_mean=('discharge_mwh', 'mean')))
+
+
+def print_run_summary(df_run, keys):
+    """每方法 × 每 run（每组模型）的 5 天均值。"""
     print()
-    print('=' * 96)
-    print('  汇总（每项目 {} 天）'.format(df_days['day_idx'].nunique()))
-    print('=' * 96)
-    header = ('  {:>12s} {:>6s}  {:>12s} {:>12s}  {:>14s} {:>14s}'
-              .format('项目', '天数', '越限次数/天', '越限总量/天', '利润/天(元)', '利润合计(元)'))
-    print(header)
-    print('  ' + '-' * 90)
+    print('=' * 108)
+    print('  汇总 A：每方法 × 每组模型（5 天均值）')
+    print('=' * 108)
+    print('  {:>12s} {:>4s}  {:<22s} {:>6s} {:>11s} {:>13s} {:>14s}'
+          .format('方法', 'run', '模型', '天数', '越限次数/天', '越限总量/天', '利润/天(元)'))
+    print('  ' + '-' * 102)
     for key in keys:
         label = PROJECTS[key]['label']
-        sub = df_days[df_days['project'] == label]
+        sub = df_run[df_run['project'] == label]
+        for _, r in sub.iterrows():
+            print('  {:>12s} {:>4d}  {:<22s} {:>6d} {:>11.2f} {:>13.4f} {:>14.2f}'
+                  .format(label, int(r['run']), str(r['model'])[:22],
+                          int(r['samples']), r['viol_count_mean'],
+                          r['viol_excess_mw_mean'], r['profit_rmb_mean']))
+
+
+def print_method_summary(df_m, keys):
+    """每方法跨「所有 run × 所有天」的 mean ± std（论文表口径）。"""
+    print()
+    print('=' * 108)
+    print('  汇总 B：每方法（跨全部模型 × 全部天，mean ± std）★ 主表')
+    print('=' * 108)
+    print('  {:>12s} {:>5s} {:>7s}  {:>19s} {:>21s} {:>22s}'
+          .format('方法', '模型数', '样本数', '越限次数/天', '越限总量/天(MW)', '利润/天(元)'))
+    print('  ' + '-' * 102)
+    for key in keys:
+        label = PROJECTS[key]['label']
+        sub = df_m[df_m['project'] == label]
         if len(sub) == 0:
             continue
-        print('  {:>12s} {:>6d}  {:>12.2f} {:>12.4f}  {:>14.2f} {:>14.2f}'
-              .format(label, len(sub),
-                      sub['viol_count'].mean(),
-                      sub['viol_excess_mw'].mean(),
-                      sub['profit_rmb'].mean(),
-                      sub['profit_rmb'].sum()))
-    print('=' * 96)
+        r = sub.iloc[0]
+        print('  {:>12s} {:>5d} {:>7d}  {:>8.2f} ± {:<8.2f} {:>9.4f} ± {:<9.4f} '
+              '{:>10.2f} ± {:<10.2f}'
+              .format(label, int(r['runs']), int(r['samples']),
+                      r['viol_count_mean'], _std0(r['viol_count_std']),
+                      r['viol_excess_mw_mean'], _std0(r['viol_excess_mw_std']),
+                      r['profit_rmb_mean'], _std0(r['profit_rmb_std'])))
+    print('=' * 108)
     print('  说明: 越限次数 = Σ 1[|ΔP_G| > {} MW]; 越限总量 = Σ max(|ΔP_G| - {}, 0) [MW]'
           .format(FLUCT_LIMIT, FLUCT_LIMIT))
     print('        利润 = Σ (P_G·pr - {}·max(-pb,0))·Δt [元], Δt = 1/60 h'
           .format(BESS_DEG_RMB_PER_MWH))
+    print('        std 的样本口径 = 所有 (模型 × 天)，样本标准差 ddof=1；单样本时显示 0.00')
+
+
+def _std0(v):
+    """std 为空(nan)时显示 0.00，避免打印 nan。"""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    return 0.0 if f != f else f
 
 
 def main():
@@ -915,74 +1009,135 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
     step_csv = os.path.join(out_dir, 'five_day_steps.csv')
     days_csv = os.path.join(out_dir, 'five_day_days.csv')
-    summary_csv = os.path.join(out_dir, 'five_day_summary.csv')
+    summary_csv = os.path.join(out_dir, 'five_day_summary.csv')            # 每方法×每run
+    method_csv = os.path.join(out_dir, 'five_day_method_summary.csv')      # 每方法(跨run)
     if os.path.isfile(step_csv):
         os.remove(step_csv)
+
+    # ---- TensorBoard（与 CSV 双份保存）----
+    writer = None
+    tb_dir = os.path.join(out_dir, 'tensorboard')
+    if not args.no_tensorboard:
+        from torch.utils.tensorboard import SummaryWriter
+        writer = SummaryWriter(tb_dir)
+        print('TensorBoard: {}'.format(tb_dir))
 
     run_args = _build_args(device, args.seed)
 
     all_days = []
-    step_columns = None
     n_step_rows = 0
+    global_step = 0
+    n_episodes = sum(len(v) for v in paths.values()) * len(days)
+    print('计划: {} 个方法, 共 {} 组模型, {} 天/组 → {} 个 episode'
+          .format(len(paths), sum(len(v) for v in paths.values()), len(days),
+                  n_episodes))
 
     try:
         for key in keys:
             spec = PROJECTS[key]
-            print('\n' + '-' * 96)
-            print('  项目 {}  ({})  <- {}'.format(spec['label'], key, paths[key]))
-            print('-' * 96)
-            runner = ProjectRunner(
-                key, paths[key], device, run_args, engine,
-                phase_feat=args.phase_feat, soc_init=args.soc_init,
-                rng=np.random.RandomState(args.seed), verbose=True)
+            label = spec['label']
+            model_dirs = paths[key]
 
-            for i, d in enumerate(days):
-                day_idx = i + 1
-                t0 = time.time()
-                day, rows = runner.run_day(
-                    d['series'], day_idx, d['iloc'], d['col'])
-                all_days.append(day)
-                print('    第{}天 (iloc[:,{}], 均值{:5.2f} m/s): '
-                      '越限 {:>4d} 次, 越限总量 {:>8.4f} MW, '
-                      '利润 {:>12.2f} 元   [{:.0f}s]'
-                      .format(day_idx, d['iloc'], day['wind_mean'],
-                              day['viol_count'], day['viol_excess_mw'],
-                              day['profit_rmb'], time.time() - t0))
+            for run_idx, model_dir in enumerate(model_dirs):
+                run_no = run_idx + 1
+                model_name = os.path.basename(model_dir.rstrip('\\/'))
+                print('\n' + '-' * 96)
+                print('  方法 {}  ({})  第 {}/{} 组模型  <- {}'
+                      .format(label, key, run_no, len(model_dirs), model_dir))
+                print('-' * 96)
+                runner = ProjectRunner(
+                    key, model_dir, device, run_args, engine,
+                    phase_feat=args.phase_feat, soc_init=args.soc_init,
+                    rng=np.random.RandomState(args.seed), verbose=True)
 
-                if not args.no_save_steps and rows:
-                    df_rows = pd.DataFrame(rows)
-                    if step_columns is None:
-                        step_columns = list(df_rows.columns)
-                    df_rows.to_csv(step_csv, mode='a',
-                                   header=(n_step_rows == 0), index=False)
-                    n_step_rows += len(df_rows)
+                run_days = []
+                for i, d in enumerate(days):
+                    day_idx = i + 1
+                    t0 = time.time()
+                    day, rows = runner.run_day(
+                        d['series'], day_idx, d['iloc'], d['col'])
+                    day['run'] = run_no
+                    day['model'] = model_name
+                    day['model_dir'] = model_dir
+                    all_days.append(day)
+                    run_days.append(day)
+                    print('    第{}天 (iloc[:,{}], 均值{:5.2f} m/s): '
+                          '越限 {:>4d} 次, 越限总量 {:>8.4f} MW, '
+                          '利润 {:>12.2f} 元   [{:.0f}s]'
+                          .format(day_idx, d['iloc'], day['wind_mean'],
+                                  day['viol_count'], day['viol_excess_mw'],
+                                  day['profit_rmb'], time.time() - t0))
 
-            # 每个项目结束就落一次盘，避免中途崩掉丢结果
-            df_days = pd.DataFrame(all_days)
-            df_days.to_csv(days_csv, index=False)
-            df_sum = (df_days.groupby(['project', 'project_key'], as_index=False)
-                      .agg(days=('day_idx', 'count'),
-                           viol_count_mean=('viol_count', 'mean'),
-                           viol_count_std=('viol_count', 'std'),
-                           viol_excess_mw_mean=('viol_excess_mw', 'mean'),
-                           viol_excess_mw_std=('viol_excess_mw', 'std'),
-                           profit_rmb_mean=('profit_rmb', 'mean'),
-                           profit_rmb_std=('profit_rmb', 'std'),
-                           profit_rmb_sum=('profit_rmb', 'sum'),
-                           soc_mean=('soc_mean', 'mean'),
-                           discharge_mwh_mean=('discharge_mwh', 'mean')))
-            df_sum.to_csv(summary_csv, index=False)
+                    # ---- CSV: 每步明细（带 run/model 列）----
+                    if not args.no_save_steps and rows:
+                        df_rows = pd.DataFrame(rows)
+                        df_rows.insert(0, 'run', run_no)
+                        df_rows.insert(1, 'model', model_name)
+                        df_rows.to_csv(step_csv, mode='a',
+                                       header=(n_step_rows == 0), index=False)
+                        n_step_rows += len(df_rows)
+
+                    # ---- TensorBoard: 本 run 的逐日三项指标 (step = 天序号) ----
+                    if writer is not None:
+                        for m in DAY_METRICS:
+                            writer.add_scalar(
+                                'test/{}/run{}/{}'.format(label, run_no, m),
+                                float(day[m]), day_idx)
+                        # 逐步子曲线（每 10 步抽 1 点；x 轴按 run 顺延不重叠）
+                        for r in rows[::10]:
+                            gs = global_step + int(r['step'])
+                            writer.add_scalar(
+                                'step/{}/run{}/P_F'.format(label, run_no),
+                                float(r['P_F']), gs)
+                            writer.add_scalar(
+                                'step/{}/run{}/SOC'.format(label, run_no),
+                                float(r['SOC']), gs)
+                            writer.add_scalar(
+                                'step/{}/run{}/profit_step'.format(label, run_no),
+                                float(r['profit_step']), gs)
+                    global_step += runner.episode_length
+
+                # ---- 每组模型跑完就落盘 ----
+                df_days = pd.DataFrame(all_days)
+                df_days.to_csv(days_csv, index=False)
+                _agg_days(df_days, ['project', 'project_key', 'run', 'model']) \
+                    .to_csv(summary_csv, index=False)
+                if writer is not None:
+                    writer.flush()
+
+            # ---- 方法级：跨 run 的逐日均值/极值曲线 ----
+            if writer is not None:
+                sub = pd.DataFrame(all_days)
+                sub = sub[sub['project'] == label]
+                for day_idx in sorted(sub['day_idx'].unique()):
+                    g = sub[sub['day_idx'] == day_idx]
+                    for m in DAY_METRICS:
+                        writer.add_scalar('method/{}/{}'.format(label, m),
+                                          float(g[m].mean()), int(day_idx))
+                        writer.add_scalar('method/{}/{}_min'.format(label, m),
+                                          float(g[m].min()), int(day_idx))
+                        writer.add_scalar('method/{}/{}_max'.format(label, m),
+                                          float(g[m].max()), int(day_idx))
+                writer.flush()
     finally:
+        if writer is not None:
+            writer.close()
         quit_engine()
 
     df_days = pd.DataFrame(all_days)
+    df_run = _agg_days(df_days, ['project', 'project_key', 'run', 'model'])
+    df_m = _agg_days(df_days, ['project', 'project_key']).sort_values(
+        'project', key=lambda s: s.map(
+            {PROJECTS[k]['label']: i for i, k in enumerate(PROJECT_ORDER)}))
+    df_run.to_csv(summary_csv, index=False)
+    df_m.to_csv(method_csv, index=False)
 
-    # ---- 明细表 ----
-    print('\n' + '=' * 96)
+    # ---- 每天明细 ----
+    print('\n' + '=' * 108)
     print('  每天明细')
-    print('=' * 96)
+    print('=' * 108)
     print('  {:>12s} {:>4s} {:>10s} {:>10s} {:>12s} {:>14s} {:>9s} {:>9s}'
-          .format('项目', '天', 'wind_iloc', '越限次数', '越限总量MW',
+          .format('方法', 'run', 'wind_iloc', '越限次数', '越限总量MW',
                   '利润(元)', '末SOC', '放电MWh'))
     for key in keys:
         label = PROJECTS[key]['label']
@@ -990,18 +1145,23 @@ def main():
         for _, r in sub.iterrows():
             print('  {:>12s} {:>4d} {:>10d} {:>10d} {:>12.4f} {:>14.2f} '
                   '{:>9.3f} {:>9.3f}'
-                  .format(label, int(r['day_idx']), int(r['wind_iloc']),
+                  .format(label, int(r['run']), int(r['wind_iloc']),
                           int(r['viol_count']), r['viol_excess_mw'],
                           r['profit_rmb'], r['soc_end'], r['discharge_mwh']))
 
-    print_summary(df_days, keys)
+    print_run_summary(df_run, keys)
+    print_method_summary(df_m, keys)
 
     print('\n输出文件:')
-    print('  每天汇总 : {}'.format(days_csv))
-    print('  项目汇总 : {}'.format(summary_csv))
+    print('  每天汇总     : {}'.format(days_csv))
+    print('  每方法×每run : {}'.format(summary_csv))
+    print('  每方法主表   : {}'.format(method_csv))
     if not args.no_save_steps:
-        print('  每步明细 : {}  ({} 行)'.format(step_csv, n_step_rows))
-    print('  总耗时   : {:.1f}s'.format(time.time() - t_start))
+        print('  每步明细     : {}  ({} 行)'.format(step_csv, n_step_rows))
+    if writer is not None:
+        print('  TensorBoard  : {}'.format(tb_dir))
+        print('                 tensorboard --logdir="{}"'.format(tb_dir))
+    print('  总耗时       : {:.1f}s'.format(time.time() - t_start))
 
 
 if __name__ == '__main__':
