@@ -39,6 +39,7 @@
   td3prrbb       SP_TD3         + td3prrbb_rule_bess.RuleBasedBESS     L 蒸馏 5 维
   td3prle        SP_TD3_PRLE    + td3prle_rule_bess.RuleBasedBESS      L 蒸馏 5 维
   td3prrlrb      SP_TD3         + td3prrlrb_rule_bess  (L=规则 SocTracker, H 带相位)
+  td3perrb       SP_TD3         + td3perrb_rule_bess   (同 td3prrlrb, 但奖励**非分段**)
   td3leprrlrb    SP_TD3_LEPRRLRB+ td3leprrlrb_rule_bess(L=规则 SocTracker, H 带相位)
 
 关键细节（都按各自 main 的写法对齐，不混用）：
@@ -49,9 +50,9 @@
               [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10])
       - td3prle            : build_L_obs_distilled(
               [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10])
-      - td3prrlrb / td3leprrlrb : 无 RL 下层，L 由 SocTracker 规则给出
+      - td3prrlrb / td3perrb / td3leprrlrb : 无 RL 下层，L 由 SocTracker 规则给出
               pb = clip((soc_target - E)/gain, pbrulemin, pbrulemax)
-  * td3prrlrb / td3leprrlrb 的 H 观测 = Normalize(obs) + 24h 相位特征，
+  * td3prrlrb / td3perrb / td3leprrlrb 的 H 观测 = Normalize(obs) + 24h 相位特征，
     维数（4 + 0/2/5）从 actor_6.pkl 的 fc1.weight 自动探测，无需手填。
     相位时刻 = episode 内的分钟序号（与训练一致：episode 恰好 1440 步）。
 
@@ -76,7 +77,7 @@
 --------
 默认统一 3.0 MWh（env.reset() 的原值），便于 8 个项目跨项目公平对比。
 加 --soc-init train 可改回各项目训练时的重置方式：
-per/prrbb/prle 用 3.0；td3per/td3prrbb/td3prle/td3prrlrb/td3leprrlrb
+per/prrbb/prle 用 3.0；td3per/td3prrbb/td3prle/td3prrlrb/td3perrb/td3leprrlrb
 用 U(0.5, 5.5) 随机（用脚本自带 RNG，可复现）。
 
 用法
@@ -89,6 +90,7 @@ per/prrbb/prle 用 3.0；td3per/td3prrbb/td3prle/td3prrlrb/td3leprrlrb
         --td3prrbb   output/TD3PRRBB-run145 \\
         --td3prle    output/TD3PRLE-run169 \\
         --td3prrlrb  output/TD3PRRLRB-run166 \\
+        --td3perrb   output/TD3PERRB-run1 \\
         --td3leprrlrb output/TD3LEPRRLRB-run23
 
     也可写成 --models per=output/x td3per=output/y ...
@@ -161,7 +163,7 @@ WIND_CSV = 'FFC_speed_noise_1.csv'
 
 PROJECT_ORDER = ['per', 'prrbb', 'prle',
                  'td3per', 'td3prrbb', 'td3prle',
-                 'td3prrlrb', 'td3leprrlrb']
+                 'td3prrlrb', 'td3perrb', 'td3leprrlrb']
 
 
 # ----------------------------------------------------------------------------
@@ -273,6 +275,21 @@ PROJECTS = {
                      rated_power=RATED_POWER, pb_cap=None),
         soc_random=True,
         ref='td3prrlrb/td3prrlrb_main.py',
+    ),
+    'td3perrb': dict(
+        label='TD3PERRB',
+        agent=('td3perrb.td3perrb_ddpg', 'SP_TD3'),
+        myfunc='td3perrb.td3perrb_myfunc',
+        rule_bess=('td3perrb.td3perrb_rule_bess', 'RuleBasedBESS'),
+        lower='rule', l_obs=None, h_obs='normalize_H',
+        h_kwargs={**_EMA, **_TD3_H, 'lam_max': 100.0, 'lam_min': 3.0,
+                  'record_update_stats': True,
+                  'wt_noise': 0.05, 'sig_noise_max': 0.2, 'sig_noise_min': 0.05},
+        h_lam=5.0,
+        tracker=dict(soc_tol=0.0, eta_c=ETA_C, eta_d=ETA_D, time=DT,
+                     rated_power=RATED_POWER, pb_cap=None),
+        soc_random=True,
+        ref='td3perrb/td3perrb_main.py',
     ),
     'td3leprrlrb': dict(
         label='TD3LEPRRLRB',
