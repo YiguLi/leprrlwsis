@@ -29,9 +29,6 @@ $RECYCLE.BIN/
 # Training output — hundreds of MB of per-run artifacts
 /output/
 
-# TensorBoard / experiment run artifacts (regenerable training logs)
-/runs/
-
 # A full duplicate copy of the project ("未命名" = "unnamed"); not tracked
 /未命名/
 
@@ -42,16 +39,10 @@ $RECYCLE.BIN/
 /FFC_speed_1.csv
 /FFC_speed_noise_1.csv
 
-# Whole-project archive (137 MB), not versioned
-/HSRL.zip
+# Project archives are not versioned (HSRL.zip 137 MB, td3prrlrb.zip)
+*.zip
 
 # data_LES/ and documentation/ manage themselves via their own .gitignore
-
-# ===== Secrets / API keys =====
-# LLM provider config holds a plaintext api_key -> never commit.
-# Local copies stay on disk; copy llm_config.example.json to create one,
-# or leave api_key empty and export DEEPSEEK_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY.
-llm_config.json
 
 # ===== LaTeX build artifacts (paper/) =====
 *.aux
