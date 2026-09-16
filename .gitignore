@@ -47,6 +47,12 @@ $RECYCLE.BIN/
 
 # data_LES/ and documentation/ manage themselves via their own .gitignore
 
+# ===== Secrets / API keys =====
+# LLM provider config holds a plaintext api_key -> never commit.
+# Local copies stay on disk; copy llm_config.example.json to create one,
+# or leave api_key empty and export DEEPSEEK_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY.
+llm_config.json
+
 # ===== LaTeX build artifacts (paper/) =====
 *.aux
 *.bbl
