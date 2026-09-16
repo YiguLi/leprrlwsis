@@ -45,9 +45,11 @@ from env import WindBattery
 from td3prrlrb.td3prrlrb_ddpg import SP_TD3
 from util import *
 from td3prrlrb.td3prrlrb_myfunc import (
-    CheckAction, Normalize,
+    CheckAction, Normalize, Normalize_H,
     Cal_Rew_RLRB, gap_penalty, soc_target_from_signal, nine_case_test,
     SOC_TOL,
+    PHASE_DIM, day_price_schedule, phase_features, phase_daily_table,
+    phase_minute_of_day,
 )
 from td3prrlrb.td3prrlrb_rule_bess import (
     RuleBasedBESS, SocTracker, block_cap_charge, block_cap_discharge,
@@ -67,6 +69,43 @@ engine = matlab.engine.start_matlab()
 
 
 RUN_TAG = 'td3prrlrb'
+
+
+def init_wt_action_bias(agent, lo=0.25, hi=0.40, sig_value=0.0, verbose=True):
+    """把 actor 输出层前 5 维 (WT 轴向诱导因子 a) 的 bias 初始化到 Cp 高效区。
+
+    为什么必须做 (run160/初始策略诊断):
+      `model.py` 的 Actor 只把 fc4.weight 初始化成 ±init_w(0.003),
+      fc4.bias 仍是 PyTorch 默认 U(−1/√fan_in)=U(±0.25) (fan_in=hidden1=16);
+      而 a 与功率系数的关系是 Cp = 4a(1−a)² (见 WFSim_port.m):
+        a=0 → Cp=0 (该机零出力/停机),  a=1/3 → Cp=0.593 (Betz 最大),  a=0.5 → Cp=0.5。
+      于是初始策略 ≈ bias: 实测 5 个种子 → 死机 2~4 台、全场 ΣCp 仅 0.47~0.72
+      (效率 16%~24%)。策略从"半停机"出发, 而 a<0 区被 CheckAction 裁掉后梯度为 0
+      → 若没有恢复力就会长期停在停机态。
+    bias∈[lo,hi]=[0.25,0.40] 对应 Cp≈0.56~0.59, 即从"正常工作点"出发。
+    SOC 目标信号维 (第 6 维) 置 sig_value=0 → 初始 soc_target = 3.0 (SOC 带中点)。
+
+    `model.py` 为多项目共享文件, 不修改; 这里构造后覆写 actor 与 actor_target 的 bias。
+    """
+    a = agent.actor
+    if not hasattr(a, 'fc4'):
+        return False
+    nb = a.fc4.bias.data.shape[0]
+    with torch.no_grad():
+        b = a.fc4.bias.data
+        n_wt = min(5, nb)
+        b[:n_wt] = torch.tensor(np.random.uniform(lo, hi, n_wt), dtype=b.dtype)
+        if nb > n_wt:
+            b[n_wt:] = float(sig_value)
+        tgt = agent.actor_target.fc4.bias.data
+        tgt.copy_(b)
+    if verbose:
+        cp = 4 * np.array([b[:n_wt].mean()]) * (1 - np.array([b[:n_wt].mean()])) ** 2
+        prGreen('init_wt_action_bias: WT bias = {} (mean a = {:.3f} -> Cp = {:.3f}); '
+                'signal bias = {}'.format(
+                    np.round(b[:n_wt].numpy(), 3), float(b[:n_wt].mean()),
+                    float(cp[0]), float(b[n_wt]) if nb > n_wt else None))
+    return True
 
 
 def _flush_csv(path, rows, written):
@@ -108,6 +147,9 @@ def train(num_iterations_H,
     episode_deg_charge = episode_deg_discharge = 0.
     observation = None
     time = 1/60
+    # 上层 gap 罚的豁免裕度 (默认 0.1 MWh = SOC_TOL); 下层跟踪死区另由
+    # tracker.soc_tol 控制 (默认 0.0) —— 两者分开是本轮的修正点。
+    soc_tol_upper = float(getattr(args, 'soc_tol', SOC_TOL))
     # Curriculum learning: consecutive blocks where EMA cost <= d_block_H
     consecutive_satisfied_H = 0
     # H 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_H (与 sum_c1 同口径)
@@ -129,6 +171,13 @@ def train(num_iterations_H,
     window_violation_count = 0   # steps where |P_F| > 3 MW
     window_power_sum = 0.0        # cumulative P_G over the window
 
+    # ---- 24h 相位特征 (--phase_feat) ----
+    phase_mode = int(getattr(args, 'phase_feat', 0))
+    phase_table = phase_daily_table() if phase_mode >= 2 else None
+    phase_sched = day_price_schedule()
+    phase_mismatch = 0
+    phase_checked = 0
+
     while step < num_iterations_H:
         # start of episode 重置环境
         prYellow('########### step:{} ###########'.format(step))
@@ -138,8 +187,16 @@ def train(num_iterations_H,
             reset_E = float(np.random.uniform(0.5, 5.5))
             env.E = reset_E
             observation[2] = reset_E
-            norm_observation = Normalize(observation)
+            norm_observation = Normalize_H(observation, phase_minute_of_day(0),
+                                           phase_mode, phase_table)
             agent_H.reset(norm_observation)
+
+        # 相位自检: env 的电价必须与 day_price_schedule() 在 episode_steps%1440 处一致
+        pm_now = phase_minute_of_day(episode_steps)
+        if phase_mode > 0:
+            if abs(float(observation[0]) - phase_sched[pm_now]) > 1e-6:
+                phase_mismatch += 1
+            phase_checked += 1
 
         # ================================================================
         # 上层 H: 每 5 步决策一次 (块级)
@@ -199,7 +256,9 @@ def train(num_iterations_H,
             env.step(action_rbb[:6], action_rbb[6:], pw_tru)
         action_rbb[6:] = action_L_env
         prGreen('Applied action = {}.'.format(round_list(action_rbb, 3)))
-        norm_observation2 = Normalize(observation2)
+        norm_observation2 = Normalize_H(observation2,
+                                        phase_minute_of_day(episode_steps + 1),
+                                        phase_mode, phase_table)
 
         # ================================================================
         # PRRBB 分段奖励 (机会/风险分离; 仅 H 层)
@@ -213,23 +272,20 @@ def train(num_iterations_H,
         sum_r1 += r1
         sum_c1 += c1_step
 
-        # ---- 块末结算: SOC 目标可行性罚 ----
+        # ---- 块末结算: SOC 目标可行性罚 (上层豁免仍为 --soc_tol, 默认 0.1) ----
         gap_raw = abs(soc_target - float(observation2[2]))
         gap_pen = 0.0
         target_feasible = True
         if episode_steps % 5 == 4:
-            # tol 必须与下层规则死区同源 (tracker.soc_tol), 否则 --soc_tol 改动后
-            # 规则停在死区边缘时上层会被收一笔永远消不掉的"幽灵税"。
-            gap_pen = gap_penalty(soc_target, float(observation2[2]),
-                                  tol=tracker.soc_tol)
+            gap_pen = gap_penalty(soc_target, float(observation2[2]), tol=soc_tol_upper)
             sum_c1 += gap_pen
             sum_gap_pen += gap_pen
 
         # ---- 可达性诊断: 规则控制在本块的最大能力 ----
         cap_c = block_cap_charge(rbb_info_obs['pbrulemax'], eta_c=0.98, time=time)
         cap_d = block_cap_discharge(rbb_info_obs['pbrulemin'], eta_d=0.98, time=time)
-        target_feasible = (soc_target <= E_current + cap_c + tracker.soc_tol) and \
-                          (soc_target >= E_current - cap_d - tracker.soc_tol)
+        target_feasible = (soc_target <= E_current + cap_c + soc_tol_upper) and \
+                          (soc_target >= E_current - cap_d - soc_tol_upper)
 
         clip_amount = rbb_info['clip_amount']
         is_infeasible = rbb_info['is_infeasible']
@@ -243,9 +299,9 @@ def train(num_iterations_H,
             round(sum_c1 if episode_steps % 5 == 4 else c1_step, 3),
             round(reward_details['c1_fluct'], 3), round(gap_pen, 4)))
         prGreen('soc_signal={:.4f} soc_target={:.3f} SOC={:.3f} gap_raw={:.3f} '
-                '(tol={}, feasible={})'.format(
+                '(tol_upper={}, feasible={})'.format(
                     soc_signal, soc_target, reward_details['SOC'],
-                    gap_raw, tracker.soc_tol, target_feasible))
+                    gap_raw, soc_tol_upper, target_feasible))
         prGreen('price={} p_level={} wind={:.1f} w_level={} (wT={}, wB={})'.format(
             reward_details['pr'], reward_details['price_level'],
             reward_details['u'], reward_details['wind_level'],
@@ -303,7 +359,8 @@ def train(num_iterations_H,
             # Test: 9-case segmented evaluation every 480 episode steps
             if episode_steps % 480 == 0:
                 case_metrics, overall = nine_case_test(
-                    agent_H, tracker, env_test, rbb_system, seed=42)
+                    agent_H, tracker, env_test, rbb_system, seed=42,
+                    phase_mode=phase_mode, phase_table=phase_table)
                 if use_csv:
                     for m in case_metrics:
                         df_test_rows.append({
@@ -358,9 +415,19 @@ def train(num_iterations_H,
                 'step': step,
                 'observation': observation,
                 'observation2': observation2,
+                # 24h 相位 (phase_feat>0): 分钟数 + 可选段内特征
+                'phase_minute': pm_now,
+                'phase_sin': float(np.sin(2 * np.pi * pm_now / 1440)),
+                'phase_cos': float(np.cos(2 * np.pi * pm_now / 1440)),
+                'phase_rest_frac': (float(phase_table[pm_now, 0]) if phase_table is not None else np.nan),
+                'phase_rest_h': (float(phase_table[pm_now, 1]) * 8 if phase_table is not None else np.nan),
+                'phase_next_pr': (float(phase_table[pm_now, 2]) * 1000 if phase_table is not None else np.nan),
                 'original_action_H': original_action_H,
                 'applied_action_H': applied_action_H,
                 'action_pb_cmd': pb_cmd,
+                # 下层规则诊断: 自愿 vs 被迫 (防自致过冲后的分解)
+                'pb_voluntary': float(tracker.last_pb_voluntary),
+                'pb_forced': float(tracker.last_pb_forced),
                 'action_rbb': action_rbb,
                 'r1': r1, 'c1_step': c1_step,
                 'c1': c1_step + gap_pen,
@@ -435,6 +502,16 @@ def train(num_iterations_H,
             writer.add_scalar('soc_deviation', reward_details['soc_deviation'], step)
             writer.add_scalar('P_F', reward_details['P_F'], step)
 
+            # 24h 相位 (与 --phase_feat 对应; 小时数即为可读的时间轴)
+            writer.add_scalar('phase/hour', pm_now / 60.0, step)
+            if phase_table is not None:
+                writer.add_scalar('phase/rest_frac', float(phase_table[pm_now, 0]), step)
+                writer.add_scalar('phase/rest_hours', float(phase_table[pm_now, 1]) * 8, step)
+                writer.add_scalar('phase/next_price', float(phase_table[pm_now, 2]) * 1000, step)
+            if phase_checked > 0:
+                writer.add_scalar('phase/check_mismatch_frac',
+                                  phase_mismatch / float(phase_checked), step)
+
             # PRRBB wind×price segmentation
             writer.add_scalar('seg/price_level',
                               {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}.get(reward_details['price_level'], 0),
@@ -461,6 +538,8 @@ def train(num_iterations_H,
             writer.add_scalar('target/d_cap_c', cap_c, step)
             writer.add_scalar('target/d_cap_d', cap_d, step)
             writer.add_scalar('target/pb_cmd', pb_cmd, step)
+            writer.add_scalar('target/pb_voluntary', float(tracker.last_pb_voluntary), step)
+            writer.add_scalar('target/pb_forced', float(tracker.last_pb_forced), step)
 
             # RBB-specific metrics
             writer.add_scalar('rbb/clip_amount', clip_amount, step)
@@ -560,6 +639,16 @@ def train(num_iterations_H,
         _flush_csv('{}/update_stats_H.csv'.format(output),
                    df_update_rows, df_update_written)
 
+    # 相位自检结论 (应恒为 0; >0 说明 episode_steps 与 env 电价时钟失配)
+    if phase_mode > 0:
+        prGreen('phase check: mode={} dims={} checked={} mismatch={} ({:.4f}%)'.format(
+            phase_mode, PHASE_DIM[phase_mode], phase_checked, phase_mismatch,
+            100.0 * phase_mismatch / max(phase_checked, 1)))
+        if phase_mismatch > 0:
+            prRed('WARNING: ep 电价时钟与 day_price_schedule() 不一致 '
+                  '({} 步) → 相位特征失效, 请检查 env.reset()/max_episode_length'.format(
+                      phase_mismatch))
+
 
 if __name__ == "__main__":
 
@@ -594,7 +683,10 @@ if __name__ == "__main__":
                         default=200,
                         type=int,
                         help='time without training but only filling the replay memory')
-    parser.add_argument('--discount', default=0.98, type=float, help='')
+    parser.add_argument('--discount', default=0.99, type=float, help='')
+    # 0.99: γ 以【块(5 min)】为单位生效 (observe_jump 聚合 5 步后 discount 只用一次)
+    #       ⇒ 半衰期 69 块 ≈ 5.8 h, 覆盖 4~7 h 的低价充/高价放周期
+    #       (0.98 时半衰期仅 34 块 ≈ 2.8 h, 跨 4 h 的套利收益权重只剩 0.38)
     parser.add_argument('--bsize', default=32, type=int,
                         help='minibatch size')
     parser.add_argument('--rmsize',
@@ -632,9 +724,11 @@ if __name__ == "__main__":
                         type=int,
                         help='train iters each timestep')
     parser.add_argument('--epsilon',
-                        default=50000,
+                        default=4000,
                         type=int,
-                        help='linear decay of exploration policy')
+                        help='探索噪声 ε 由 1 线性衰减到 0 所需的【决策次数】。'
+                             'H 每 5 个环境步决策一次 ⇒ 4000 次 = 20k 环境步'
+                             '(信号维幅值此后由地板 sig_noise_min 保底)')
     parser.add_argument('--seed', default=-1, type=int, help='')
     parser.add_argument('--resume',
                         default='default',
@@ -673,7 +767,34 @@ if __name__ == "__main__":
     parser.add_argument('--rbb_rated_power', default=10.0, type=float,
                         help='BESS rated charge/discharge power (MW)')
     parser.add_argument('--soc_tol', default=SOC_TOL, type=float,
-                        help='SOC 目标死区 (MWh), 与规则下层死区同源')
+                        help='【上层】块末 gap 罚的豁免裕度 (MWh): H 只对超过该值的残差付费。'
+                             '默认 0.1 (=SOC_TOL), 本轮不改 (上层偏移量保留)')
+    parser.add_argument('--tracker_soc_tol', default=0.0, type=float,
+                        help='【下层】规则控制器的跟踪死区 (MWh)。默认 0.0 = 残差 0.01 也照追'
+                             '(0.1 的豁免只属于上层罚项)。必须 ≤ --soc_tol, 否则幽灵税回归')
+    parser.add_argument('--pb_cap', default=-1.0, type=float,
+                        help='【实验用】下层自愿指令的硬上限 (MW)。<=0 表示**不限制**(默认): '
+                             '"不顶格"由规则本身保证 —— pb = clip(ΔSOC/g, pbrule 窗口), '
+                             '残差小则功率自然小。设成小值会砍掉"目标远时"的合法能力')
+
+    # ---- 探索噪声幅度 (逐维; 见 td3prrlrb_ddpg.SP_TD3.__init__) ----
+    parser.add_argument('--wt_noise', default=0.05, type=float,
+                        help='WT 5 维探索噪声幅度 (±wt_noise*eps)')
+    parser.add_argument('--sig_noise_max', default=0.2, type=float,
+                        help='SOC 目标信号维探索噪声幅度上限 (±sig_noise_max*eps)')
+    parser.add_argument('--sig_noise_min', default=0.05, type=float,
+                        help='SOC 目标信号维探索噪声幅度地板 (eps 衰减完后保底)')
+
+    # ---- 24h 相位特征 (--phase_feat) ----
+    parser.add_argument('--phase_feat', default=1, type=int, choices=[0, 1, 2],
+                        help='H 层观测的 24h 相位特征: 0=关(4维, 复现旧run); '
+                             '1=sin/cos(2π·minute/1440) (6维, 默认); '
+                             '2=1 + [段内剩余比例, 剩余小时/8, 下一段电价/1000] (9维)')
+
+    # ---- 输出层 bias 初始化 (P0.1; 见 init_wt_action_bias) ----
+    parser.add_argument('--wt_bias_init', default=1, type=int, choices=[0, 1],
+                        help='1: 把 actor 输出层 WT 5 维 bias 初始化到 Cp 高效区 '
+                             '[0.25,0.40] (避免从"半停机"a≈0 出发); 0: 用 PyTorch 默认')
 
     args = parser.parse_args()
     args.output = get_output_folder(args.output, args.env)
@@ -726,19 +847,39 @@ if __name__ == "__main__":
     )
 
     # 下层: 规则控制器 (无 RL, 无 lam2)
-    tracker = SocTracker(soc_tol=args.soc_tol, eta_c=0.98, eta_d=0.98,
-                         time=1.0 / 60, rated_power=args.rbb_rated_power)
+    #   机制 = clip(ΔSOC/g, pbrule 窗口): "一步填平所需功率"夹进可行窗口。
+    #   soc_tol 默认 0.0 (下层不设死区: 残差 0.01 也照追);
+    #   0.1 MWh 的豁免只属于上层 gap 罚 (--soc_tol), 因此不存在幽灵税。
+    #   pb_cap 默认不限 (= 额定), "不顶格"由规则本身保证。
+    _pb_cap = args.pb_cap if args.pb_cap > 0 else None
+    assert args.tracker_soc_tol <= args.soc_tol + 1e-12, \
+        'tracker_soc_tol({}) 必须 <= soc_tol({}), 否则规则停在死区而上层照罚 (幽灵税)'.format(
+            args.tracker_soc_tol, args.soc_tol)
+    tracker = SocTracker(soc_tol=args.tracker_soc_tol, eta_c=0.98, eta_d=0.98,
+                         time=1.0 / 60, rated_power=args.rbb_rated_power,
+                         pb_cap=_pb_cap)
+    print('SocTracker: soc_tol(lower)={} pb_cap={} | gap_penalty tol(upper)={} MWh'.format(
+        args.tracker_soc_tol, _pb_cap, args.soc_tol))
 
     # 上层: TD3 + EMA 实际成本对偶 (lam1 ∈ [3, 100], 初始 5.0)
-    agent_H = SP_TD3(nb_states=4, nb_actions=6, args=args,
+    nb_states_H = 4 + PHASE_DIM[int(getattr(args, 'phase_feat', 0))]
+    print('H nb_states = {} (4 base + {} phase dims, --phase_feat={})'.format(
+        nb_states_H, PHASE_DIM[int(getattr(args, 'phase_feat', 0))], args.phase_feat))
+    agent_H = SP_TD3(nb_states=nb_states_H, nb_actions=6, args=args,
                      lam_max=100.0, lam_min=3.0,
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                      record_update_stats=True,
                      policy_delay=args.policy_delay,
                      policy_noise=args.policy_noise,
                      noise_clip=args.noise_clip,
-                     cost_critic_mode=args.cost_critic_mode)
+                     cost_critic_mode=args.cost_critic_mode,
+                     wt_noise=args.wt_noise,
+                     sig_noise_max=args.sig_noise_max,
+                     sig_noise_min=args.sig_noise_min)
     agent_H.lam = 5.0
+    # ---- P0.1: WT 输出层 bias 初始化到 Cp 高效区 (避免"半停机"起步) ----
+    if args.wt_bias_init:
+        init_wt_action_bias(agent_H, lo=0.25, hi=0.40, sig_value=0.0)
 
     if args.mode == 'train':
         train(args.train_iter_H,

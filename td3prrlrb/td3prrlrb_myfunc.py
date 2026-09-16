@@ -276,7 +276,14 @@ def Cal_Rew_RLRB(observation, observation2, action_rbb, rbb_info,
 def CheckAction(action, charge=10.):
     """Clip actions to feasible ranges. WT: [0,0.5], Signal: [-0.5,0.5], Bat: [-charge,charge].
 
-    上层 (6 维): WT 越界与信号越界按 100/MW 计罚, 并封顶 50 (penalty_NN_H)。
+    上层 (6 维): WT 越界与信号越界按 100/单位计罚, **不封顶** (penalty_NN_H)。
+        为什么不封顶 (run160 诊断): 封顶 50 时, 只要 5 个 WT 维各越界 0.1 就累计 0.5
+        触顶 → 越界区收益通道(裁剪为平)与成本通道(罚为常数)梯度同时为 0 →
+        越界方向上恢复力为零, 维度被共享隐层"顺带拖走"随机游走
+        (run160 实测 a2/a3/a4 漂到 −3.9/−4.7/−6.4 → 三台机 Cp=0 长期停机,
+         全场 ΣCp 仅 0.913/2.963 = 31% 风能效率); 原始罚实测达 1600~2400。
+        不封顶后: 越界每单位恒定产生 100 的惩罚梯度 (r1 与 c1 双通道),
+        任意深度都不衰减 → 越界区始终有把动作拉回合法域的恢复力。
     下层 (1 维): 规则控制器已保证落在 RBB 窗口内, 这里只做额定功率安全限幅。
     """
     penalty = 0
@@ -293,7 +300,7 @@ def CheckAction(action, charge=10.):
             penalty += 100 * (SIGNAL_MIN - sig)
         applied = np.append(np.clip(action[:5], 0., 0.5),
                             np.clip(action[5], SIGNAL_MIN, SIGNAL_MAX))
-        penalty = min(penalty, 50.0)
+        # 不封顶: 保持恒定恢复力 (见 docstring)
         return applied, penalty
 
     elif len(action) == 5:
@@ -312,7 +319,7 @@ def CheckAction(action, charge=10.):
 
 
 # =============================================================================
-# 8. Normalization
+# 8. Normalization  (H 观测 = 4 维基础观测 + 可选 24h 相位特征)
 # =============================================================================
 
 def Normalize(obs, max_E=6.):
@@ -321,6 +328,100 @@ def Normalize(obs, max_E=6.):
 
 def Original(obs, max_E=6.):
     return np.array([obs[0] * 1000, obs[1] * 10, obs[2] * 10, obs[3] * 10])
+
+
+# =============================================================================
+# 8b. 24h 相位特征 (--phase_feat)
+# =============================================================================
+# 动机: H 原本看不到"一天中的位置"。而套利的关键决策之一 —— 在低价窗的哪一刻
+# 把电充满 (规则速率 0.245 MWh/块 → 充 5 MWh 需 1.7 h) —— 必须要知道"本段还剩多久、
+# 下一段是涨还是跌"。实测: 相位盲策略只能做"持留套利"(把平抑强塞进来的电留到贵时卖,
+# ~1 MWh/天), 无法做"择时套利"(3~5 MWh/天)。
+#
+# 编码方式 (用 16→100 的同结构网络做了拟合对比):
+#   mode 0: 关 (4 维, 可复现旧 run)
+#   mode 1: sin/cos(2π·minute/1440)                      → 6 维 (默认; 用 sin/cos 而非
+#           1 维锯齿 t/1440: 后者跨零点不连续, 拟合 MSE 0.047 vs 0.0008, 差 60 倍)
+#   mode 2: mode 1 + [段内剩余比例, 剩余小时/8, 下一段电价/1000] → 9 维
+#           (小样本预算下 precision 0.51→0.74, 更"好教"; 需要日程表)
+#
+# 相位来源: **不读 env 内部时钟**, 而是按"每个 episode 恰好 1440 步"这一事实
+# (env.reset() 里 count_price=0, env.step() 恒 done=False) 用 episode_steps % 1440,
+# 并与 env.CalPrice 的日程表对齐; 主循环里用 day_price_schedule() 做一致性自检。
+
+PHASE_DIM = {0: 0, 1: 2, 2: 5}
+DAY_MINUTES = 1440
+
+_PHASE_TABLE_CACHE = {}
+
+
+def day_price_schedule():
+    """与 env.CalPrice 一致的 1440 分钟电价日程表 (LOW 300 / MED 580 / HIGH 980)。"""
+    m = np.arange(DAY_MINUTES)
+    p = np.full(DAY_MINUTES, 980.0)
+    p[(m < 7 * 60) | (m >= 23 * 60)] = 300.0
+    p[((m >= 11 * 60) & (m < 17 * 60)) | ((m >= 21 * 60) & (m < 23 * 60))] = 580.0
+    return p
+
+
+def phase_daily_table():
+    """日程表逐分钟的 [段内剩余比例, 剩余小时/8, 下一段电价/1000] (循环日程)。
+
+    循环处理很重要: 23:00–23:59 与 0:00–6:59 同为 300 → 属于同一个 8 h 段,
+    0:00 时"本段剩余"应为 7 h 而不是 1 h。
+    """
+    key = 'daily'
+    if key in _PHASE_TABLE_CACHE:
+        return _PHASE_TABLE_CACHE[key]
+    pr = day_price_schedule()
+    n = DAY_MINUTES
+    t = np.zeros((n, 3))
+    for i in range(n):
+        j = i
+        while (j - i) < n - 1 and pr[(j + 1) % n] == pr[i]:
+            j += 1
+        k = i
+        while (i - k) < n - 1 and pr[(k - 1) % n] == pr[i]:
+            k -= 1
+        steps = (j - i) + 1               # 本段剩余步数 (含当前步)
+        seg_len = (j - k) + 1
+        t[i] = [steps / seg_len, min(steps, 480) / 480.0, pr[(j + 1) % n] / 1000.0]
+    _PHASE_TABLE_CACHE[key] = t
+    return t
+
+
+def phase_features(minute, mode=1, table=None):
+    """相位特征向量; mode<=0 返回空数组。minute 为一天中的第几分钟 (0..1439)。"""
+    if mode <= 0:
+        return np.zeros(0)
+    m = int(minute) % DAY_MINUTES
+    ang = 2.0 * np.pi * m / DAY_MINUTES
+    feats = [np.sin(ang), np.cos(ang)]
+    if mode >= 2:
+        t = phase_daily_table() if table is None else table
+        feats.extend([t[m, 0], t[m, 1], t[m, 2]])
+    return np.asarray(feats, dtype=np.float64)
+
+
+def phase_minute_of_day(episode_steps):
+    return int(episode_steps) % DAY_MINUTES
+
+
+def Normalize_H(obs, minute=0, mode=1, table=None):
+    """H 层观测归一化: 4 维基础观测 + 相位特征 (mode 0 时即原 Normalize)。"""
+    base = Normalize(obs)
+    if mode <= 0:
+        return base
+    return np.concatenate([base, phase_features(minute, mode, table)])
+
+
+# 9-case 测试用: 把 case 的电价档映射到该档"代表性时刻"(取该段中点),
+# 这样测试时的相位与训练同分布 (场景电价每 5 步就变, 直接用 wall-clock 相位会 OOD)。
+REP_MINUTE = {'LOW': 210, 'MEDIUM': 840, 'HIGH': 540}
+
+
+def rep_minute_for_price_level(level):
+    return REP_MINUTE.get(str(level).upper(), 210)
 
 
 # =============================================================================
@@ -338,7 +439,8 @@ except ImportError:
 
 
 def nine_case_test(agent_H, tracker, env_test, rbb_system,
-                   scenario=None, test_csv=False, output=None, seed=None):
+                   scenario=None, test_csv=False, output=None, seed=None,
+                   phase_mode=0, phase_table=None):
     """
     TD3PRRLRB 45-step 9-case in-training test (下层 = 规则控制器).
 
@@ -359,7 +461,11 @@ def nine_case_test(agent_H, tracker, env_test, rbb_system,
         wind_seq, price_seq, case_ids, blocks = scenario
 
     obs = env_test.ScenarioReset(wind_seq, price_seq)
-    norm_obs = Normalize(obs)
+    # 相位: 场景电价每 5 步就变一次, 直接用 wall-clock 相位会 OOD;
+    # 这里按 case 的电价档映射到该档"代表性时刻"(段中点), 使测试与训练同分布,
+    # 且跨 run 可比 (相同 case 相同相位)。
+    _pminute = {i: rep_minute_for_price_level(price_seq[i]) for i in range(len(price_seq))}
+    norm_obs = Normalize_H(obs, _pminute[0], phase_mode)
     time = 1.0 / 60
     agent_H.is_training = False
     step = 0
@@ -406,7 +512,8 @@ def nine_case_test(agent_H, tracker, env_test, rbb_system,
             env_test.ScenarioStep(action_rbb[:6], action_rbb[6:], pw_tru)
 
         action_rbb[6:] = action_L_env
-        norm_obs2 = Normalize(obs2)
+        norm_obs2 = Normalize_H(obs2, _pminute[min(step + 1, num_iterations - 1)],
+                                phase_mode, phase_table)
 
         r1, c1_step, details = Cal_Rew_RLRB(
             obs, obs2, action_rbb, rbb_info,
@@ -414,10 +521,10 @@ def nine_case_test(agent_H, tracker, env_test, rbb_system,
             ptur=ptur, pb_cmd=pb_cmd,
         )
 
-        # 块末: SOC 目标可行性罚 (tol 与下层规则死区同源)
+        # 块末: SOC 目标可行性罚
         gap_pen = 0.0
         if step % 5 == 4:
-            gap_pen = gap_penalty(soc_target, float(obs2[2]), tol=tracker.soc_tol)
+            gap_pen = gap_penalty(soc_target, float(obs2[2]))
         c1 = c1_step + gap_pen
 
         bi = step // 5

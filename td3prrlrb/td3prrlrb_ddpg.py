@@ -40,7 +40,8 @@ class SP_TD3(object):
                  ema_lam=False, ema_alpha=0.02, ema_lam_lr=0.01,
                  record_update_stats=False,
                  policy_delay=2, policy_noise=0.1, noise_clip=0.3,
-                 cost_critic_mode='max'):
+                 cost_critic_mode='max',
+                 wt_noise=0.05, sig_noise_max=0.2, sig_noise_min=0.05):
 
         # Determine device first
         self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -176,6 +177,29 @@ class SP_TD3(object):
         else:
             amp = np.ones(self.nb_actions)
         self.action_amp = np.asarray(amp, dtype=np.float32)
+
+        # ---- 探索噪声幅度 (逐维; TD3PRRLRB 标定) ----
+        # 旧实现: action += eps * ((np.random.random(n) - 0.5)/10)[0]
+        #   → (a) 幅度仅 ±0.05 (对 SOC 目标信号 = ±0.25 MWh, 不足一个块的跟踪能力)
+        #     (b) [0] 索引使同一个标量加到全部维度 (维度耦合, 非逐维噪声)
+        # 新实现: 逐维均匀噪声 ±amp_dim * eps, 信号维另有地板 sig_noise_min:
+        #   WT 5 维: ±wt_noise * eps        (0.05, 与原幅度一致, 仅改为逐维独立抽样)
+        #   信号维 : ±max(sig_noise_max*eps, sig_noise_min)  (0.2 → 地板 0.05)
+        # eps 由 1 线性衰减到 0, 衰减完成的【决策次数】= args.epsilon
+        # (H 每 5 个环境步决策一次 ⇒ args.epsilon=4000 对应 20k 环境步)。
+        self.wt_noise = float(wt_noise)
+        self.sig_noise_max = float(sig_noise_max)
+        self.sig_noise_min = float(sig_noise_min)
+        if self.nb_actions == self.nb_turbine + 1:
+            amp_e = np.array([self.wt_noise] * self.nb_turbine + [self.sig_noise_max],
+                             dtype=np.float32)
+            floor_e = np.array([0.0] * self.nb_turbine + [self.sig_noise_min],
+                               dtype=np.float32)
+        else:
+            amp_e = np.full(self.nb_actions, self.wt_noise, dtype=np.float32)
+            floor_e = np.zeros(self.nb_actions, dtype=np.float32)
+        self.explore_amp = amp_e
+        self.explore_floor = floor_e
 
     # ---- TD3 helper: aggregate a critic pair (min or max) ----
     def _pair_min(self, q1, q2):
@@ -417,7 +441,13 @@ class SP_TD3(object):
 
     def select_action(self, s_t, decay_epsilon=True):
         action = to_numpy(self.actor(to_tensor(np.array([s_t])))).squeeze(0)
-        action += self.is_training * max(self.epsilon,0) * ((np.random.random(self.nb_actions)-0.5)/10)[0] # noise [0.0, 1.0)
+
+        # 逐维探索噪声: 均匀 U(-amp, +amp), amp = max(amp_dim*eps, floor_dim)
+        # (信号维幅值 0.2*eps 且地板 0.05; WT 维 0.05*eps; 见 __init__)
+        if self.is_training:
+            eps = max(self.epsilon, 0.0)
+            amp = np.maximum(self.explore_amp * eps, self.explore_floor)
+            action = action + (np.random.random(self.nb_actions) - 0.5) * 2.0 * amp
 
         if decay_epsilon:
             self.epsilon -= self.depsilon
