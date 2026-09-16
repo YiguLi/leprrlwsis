@@ -31,7 +31,8 @@ H: r1 = pr·P_G·dt − 490·max(−pbrule,0)·dt − penalty_NN_H          (P_G
     c1 = 1.0·[10·(P_F−3)⁺ + 0.1·P_F] + 10·unfeasible_gap
          + [块末] 10·max(0, |soc_target − SOC_末| − 0.1)
 L: r2 = −100·clip_amount
-    c2 = 1000·|soc_target − SOC'|
+    c2 = 1000·slack,  slack = max(0, |target−SOC'| − |target−SOC_best|)
+         SOC_best = SOC + g·clip(δ/g, RBB窗口)   (能力内追踪失败量; 见 myfunc)
 
 对偶上升 (两层都是 EMA 实际块成本)
 ----------------------------------
@@ -980,7 +981,9 @@ if __name__ == "__main__":
 
     # 下层 L: 保留 td3per 自己的 RL BESS 操作
     #   * 观测 5 维蒸馏 = [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
-    #   * r2 = −100·clip_amount; c2 = 1000·|soc_target − SOC'|
+    #   * r2 = −100·clip_amount
+    #   * c2 = 1000·slack (能力内追踪失败量: 只罚"本步能做到却没做"的部分,
+    #        零成本动作 = 规则 SocTracker 的 clip(δ/g, 窗口); 见 myfunc.soc_track_slack)
     #   * lam2 ∈ [10, 500] 初始 10.0; 每块 10 次更新; 步级折扣 --l_discount
     agent_L = SP_TD3(nb_states=5, nb_actions=1, args=args,
                      lam_max=500.0, lam_min=10.0,
