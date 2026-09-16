@@ -29,6 +29,9 @@ $RECYCLE.BIN/
 # Training output — hundreds of MB of per-run artifacts
 /output/
 
+# TensorBoard / experiment run artifacts (regenerable training logs)
+/runs/
+
 # A full duplicate copy of the project ("未命名" = "unnamed"); not tracked
 /未命名/
 
