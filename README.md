@@ -147,7 +147,7 @@ HSRL/
 ├── DEPENDENCIES.md           ★ 完整依赖清单（Python / MATLAB / 第三方库）
 ├── CHANGELOG.md              分段奖励函数版本记录
 ├── AGENTS.md                 协作与 git 备份协议
-└── llm_config.example.json   LLM 配置模板（真实配置不入库）
+└── README.md                 本文件
 ```
 
 ---
@@ -308,34 +308,32 @@ python compare_episode_reward.py   # Episode Reward 对比（MAPE）
 
 ---
 
-## 10. LLM 配置（⚠️ 密钥安全）
+## 10. LLM 配置
 
 `prle`、`td3prle`、`td3leprrlrb` 三个方法需要调用 LLM 做元控制，配置由各自目录下的
-`llm_config.json` 提供。**该文件含明文 API key，已被 `.gitignore` 排除，永不入库。**
-
-方式一（推荐，密钥不落盘）：只留 provider/model，密钥通过环境变量传入：
+`llm_config.json` 提供：
 
 ```jsonc
 // <method>/llm_config.json
 {
-    "provider": "deepseek",
-    "api_key": "",
+    "provider": "deepseek",     // deepseek / anthropic / openai
+    "api_key": "sk-...",        // 留空则回退到环境变量
     "model": "deepseek-v4-flash"
 }
 ```
 
-```powershell
-$env:DEEPSEEK_API_KEY = "sk-..."     # 或 OPENAI_API_KEY / ANTHROPIC_API_KEY
-```
-
-方式二：复制模板文件 [ `llm_config.example.json` ](llm_config.example.json) 到目标目录后填入。
-
 `load_llm_config()` 的解析顺序为：**config 文件的 `api_key` → 对应环境变量**
 （`deepseek` → `DEEPSEEK_API_KEY` / `OPENAI_API_KEY`，`anthropic` → `ANTHROPIC_API_KEY`，
-`openai` → `OPENAI_API_KEY`）。
+`openai` → `OPENAI_API_KEY`）。也可用 `--llm_config <path>` 指定其他配置文件。
 
-> 🔒 **切勿**把真实密钥写进受版本控制的文件。若曾提交过密钥，**必须立即在服务商侧吊销**
-> 并更换 —— 从提交历史中删除并不能让泄露的密钥失效。
+若不想让密钥落盘，把 `api_key` 留空改用环境变量即可：
+
+```powershell
+$env:DEEPSEEK_API_KEY = "sk-..."
+```
+
+> 这三个 `llm_config.json` 当前**已入库**（私有仓库）。若将来转为公开仓库或增加协作者，
+> 建议改为「`api_key` 留空 + 环境变量」，或将该文件移出版本控制。
 
 ---
 
@@ -344,8 +342,8 @@ $env:DEEPSEEK_API_KEY = "sk-..."     # 或 OPENAI_API_KEY / ANTHROPIC_API_KEY
 | 路径 | 内容 | 版本控制 |
 |---|---|---|
 | `output/<METHOD>-runN/` | 每步明细、每 episode 汇总、9-case 测试、更新统计等 CSV | ❌ 已忽略（本地可达数 GB） |
-| `runs/` | TensorBoard 训练日志（`events.out.tfevents.*`） | ❌ 已忽略 |
 | `output/test_five_days/` | 五天评测的 CSV 与 TensorBoard | ❌ 已忽略 |
+| `runs/` | TensorBoard 训练日志（`events.out.tfevents.*`） | ⚠️ 当前已入库（3 个事件文件） |
 
 训练产生的记录文件以 `td3prrlrb` 为例：
 
