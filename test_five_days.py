@@ -51,6 +51,7 @@
   prrbb          SP_DDPG        + prrbb_rule_bess.RuleBasedBESS        L 基线 5 维
   prle           PRLE_DDPG      + prrbb_rule_bess.RuleBasedBESS        L 基线 5 维
   td3per         SP_TD3         + rbb/rbb_rule_bess.RuleBasedBESS      L 蒸馏 5 维
+                 (上层 = td3perrb 口径: 非分段奖励 + SOC 目标信号 + 相位观测)
   td3prrbb       SP_TD3         + td3prrbb_rule_bess.RuleBasedBESS     L 蒸馏 5 维
   td3prle        SP_TD3_PRLE    + td3prle_rule_bess.RuleBasedBESS      L 蒸馏 5 维
   td3prrlrb      SP_TD3         + td3prrlrb_rule_bess  (L=规则 SocTracker, H 带相位)
@@ -61,15 +62,18 @@
   * agent 类、CheckAction / Normalize(_H)、RuleBasedBESS 各自取自本项目模块；
   * L 层观测：
       - per / prrbb / prle : np.append(Normalize(obs), applied_action_H[-1])
-      - td3per / td3prrbb  : build_L_obs_distilled(
-              [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10])
-      - td3prle            : build_L_obs_distilled(
+      - td3perrb 化后的 td3per / td3prle : build_L_obs_distilled(
               [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10])
+      - td3prrbb           : build_L_obs_distilled(
+              [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10])
       - td3prrlrb / td3perrb / td3leprrlrb : 无 RL 下层，L 由 SocTracker 规则给出
               pb = clip((soc_target - E)/gain, pbrulemin, pbrulemax)
-  * td3prrlrb / td3perrb / td3leprrlrb 的 H 观测 = Normalize(obs) + 24h 相位特征，
+  * td3per / td3prrlrb / td3perrb / td3leprrlrb 的 H 观测 = Normalize(obs) + 24h 相位特征，
     维数（4 + 0/2/5）从 actor_6.pkl 的 fc1.weight 自动探测，无需手填。
     相位时刻 = episode 内的分钟序号（与训练一致：episode 恰好 1440 步）。
+  * td3per 改造后其 L 层仍走 RL（不是规则），只是第 3 维信号由影子电价换成 SOC 目标；
+    因此 H 权重（actor_6）与 L 权重（actor_1）都必须来自改造后的 td3per 训练 run，
+    改造前的 TD3PER-run* 权重语义不同（影子电价 + 4 维 H 观测），不可混用。
 
 不启用的训练期机制（对三项指标无影响，故测试中省去）
 ----------------------------------------------------
@@ -242,13 +246,17 @@ PROJECTS = {
         ref='prle/prle_main.py',
     ),
     'td3per': dict(
+        # 上层 = td3perrb 口径 (非分段奖励 + SOC 目标信号 + 相位观测);
+        # 下层 = td3per 自己的 RL BESS, 蒸馏 5 维第 3 维 = soc_target/10,
+        #        r2 = -100·clip_amount, c2 = 1000·|soc_target - SOC'|
         label='TD3PER',
         agent=('td3per.td3per_ddpg', 'SP_TD3'),
-        myfunc='myfunc',
+        myfunc='td3per.td3per_myfunc',
         rule_bess=('rbb.rbb_rule_bess', 'RuleBasedBESS'),
-        lower='rl', l_obs='distilled', h_obs='normalize',
-        h_kwargs={**_EMA, **_TD3_H, 'lam_max': 50.0, 'lam_min': 3.0,
-                  'record_update_stats': True},
+        lower='rl', l_obs='distilled', h_obs='normalize_H',
+        h_kwargs={**_EMA, **_TD3_H, 'lam_max': 100.0, 'lam_min': 3.0,
+                  'record_update_stats': True,
+                  'wt_noise': 0.05, 'sig_noise_max': 0.2, 'sig_noise_min': 0.05},
         h_lam=5.0,
         l_kwargs={**_EMA, **_TD3_L, 'lam_max': 500.0, 'lam_min': 10.0},
         l_cost_limit=10.0,

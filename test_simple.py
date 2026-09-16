@@ -92,6 +92,10 @@ def main():
         agent_L = SP_TD3_PRLE(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
         agent_L.cost_limit = 10.0
     elif proj_type == 'TD3PER':
+        # ⚠️ 本分支仍是 td3per 改造【前】的口径 (H 4 维观测 + 影子价格下层信号),
+        #    与改造后的 td3per 权重 (H 6 维相位观测 + SOC 目标下层) 不兼容。
+        #    新 td3per 的单文件推理请用:
+        #        python test_five_days.py --projects td3per --td3per <模型目录>
         agent_H = SP_TD3_PER(nb_states=4, nb_actions=6, args=ns)
         agent_L = SP_TD3_PER(nb_states=5, nb_actions=1, args=ns, lam_max=100.0)
         agent_L.cost_limit = 10.0

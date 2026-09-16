@@ -49,7 +49,7 @@
 | **PER** | 根目录 + `PER/` | DDPG（`SP_DDPG`） | 原始 | RL（基线 5 维观测） | `PER_main0.py` |
 | **PRRBB** | `prrbb/` | DDPG | **分段奖励** | RL（基线 5 维） | `prrbb/prrbb_main.py` |
 | **PRLE** | `prle/` | DDPG（`PRLE_DDPG`） | 分段 + **LLM 增强** | RL（基线 5 维） | `prle/prle_main.py` |
-| **TD3PER** | `td3per/` | **TD3**（`SP_TD3`） | 原始 | RL（蒸馏 5 维） | `td3per/td3per_main.py` |
+| **TD3PER** | `td3per/` | **TD3**（`SP_TD3`） | **非分段**（移植 td3perrb 上层） | RL（蒸馏 5 维，追踪 **SOC 目标**） | `td3per/td3per_main.py` |
 | **TD3PRRBB** | `td3prrbb/` | TD3 | 分段 | RL（蒸馏 5 维） | `td3prrbb/td3prrbb_main.py` |
 | **TD3PRLE** | `td3prle/` | TD3（`SP_TD3_PRLE`） | 分段 + LLM | RL（蒸馏 5 维） | `td3prle/td3prle_main.py` |
 | **TD3PRRLRB** | `td3prrlrb/` | TD3 | 分段 | **规则 `SocTracker`** | `td3prrlrb/td3prrlrb_main.py` |
@@ -97,6 +97,12 @@ PRRBB ──(加 LLM)──→ PRLE          TD3PRRBB ──(加 LLM)──→ T
 
 - `td3prrlrb` ← `td3prrbb`：**上层保留 TD3，下层由 TD3 改为规则控制器** `SocTracker`
 - `td3perrb` ← `td3prrlrb`：**唯一差异是奖励不分段**（收益权重与风险系数恒取 1.0）
+- `td3per`（**反向改造**：`td3perrb` 的上层 + `td3per` 自己的 RL 下层）：
+  上层 6 维动作第 6 维语义由"影子电价"改为 **SOC 目标信号**（与 td3perrb 逐项一致：
+  非分段奖励、块末 gap 罚、相位观测、逐维探索噪声、`lam1∈[3,100]`、每块 2 次更新）；
+  下层仍是 TD3+PER 的 RL BESS，但信号与追踪目标同为 SOC 目标
+  （观测第 3 维 `soc_target/10`、`r2 = −100·clip_amount`、`c2 = 1000·|soc_target − SOC'|`）。
+  ⚠️ 改造前的 `output/TD3PER-run*` 权重（4 维 H 观测 + 影子电价下层）与新代码不兼容。
 - `td3leprrlrb` ← `td3prrlrb`：增加 **LLM 在线微调风速分段阈值**（±1 m/s 硬约束）+ 回放池 relabel
 - `td3prle` ← `td3prrbb`：增加 LLM 元控制器；`prle` ← `prrbb` 同理
 - 各 TD3 版本与同名 DDPG 版本的差异集中在：双 critic、延迟策略更新、目标平滑、PER
@@ -120,7 +126,7 @@ HSRL/
 ├── prrbb/                    DDPG + 分段奖励 + 学习型下层
 ├── prle/                     PRRBB + LLM 增强
 ├── pernewact/                仅剩 .pyc 编译缓存，源文件已丢失，未入库
-├── td3per/                   TD3 + PER
+├── td3per/                   TD3 + PER（上层 td3perrb 口径：非分段 + SOC 目标信号；下层 RL BESS 追 SOC 目标）
 ├── td3prrbb/                 TD3 + 分段奖励 + 学习型下层
 ├── td3prle/                  TD3 + 分段奖励 + LLM
 ├── td3prrlrb/                TD3 + 分段奖励 + 规则下层
