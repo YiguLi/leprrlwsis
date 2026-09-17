@@ -437,7 +437,21 @@ REP_MINUTE = {'LOW': 210, 'MEDIUM': 840, 'HIGH': 540}
 
 
 def rep_minute_for_price_level(level):
-    return REP_MINUTE.get(str(level).upper(), 210)
+    """电价档 → 该档的"代表性时刻"(分钟)。同时接受档位名('LOW')与数值电价(300/580/980)。
+
+    ⚠️ 历史 bug: 9-case 场景的 price_seq 是**数值**电价
+    (test_scenario.build_9case_scenario 返回 int), 而早期实现只按档位名查表
+    ⇒ str(300)='300' 查不到 ⇒ 45 步全部回退 210 (LOW)
+    ⇒ MEDIUM/HIGH 的 case 用"凌晨 3:30 的相位"评估, 相位与电价自相矛盾 (OOD)。
+    这里先按档位名查, 查不到再按数值电价分档 (get_price_level), 两种调用都正确。
+    """
+    key = str(level).strip().upper()
+    if key not in REP_MINUTE:
+        try:
+            key = get_price_level(float(level))
+        except (TypeError, ValueError):
+            pass
+    return REP_MINUTE.get(key, 210)
 
 
 # =============================================================================
