@@ -90,6 +90,7 @@ warnings.filterwarnings("ignore")
 import matlab
 import matlab.engine
 import hsrl_cost as hc   # H 层 c1/λ/d_block 统一口径
+import hsrl_agent_init as hinit   # critic 输出层 bias(价值基线)
 engine = matlab.engine.start_matlab()
 
 
@@ -304,6 +305,8 @@ def train(num_iterations_H,
     window_violation_count = 0   # steps where |P_F| > 3 MW
     window_power_sum = 0.0        # cumulative P_G over the window
 
+    # ---- critic 输出层 bias(价值基线)初始化: 收集 warmup 期块样本 ----
+    _warm_blocks = []
     while step < num_iterations_H:
         # start of episode 重置环境
         prYellow('########### step:{} ###########'.format(step))
@@ -479,6 +482,17 @@ def train(num_iterations_H,
             # 使 relabel_all() 重算成本时不会丢掉这一项 (它与风速阈值无关)。
             block_ctx_H[-1]['gap_pen'] = float(gap_pen)
             window_stats.add_block_end(gap_pen, gap_raw)
+            # ---- critic 输出层 bias(价值基线)初始化 (在首次策略更新前生效) ----
+            if getattr(args, 'critic_bias_init', 'estimate') != 'none' and step <= args.warmup:
+                _warm_blocks.append((float(sum_r1), float(sum_c1)))
+                if step == args.warmup:
+                    _b_p, _b_c = hinit.bias_from_block_samples(_warm_blocks, args.discount)
+                    if getattr(args, 'critic_bias_p', -1.0) > 0:
+                        _b_p = float(args.critic_bias_p)
+                    if getattr(args, 'critic_bias_c', -1.0) > 0:
+                        _b_c = float(args.critic_bias_c)
+                    hinit.init_critic_bias(agent_H, _b_p, _b_c)
+
             agent_H.observe_jump(norm_observation_H, original_action_H,
                                  sum_r1, sum_c1, norm_observation2, done,
                                  context=list(block_ctx_H))
@@ -1100,6 +1114,16 @@ if __name__ == "__main__":
                         choices=['uniform', 'legacy'],
                         help='H 层 c1 口径: uniform=波动当量(默认, hsrl_cost 单一真源); '
                              'legacy=各项目原公式(对照臂)')
+    parser.add_argument('--critic_bias_init', default='estimate',
+                        choices=['estimate', 'none'],
+                        help='critic 输出层 bias 的价值基线初始化: estimate=用 warmup 观测的'
+                             '块收益估计 r̄/(1-γ) (默认); none=不初始化(对照臂)')
+    parser.add_argument('--critic_bias_p', default=-1.0, type=float,
+                        help='显式指定利润 critic 基线 (>0 生效, 覆盖 estimate)')
+    parser.add_argument('--critic_bias_c', default=-1.0, type=float,
+                        help='显式指定成本 critic 基线 (>0 生效, 覆盖 estimate)')
+    parser.add_argument('--max_steps', default=0, type=int,
+                        help='>0 时覆盖 train_iter_H, 用于短程 A/B')
     args = parser.parse_args()
     hc.set_mode(args.c1_mode)
     _HCFG = hc.h_settings()
@@ -1168,6 +1192,8 @@ if __name__ == "__main__":
     use_csv = True
     args.max_episode_length = 1440  # 1d = 24h*60m = 1440 steps
     args.train_iter_H = 1000 * args.max_episode_length
+    if getattr(args, 'max_steps', 0) and args.max_steps > 0:
+        args.train_iter_H = int(args.max_steps)
     args.seed = np.random.randint(0, 10000)
     args.cost_single_limit = 1000.
 
