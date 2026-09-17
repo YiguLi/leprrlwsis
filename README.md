@@ -160,6 +160,7 @@ HSRL/
 │   ├── test_warmup_schedule.py       warmup 调度 + bias 触发点
 │   ├── test_value_scale.py           H 层 --value_scale 归一化
 │   ├── test_l_lower_unit.py          RL-BESS 下层口径 ÷100
+│   ├── audit_coverage.py             九方法覆盖审计 + H 层 η1 分析
 │   ├── analyse_q_scale.py            Q 尺度瞬态 / 相对 TD 误差
 │   ├── ab_critic_bias.py             同 seed 短程 A/B 驱动
 │   ├── probe_action_symmetry.py      ∂Q/∂a 动作对称性探针
@@ -347,6 +348,7 @@ python agentutil/test_critic_bias.py       # critic bias 初始化
 python agentutil/test_warmup_schedule.py   # warmup 调度 + bias 触发点
 python agentutil/test_value_scale.py       # H 层 --value_scale 归一化
 python agentutil/test_l_lower_unit.py      # RL-BESS 下层口径 ÷100
+python agentutil/audit_coverage.py         # 九方法覆盖审计 (归一化/bias/η1)
 
 # 分析 / 诊断 / A-B 驱动
 python agentutil/analyse_q_scale.py                       # 扫 output/*/update_stats_H.csv
@@ -551,6 +553,8 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 **不受影响 / 需要留意的**
 
 * **H 层**一切不变：`d_block_H = 15`、`--value_scale 1000`、`λ1/curriculum` 均未动。
+* **η1 不需要改（与 η2 的处境不同）**：H 层是**乘性**对偶 `λ ← λ·exp(η1·(EMA/d − 1))`，只看 `EMA/d` 的**比值**；而 `sum_c1` / EMA / `d_block_H` 全在原始口径，归一化只作用于 critic 回归空间 ⇒ 比值不变 ⇒ η1 = 0.02 原样保留。即便将来把 H 对偶也搬进归一化口径（EMA/s、d/s），比值仍不变 ⇒ 依旧不用改。反过来 L 层是**加性**对偶 `λ += η2·(EMA − d)`，又真的把 c2 与 `d_block_L` 同除了 100（差值也缩 100 倍）⇒ 必须 η2×100。四种组合的实算对照见 `python agentutil/audit_coverage.py`：
+  乘性（原始口径 vs 归一化口径）|A−B| = 8e-15（逐位免疫）；加性补 η×k |E−D| = 4e-14（与旧口径一致）；加性不补 η |E−C| = 3.86（λ 几乎不动 —— η2 的困境）。
 * **日志口径变化**：`r2`/`c2` 相关列（`sum_c2`、`df_episode_*.csv` 的 L 成本列、
   TensorBoard 的 `reward_lower/*`）全部 ÷100 —— 跨版本对比绝对数值时要乘回 100。
 * `Cal_r2_PER_baseline()`（prrbb/prle/td3prrbb）是 **LEGACY 基线**，其系数（10 / 700）

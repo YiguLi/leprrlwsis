@@ -199,6 +199,7 @@ DAY_METRICS = ('viol_count', 'viol_excess_mw', 'profit_rmb')
 # 项目注册表
 # ----------------------------------------------------------------------------
 _EMA = dict(ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01)
+_EMA_L = dict(ema_lam=True, ema_alpha=0.02, ema_lam_lr=1.0)   # L 层: c2 口径 ÷100 后 η2 ×100
 _TD3_H = dict(policy_delay=2, policy_noise=0.1, noise_clip=0.3,
               cost_critic_mode='max')
 _TD3_L = dict(policy_delay=2, policy_noise=0.1, noise_clip=0.3,
@@ -214,8 +215,8 @@ PROJECTS = {
         h_kwargs={**_EMA, 'lam_max': 20.0, 'lam_min': 3.0,
                   'record_update_stats': True},
         h_lam=5.0,
-        l_kwargs={**_EMA, 'lam_max': 500.0, 'lam_min': 10.0},
-        l_cost_limit=10.0,
+        l_kwargs={**_EMA_L, 'lam_max': 500.0, 'lam_min': 10.0},
+        l_cost_limit=0.1,   # = 生产 agent_L.cost_limit (L 口径 ÷100)
         soc_random=False,
         ref='PER_main0.py',
     ),
@@ -228,8 +229,8 @@ PROJECTS = {
         h_kwargs={**_EMA, 'lam_max': 20.0, 'lam_min': 3.0,
                   'record_update_stats': True},
         h_lam=5.0,
-        l_kwargs={**_EMA, 'lam_max': 500.0, 'lam_min': 10.0},
-        l_cost_limit=10.0,
+        l_kwargs={**_EMA_L, 'lam_max': 500.0, 'lam_min': 10.0},
+        l_cost_limit=0.1,   # = 生产 agent_L.cost_limit (L 口径 ÷100)
         soc_random=False,
         ref='prrbb/prrbb_main.py',
     ),
@@ -242,8 +243,8 @@ PROJECTS = {
         h_kwargs={**_EMA, 'lam_max': 20.0, 'lam_min': 3.0,
                   'record_update_stats': True},
         h_lam=5.0,
-        l_kwargs={**_EMA, 'lam_max': 200.0, 'lam_min': 10.0},
-        l_cost_limit=10.0,
+        l_kwargs={**_EMA_L, 'lam_max': 200.0, 'lam_min': 10.0},
+        l_cost_limit=0.1,   # = 生产 agent_L.cost_limit (L 口径 ÷100)
         soc_random=False,
         ref='prle/prle_main.py',
     ),
@@ -260,8 +261,8 @@ PROJECTS = {
                   'record_update_stats': True,
                   'wt_noise': 0.05, 'sig_noise_max': 0.2, 'sig_noise_min': 0.05},
         h_lam=5.0,
-        l_kwargs={**_EMA, **_TD3_L, 'lam_max': 500.0, 'lam_min': 10.0},
-        l_cost_limit=10.0,
+        l_kwargs={**_EMA_L, **_TD3_L, 'lam_max': 500.0, 'lam_min': 10.0},
+        l_cost_limit=0.1,   # = 生产 agent_L.cost_limit (L 口径 ÷100)
         soc_random=True,
         ref='td3per/td3per_main.py',
     ),
@@ -274,8 +275,8 @@ PROJECTS = {
         h_kwargs={**_EMA, **_TD3_H, 'lam_max': 50.0, 'lam_min': 3.0,
                   'record_update_stats': True},
         h_lam=5.0,
-        l_kwargs={**_EMA, **_TD3_L, 'lam_max': 500.0, 'lam_min': 10.0},
-        l_cost_limit=10.0,
+        l_kwargs={**_EMA_L, **_TD3_L, 'lam_max': 500.0, 'lam_min': 10.0},
+        l_cost_limit=0.1,   # = 生产 agent_L.cost_limit (L 口径 ÷100)
         soc_random=True,
         ref='td3prrbb/td3prrbb_main.py',
     ),
@@ -288,9 +289,9 @@ PROJECTS = {
         h_kwargs={**_EMA, **_TD3_H, 'lam_max': 500.0, 'lam_min': 50.0,
                   'record_update_stats': True},
         h_lam=100.0,
-        l_kwargs={**_EMA, **_TD3_L, 'lam_max': 200.0, 'lam_min': 2.0},
+        l_kwargs={**_EMA_L, **_TD3_L, 'lam_max': 200.0, 'lam_min': 2.0},
         l_lam=100.0,
-        l_cost_limit=10.0,
+        l_cost_limit=0.1,   # = 生产 agent_L.cost_limit (L 口径 ÷100)
         soc_random=True,
         ref='td3prle/td3prle_main.py',
     ),

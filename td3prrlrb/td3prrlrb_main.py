@@ -190,6 +190,9 @@ def train(num_iterations_H,
     #                  触发点 = warmup 之后第一个块末, 仍在首次策略更新之前)
     warmup_sched, warmup_rule, bess_fill_stats = hwarm.build_from_args(args, agent_H)
     bias_init = hinit.BiasInitTracker.from_args(args)
+    # 与 H agent 绑定同一 (γ, s): 估计口径 = critic 回归口径, 结构上不会分叉
+    bias_init.value_scale = float(getattr(agent_H, 'value_scale', hc.value_scale()))
+    bias_init.discount = float(agent_H.discount)
     while step < num_iterations_H:
         # start of episode 重置环境
         prYellow('########### step:{} ###########'.format(step))
