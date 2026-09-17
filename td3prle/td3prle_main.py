@@ -23,11 +23,11 @@ Parent packages:
 Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
   Upper (H): r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
                   - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
-                  (wT = wT_u(u)×wT_p(pr), wB = wB_p(pr);
+                  (wT = wT_u(u)×wT_p(pr), wB ≡ 1.0;
                    【本轮变更】取消"按 SOC 位置折减 BESS 盈利 ×0.7"的机制,
                    WB_SOC_OUTSIDE 0.7 → 1.0, SOC 位置不再影响 H 的收益权重;
                    与 td3prrbb 的差异仅在于此)
-             c1 = C1_RISK[wind]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
+             c1 = 1.0*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
                   + 块末结算项 c1_soc_track = 10*|soc_target − SOC_块末|
   Lower (L): r2 = -min(100*(clip_amount + clip_over), 1000)
              (clip_amount = 送进 RBB 的动作被可行窗口夹掉的量;
@@ -1002,9 +1002,9 @@ if __name__ == "__main__":
         writer = SummaryWriter(args.output)
         writer.add_scalar('seed', args.seed)
 
-    # ---- H 层收益权重留痕 (本轮取消 SOC 贴边折减: wB 只由电价档决定) ----
-    prCyan('H 层收益权重: wT=wT_u(u)×wT_p(pr), wB=wB_p(pr) — SOC 位置不影响权重 '
-           '(WB_SOC_OUTSIDE={}, =1.0 表示折减已取消); WB_PRICE={}, WT_WIND={}, WT_PRICE={}'.format(
+    # ---- H 层收益权重留痕 (【本轮变更】wB 与 c1 波动项的分段系数已去掉) ----
+    prCyan('H 层收益权重: wT=wT_u(u)×wT_p(pr), wB≡1.0, c1 波动项系数≡1.0 '
+           '(WB_SOC_OUTSIDE={}, WB_PRICE={}), WT_WIND={}, WT_PRICE={}'.format(
                WB_SOC_OUTSIDE, WB_PRICE, WT_WIND, WT_PRICE))
 
     env = WindBattery(max_E, args.nb_turbine, upload, engine)

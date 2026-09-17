@@ -265,7 +265,7 @@ def train_prle(num_iterations_H,
             'penalty_NN_H': float(penalty_NN_H),
             'P_F': float(reward_details['P_F']),
             # PRRBB 分段结构新增的重标记上下文：
-            'soc': float(observation[2]),                 # 决策时刻 SOC（wB_soc 贴边判断）
+            'soc': float(observation[2]),                 # 决策时刻 SOC（wB ≡ 1.0 后仅供回退/诊断）
             'unfeasible_gap': float(rbb_info['unfeasible_gap']),  # c1 不可行付费项
         }
         block_ctx_H.append(sub_step_ctx)

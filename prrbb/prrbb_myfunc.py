@@ -7,21 +7,23 @@ Decomposes PG revenue into turbine (ptur) and BESS (pb) components.
 
 Upper (H) r1（机会侧，乘法分解）:
   r1 = wT * (pr * ptur * time)           ← 风机收益, wT = wT_u(u) × wT_p(pr)
-     + wB * (-pr * pbrule * time)         ← BESS 收益, wB = wB_p(pr) × wB_soc(SOC,wind)
+     + wB * (-pr * pbrule * time)         ← BESS 收益, wB ≡ 1.0 (分段系数已去掉)
       - BESS_DEG_RMB_PER_MWH * max(-pbrule, 0) * time    ← 退化 (H 看 BESS 净收益)
       - penalty_NN_H
 
   Weight tables:
     wT_u:   LOW=1.2  MEDIUM=1.0  HIGH=0.9    (高风轻度降载倾向)
     wT_p:   LOW=1.0  MEDIUM=1.0  HIGH=1.05   (高价时段轻微加码发电)
-    wB_p:   LOW=0.8  MEDIUM=1.0  HIGH=1.2    (低价时少罚充电→鼓励低谷充电)
-    wB_soc: 带内(当前风速档安全带)=1.0, 带外=0.7 (SOC 贴边抑制套利)
+    wB_p:   恒 1.0 —— 【本轮变更】BESS 收益项分段系数已去掉
+    wB_soc: 恒 1.0 —— SOC 贴边折减同步取消 ⇒ wB ≡ 1.0
+            (BESS 由 SOC + RuleBasedBESS 硬窗口调控, 基本不存在安全问题)
 
   Wind boundaries: LOW < 7.0 m/s, MEDIUM [7.0, 11.0), HIGH >= 11.0 m/s
 
 Upper (H) c1（风险侧）:
-  c1 = r_u(u) × [10*(P_F-3)+ + 0.1*P_F] + W_GAP * unfeasible_gap
-    r_u:   LOW=0.8  MEDIUM=1.0  HIGH=1.2
+  c1 = r_u × [10*(P_F-3)+ + 0.1*P_F] + W_GAP * unfeasible_gap
+    r_u:   恒 1.0 —— 【本轮变更】波动风险项分段系数已去掉
+           (风力变化本身已证明控制完成, 无需按风档加减风险罚)
     W_GAP = 50.0  (平抑可行性缺口 unfeasible_gap 的直接代价, 单位 MW)
 
 Lower (L):
@@ -107,20 +109,23 @@ def get_wind_level(u):
 # =============================================================================
 # 机会侧（利润）与风险侧（c1/c2）分离：
 #   wT = wT_u(u) × wT_p(pr)                 — 风机发电收益权重
-#   wB = wB_p(pr) × wB_soc(SOC, wind_level) — BESS 套利收益权重
+#   wB ≡ 1.0 — BESS 套利收益权重 (原 wB_p(pr) × wB_soc; 【本轮变更】分段系数已去掉)
 # 风险全部进入 c1（波动+不可行缺口）与 c2（SOC 安全带），不再混入收益权重。
 
 # 风机收益：低风鼓励多发（机会大、风险小），高风轻度降载倾向
 WT_WIND = {'LOW': 1.2, 'MEDIUM': 1.0, 'HIGH': 0.9}
 # 风机收益：高价时段轻微加码（降载的机会成本更大）
 WT_PRICE = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.05}
-# BESS 收益：电价分档沿用原设计（低价时少罚充电→鼓励低谷充电）
-WB_PRICE = {'LOW': 0.8, 'MEDIUM': 1.0, 'HIGH': 1.2}
-# BESS 收益：SOC 贴边（超出当前风速档安全带）时压低套利权重
-WB_SOC_OUTSIDE = 0.7
+# BESS 收益：分段系数已取消 ⇒ wB ≡ 1.0（原 LOW=0.8 / MEDIUM=1.0 / HIGH=1.2）
+#   理由: BESS 由 SOC + RuleBasedBESS 硬窗口调控, 基本不存在安全问题,
+#   上层无需再用收益权重塑造其套利行为。改回原三档值即一键恢复。
+WB_PRICE = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.0}
+# BESS 收益：SOC 贴边折减同步取消（原 0.7）⇒ get_wB 恒返回 1.0
+WB_SOC_OUTSIDE = 1.0
 
-# c1 风险系数：三档（LOW≠MEDIUM≠HIGH）
-C1_RISK = {'LOW': 0.8, 'MEDIUM': 1.0, 'HIGH': 1.2}
+# c1 风险系数：分段系数已取消 ⇒ 恒 1.0（原 LOW=0.8 / MEDIUM=1.0 / HIGH=1.2）
+#   理由: 风力变化本身已证明控制完成, 无需再按风档加/减波动风险罚。
+C1_RISK = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.0}
 # unfeasible_gap（平抑可行性缺口, MW）进入 c1 的系数
 W_GAP = 50.0
 
@@ -131,10 +136,13 @@ def get_wT(wind_level, price_level):
 
 
 def get_wB(price_level, wind_level, SOC):
-    """BESS revenue weight: price × SOC-margin decomposition.
+    """BESS revenue weight —— 【本轮变更】恒为 1.0（分段系数已去掉）。
 
-    SOC-margin: 1.0 inside the wind-level safe band (SOC_SAFE_RANGES),
-    WB_SOC_OUTSIDE otherwise (SOC 贴边时套利动作大概率被裁剪/不可行).
+    历史机制保留在下方代码里（一键恢复）: wB = WB_PRICE[price] × w_soc,
+    w_soc = 1.0（SOC 在 SOC_SAFE_RANGES[wind] 带内）/ WB_SOC_OUTSIDE（带外）。
+    现 WB_PRICE 三档均 1.0 且 WB_SOC_OUTSIDE = 1.0 ⇒ 两条分支都返回 1.0,
+    r1 的 BESS 项退化为物理净收益 -pr*pbrule*time, 不再按电价/风档/SOC 加权。
+    恢复旧行为: 把 WB_PRICE / WB_SOC_OUTSIDE 改回原值即可（签名与调用点不变）。
     """
     soc_min, soc_max = SOC_SAFE_RANGES[wind_level]
     w_soc = 1.0 if soc_min <= SOC <= soc_max else WB_SOC_OUTSIDE
@@ -151,7 +159,7 @@ def Cal_r1_PRRBB(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
     PRRBB upper-level r1 — 机会/风险分离的分段收益分解.
 
     r1 = wT * (pr * ptur * time)           ← 风机收益, wT = wT_u(u)×wT_p(pr)
-       + wB * (-pr * pbrule * time)        ← BESS 收益, wB = wB_p(pr)×wB_soc(SOC,wind)
+       + wB * (-pr * pbrule * time)        ← BESS 收益, wB ≡ 1.0 (【本轮变更】分段系数已去掉)
        - BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time  ← 退化 (H 看 BESS 净收益)
        - penalty_NN_H
 
@@ -172,7 +180,7 @@ def Cal_r1_PRRBB(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
     price_level : str
         'LOW' | 'MEDIUM' | 'HIGH'.
     SOC : float
-        Battery SOC at decision time (MWh), used by wB_soc margin check.
+        Battery SOC at decision time (MWh). 当前 wB ≡ 1.0 不再用它; 保留参数以便把 WB_SOC_OUTSIDE 改回 0.7 时一键恢复。
     time : float
         Step duration in hours (default 1/60).
 
@@ -255,7 +263,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     """
     PRRBB reward: 机会/风险分离的分段奖励.
     Upper r1 = wT*pr*ptur*dt + wB*(-pr*pbrule*dt) - 退化 - penalty_NN_H
-             （wT/wB 乘法分解: wT=wT_u×wT_p, wB=wB_p×wB_soc）
+             （wT = wT_u×wT_p; wB ≡ 1.0 —— 【本轮变更】BESS 分段系数已去掉）
     Upper c1 = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
     Lower r2 = 10*shadow_profit - 100*clip_amount
     Lower c2 = 700*soc_deviation
@@ -292,7 +300,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 
     wind_level = get_wind_level(u)
     price_level = get_price_level(pr_old)
-    SOC_decision = float(observation[2])  # 决策时刻 SOC，用于 wB_soc 贴边判断
+    SOC_decision = float(observation[2])  # 决策时刻 SOC（wB ≡ 1.0 后仅供签名/回退用）
     w_wind = get_wT(wind_level, price_level)
     w_bess = get_wB(price_level, wind_level, SOC_decision)
 

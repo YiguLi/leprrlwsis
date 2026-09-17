@@ -22,7 +22,7 @@ L (规则, SocTracker, 1 维动作 pb):
 奖励 / 成本
 -----------
 H: r1 = wT*(pr*ptur*dt) + wB*(-pr*pbrule*dt) - 490*max(-pbrule,0)*dt - penalty_NN_H
-    c1 = C1_RISK[wind]*[10*(P_F-3)+ + 0.1*P_F] + 10*unfeasible_gap
+    c1 = 1.0*[10*(P_F-3)+ + 0.1*P_F] + 10*unfeasible_gap  (【本轮变更】分段系数已去掉)
          + [块末结算] 10*max(0, |soc_target - SOC_end| - SOC_TOL)
 
 对偶上升 (仅 H, EMA 实际块成本)
@@ -1148,7 +1148,7 @@ if __name__ == "__main__":
                orig_low_max - 1.0, orig_low_max + 1.0,
                orig_high_min - 1.0, orig_high_min + 1.0))
     prCyan('LEPRRLRB: 收益权重表 WT_WIND={}, WT_PRICE={}, WB_PRICE={}, '
-           'WB_SOC_OUTSIDE={} (SOC 贴边折减已取消: wB 只由电价档决定, 与 td3prle 对齐)'
+           'WB_SOC_OUTSIDE={} (【本轮变更】BESS 收益项与 c1 波动项的分段系数都已去掉: wB ≡ 1.0, c1 系数 ≡ 1.0)'
            .format(WT_WIND, WT_PRICE, WB_PRICE, WB_SOC_OUTSIDE))
 
     max_E = 6.

@@ -1,9 +1,9 @@
 """
 TD3PERRB — Non-Segmented Reward + Rule-Based BESS
 ====================================================
-与 TD3PRRLRB 的【唯一差异】: 不使用分段奖励函数 —— 收益权重与 c1 风险系数全部
-取固定 1.0, 不移植任何分段系数 (TD3PRRLRB 为 wT_u(u)×wT_p(pr) / wB_p(pr)×
-wB_soc(SOC,wind) / C1_RISK[wind])。详见第 2 节。
+与 TD3PRRLRB 的差异: 不使用分段奖励函数 —— 收益权重与 c1 风险系数全部取固定 1.0。
+【更新】TD3PRRLRB 现已取消 wB 与 C1_RISK 的分段系数 (均恒 1.0), 故两者如今
+【只剩 wT = wT_u(u)×wT_p(pr) 一项不同】(TD3PRRLRB 保留 wT 分段)。详见第 2 节。
 
 Upper layer (H, RL):
   r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
@@ -76,9 +76,9 @@ def get_wind_level(u):
 # -----------------------------------------------------------------------------
 # 非分段权重 —— TD3PERRB 与 TD3PRRLRB 的【唯一差异】
 # -----------------------------------------------------------------------------
-# TD3PRRLRB 使用【分段奖励函数】: 风机收益权重 wT = wT_u(风况档) × wT_p(电价档),
-# BESS 收益权重 wB = wB_p(电价档) × wB_soc(SOC 是否越出风况分段安全带), c1 风险
-# 系数按风况档取 {LOW 0.8, MEDIUM 1.0, HIGH 1.2}。
+# TD3PRRLRB 使用【分段奖励函数】: 风机收益权重 wT = wT_u(风况档) × wT_p(电价档)。
+# 【更新】TD3PRRLRB 已取消 BESS 收益权重 wB 与 c1 风险系数的分段 (现均为 1.0),
+# 因此两者现在【只差 wT 一项】; 下文关于 wB/C1_RISK 的分段描述保留为历史口径。
 # TD3PERRB **不移植任何分段系数**, 三者全部固定为 1.0 ⇒ 回到非分段(连续)口径:
 #     r1 = 1.0*(pr*ptur*time) + 1.0*(-pr*pbrule*time)
 #          - 490*max(-pbrule,0)*time - penalty_NN_H

@@ -19,7 +19,7 @@ Parent packages:
 Reward structure (td3prrbb_myfunc.Cal_Rew_PRRBB):
   Upper (H): r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
                   - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
-                  wT = wT_u(u)×wT_p(pr), wB = wB_p(pr)×wB_soc(SOC,wind)
+                  wT = wT_u(u)×wT_p(pr), wB ≡ 1.0 (【本轮变更】BESS 分段系数已去掉)
              c1 = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + 50*unfeasible_gap
   Lower (L): r2 = 10*shadow_profit - 100*clip_amount
              c2 = 700*soc_deviation   (wind-segmented SOC 安全带)

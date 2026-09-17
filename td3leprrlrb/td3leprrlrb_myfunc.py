@@ -10,12 +10,15 @@ Upper layer (H, RL):
   r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
        - 490*max(-pbrule,0)*time            (电池退化, 由命令方 H 付费)
        - penalty_NN_H                        (【P0.2】不封顶)
-       wT = wT_u(u) × wT_p(pr),  wB = wB_p(pr) × w_soc
-       (w_soc 的 SOC 贴边折减已取消: WB_SOC_OUTSIDE = 1.0 ⇒ wB 只由电价档决定)
+       wT = wT_u(u) × wT_p(pr)
+       wB ≡ 1.0  【本轮变更】BESS 收益项分段系数已去掉
+                 (BESS 由 SOC + RuleBasedBESS 硬窗口调控, 基本不存在安全问题)
 
-  c1 = C1_RISK[wind] * [ 10*(P_F-3)+ + 0.1*P_F ]      (波动越限 + 平滑)
+  c1 = 1.0 * [ 10*(P_F-3)+ + 0.1*P_F ]                (波动越限 + 平滑)
        + W_GAP * unfeasible_gap                       (平抑可行性缺口)
        + [块末结算] gap_penalty                        (SOC 目标可行性罚)
+       【本轮变更】波动风险项分段系数已去掉 ⇒ 系数恒 1.0
+       (风力变化本身已证明控制完成)
 
   a6 = SOC 目标信号 (-0.5 ~ 0.5)  →  soc_target = 3 + 5*a6 ∈ [0.5, 5.5]
        块级(每 5 步)固定; 上层为"不可行的目标"付费。
@@ -33,11 +36,12 @@ Lower layer (L, 规则): SocTracker (见 td3leprrlrb_rule_bess.py)
   H 只对超过 0.1 MWh 的目标残差付费, 下层则尽力追到 0 —— 不对称方向安全
   (L 能消的残差 ⊇ H 豁免的), 不会产生幽灵税。
 
-【阈值依赖面】风速档 wind_level(u) 同时进入
-  (a) 收益权重 wT = WT_WIND[wind]×WT_PRICE[price] 与 wB (经 SOC_SAFE_RANGES[wind])
-  (b) 风险系数 C1_RISK[wind]
-所以阈值一动, 历史的 r1/c1 口径就变了 → 必须 relabel (本模块提供两个
-relabel_*_substep 辅助函数, 只重算阈值相关的乘法因子)。
+【阈值依赖面】本轮变更后, 风速档 wind_level(u) 只剩**一处**进入奖励:
+  (a) 收益权重 wT = WT_WIND[wind]×WT_PRICE[price]
+已取消的两处: wB (原经 SOC_SAFE_RANGES[wind]) 与 c1 的 C1_RISK[wind]
+  ⇒ wB ≡ 1.0, c1 的波动项系数 ≡ 1.0 (见 §2 的 WB_PRICE / WB_SOC_OUTSIDE / C1_RISK)。
+因此阈值一动, 只有 wT 那一项会让历史 r1 的口径变化 → relabel 仍然必要
+(本模块提供两个 relabel_*_substep 辅助函数, 只重算阈值相关的乘法因子)。
 
 Constants
 ---------
@@ -125,24 +129,23 @@ def get_wind_level(u):
 # =============================================================================
 # 2. Segmented weight lookup (multiplicative decomposition)
 # =============================================================================
-# 机会侧（利润）与风险侧（c1）分离: wT = WT_WIND(u)×WT_PRICE(pr), wB = WB_PRICE(pr)×w_soc
-# 【本轮变更】w_soc 的 SOC 贴边折减已取消 (WB_SOC_OUTSIDE 0.7 → 1.0),
-# 与 td3prle 对齐: wB 只由电价档决定, SOC 位置不再影响上层 BESS 盈利权重。
+# 机会侧（利润）与风险侧（c1）分离: wT = WT_WIND(u)×WT_PRICE(pr), wB ≡ 1.0
+# 【本轮变更】BESS 收益项分段系数彻底去掉: WB_PRICE 三档均 1.0 且
+# WB_SOC_OUTSIDE = 1.0 ⇒ wB ≡ 1.0（不再按电价档/风档/SOC 位置加权）。
 
 WT_WIND = {'LOW': 1.2, 'MEDIUM': 1.0, 'HIGH': 0.9}
 WT_PRICE = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.05}
-WB_PRICE = {'LOW': 0.8, 'MEDIUM': 1.0, 'HIGH': 1.2}
-# BESS 收益: SOC 贴边 (超出当前风速档安全带) 时的折减系数。
-# 【本轮变更】取消该机制: 0.7 → 1.0 ⇒ 上层 BESS 盈利不再随 SOC 位置打折。
-#   原值 0.7 会让 H 在 SOC 贴边时低估套利收益 (软刹车); 现由 SOC 目标机制接管
-#   (H 给目标 → 下层规则跟踪 → H 块末按 |目标−实际| 计 gap 罚), 收益侧不再额外打折。
-#   改回 0.7 即一键恢复原行为 —— 注意: 恢复后 relabel 仍精确, 因为 relabel 上下文
-#   已缓存每子步的决策时刻 SOC (见 main 的 block_ctx_H 与 relabel_r1_substep),
-#   千万不要为"省一个字段"把 context 里的 SOC 删掉。
+# BESS 收益：分段系数已取消 ⇒ wB ≡ 1.0（原 LOW=0.8 / MEDIUM=1.0 / HIGH=1.2）
+#   理由: BESS 由 SOC + RuleBasedBESS 硬窗口调控, 基本不存在安全问题。
+WB_PRICE = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.0}
+# BESS 收益: SOC 贴边折减（原 0.7 → 1.0）⇒ get_wB 恒返回 1.0
+#   注意: relabel_r1_substep 仍按位置接收 SOC 并缓存决策时刻 SOC ——
+#   即使当前 wB 与 SOC 无关, 也不要删掉该字段 (恢复旧权重时 relabel 需要它)。
 WB_SOC_OUTSIDE = 1.0
 
-# c1 风险系数：三档
-C1_RISK = {'LOW': 0.8, 'MEDIUM': 1.0, 'HIGH': 1.2}
+# c1 风险系数：分段系数已取消 ⇒ 恒 1.0（原 LOW=0.8 / MEDIUM=1.0 / HIGH=1.2）
+#   理由: 风力变化本身已证明控制完成, 无需再按风档加/减波动风险罚。
+C1_RISK = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.0}
 # unfeasible_gap（平抑可行性缺口, MW）进入 c1 的系数
 W_GAP = 10.0
 
@@ -168,12 +171,11 @@ def get_wT(wind_level, price_level):
 
 
 def get_wB(price_level, wind_level, SOC):
-    """BESS revenue weight: price × SOC-margin decomposition.
+    """BESS revenue weight —— 【本轮变更】恒为 1.0（分段系数已去掉）。
 
-    【本轮变更】SOC 贴边折减已取消 (WB_SOC_OUTSIDE = 1.0): wB 只由电价档决定,
-    即 wB = WB_PRICE[price_level] * 1.0, SOC 位置与风速档都不再影响上层
-    BESS 盈利权重。安全带判定 (SOC_SAFE_RANGES) 与其分支保留: 把
-    WB_SOC_OUTSIDE 改回 0.7 即一键恢复"带外 ×0.7"。
+    WB_PRICE 三档均 1.0 且 WB_SOC_OUTSIDE = 1.0 ⇒ 两条分支都返回 1.0,
+    r1 的 BESS 项退化为物理净收益 -pr*pbrule*time。
+    历史机制保留在下方代码里: 把 WB_PRICE / WB_SOC_OUTSIDE 改回原值即一键恢复。
     wind_level / SOC 参数继续保留以保证调用签名不变 (relabel 也按位置传参)。
     """
     soc_min, soc_max = SOC_SAFE_RANGES[wind_level]
@@ -235,7 +237,7 @@ def Cal_r1_PRRBB(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
 # 阈值改动只影响两处乘法因子:
 #   (a) 收益权重 wT = WT_WIND[wind(u)] × WT_PRICE[price]
 #                 wB = WB_PRICE[price] × w_soc   (w_soc≡1.0, 见 WB_SOC_OUTSIDE)
-#   (b) 风险系数 C1_RISK[wind(u)]
+#   (b) 风险系数恒 1.0 —— 【本轮变更】原 C1_RISK[wind(u)] 分段系数已去掉
 # 其余项 (pr·ptur·dt, −pr·pbrule·dt, 退化, penalty_NN_H, P_F 项, W_GAP·gap)
 # 都与阈值无关, 因此缓存"与阈值无关的原料"(raw) + 少数上下文标量即可精确重算。
 #
@@ -276,7 +278,7 @@ def relabel_r1_substep(u, pr, turbine_raw, bess_raw, degradation, penalty_NN_H,
 def relabel_c1_substep(u, P_F, unfeasible_gap=0.0, gap_pen=0.0):
     """用【当前】阈值重算单个子步的 c1.
 
-    c1 = C1_RISK[wind(u)] · [10·(P_F−3)⁺ + 0.1·P_F]
+    c1 = 1.0 · [10·(P_F−3)⁺ + 0.1·P_F]   (【本轮变更】C1_RISK 分段系数已去掉)
          + W_GAP·unfeasible_gap     (与阈值无关, 原样带回)
          + gap_pen                  (块末 SOC 目标罚, 与阈值无关; 仅块内最后
                                      一个子步非零 —— 见 main 的 context 记账)

@@ -20,7 +20,7 @@ L (规则, SocTracker, 1 维动作 pb):
 奖励 / 成本
 -----------
 H: r1 = wT*(pr*ptur*dt) + wB*(-pr*pbrule*dt) - 490*max(-pbrule,0)*dt - penalty_NN_H
-    c1 = C1_RISK[wind]*[10*(P_F-3)+ + 0.1*P_F] + 10*unfeasible_gap
+    c1 = 1.0*[10*(P_F-3)+ + 0.1*P_F] + 10*unfeasible_gap  (【本轮变更】分段系数已去掉)
          + [块末结算] 10*max(0, |soc_target - SOC_end| - SOC_TOL)
 
 对偶上升 (仅 H, EMA 实际块成本)

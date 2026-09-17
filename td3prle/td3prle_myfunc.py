@@ -27,17 +27,19 @@ TD3PRLE addition over prle_myfunc.py:
 
 Upper (H) r1 (机会侧, 乘法分解, 与 td3prrbb 一致):
   r1 = wT * (pr * ptur * time)            ← 风机收益, wT = wT_u(u) × wT_p(pr)
-     + wB * (-pr * pbrule * time)         ← BESS 收益, wB = wB_p(pr) (本轮取消 SOC 贴边折减)
+     + wB * (-pr * pbrule * time)         ← BESS 收益, wB ≡ 1.0 (分段系数已去掉)
       - BESS_DEG_RMB_PER_MWH * max(-pbrule, 0) * time   ← 退化 (H 看 BESS 净收益)
       - penalty_NN_H
 
   wT_u: LOW=1.2 MEDIUM=1.0 HIGH=0.9 | wT_p: LOW=1.0 MEDIUM=1.0 HIGH=1.05
-  wB_p: LOW=0.8 MEDIUM=1.0 HIGH=1.2 | 【本轮变更】原 wB_soc 带外×0.7 已取消 (WB_SOC_OUTSIDE=1.0)
+  wB_p: 恒 1.0 | 【本轮变更】wB_soc 带外×0.7 与 wB_p 分档都已取消 ⇒ wB ≡ 1.0
+        (BESS 由 SOC + RuleBasedBESS 硬窗口调控, 基本不存在安全问题)
 
 Upper (H) c1 (风险侧):
-  c1 = C1_RISK[wind] × [10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
+  c1 = C1_RISK × [10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
   块末结算再叠加 SOC 跟踪项: c1_soc_track = C1_SOC_TRACK × |soc_target − SOC_块末|
-  C1_RISK: LOW=0.8 MEDIUM=1.0 HIGH=1.2, W_GAP=10 (td3prle 调参: 原 50 → 10)
+  C1_RISK: 恒 1.0 【本轮变更】波动风险项分段系数已去掉
+           (风力变化本身已证明控制完成), W_GAP=10 (td3prle 调参: 原 50 → 10)
 
 Wind boundaries: 动态 (main 按 --seg 定起点, LLM 每 7200 步在 原设定±1 m/s 内调整)
 
@@ -130,24 +132,24 @@ def get_wind_level(u):
 # =============================================================================
 # 机会侧（利润）与风险侧（c1/c2）分离：
 #   wT = wT_u(u) × wT_p(pr)   — 风机发电收益权重
-#   wB = wB_p(pr)             — BESS 套利收益权重 (本轮取消 SOC 贴边折减, 见 WB_SOC_OUTSIDE)
+#   wB ≡ 1.0                  — BESS 套利收益权重 (【本轮变更】分段系数已去掉)
 # 风险全部进入 c1（波动+不可行缺口+SOC 跟踪）与 c2（SOC 目标二次势），不再混入收益权重。
 
 # 风机收益：低风鼓励多发（机会大、风险小），高风轻度降载倾向
 WT_WIND = {'LOW': 1.2, 'MEDIUM': 1.0, 'HIGH': 0.9}
 # 风机收益：高价时段轻微加码（降载的机会成本更大）
 WT_PRICE = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.05}
-# BESS 收益：电价分档沿用原设计（低价时少罚充电→鼓励低谷充电）
-WB_PRICE = {'LOW': 0.8, 'MEDIUM': 1.0, 'HIGH': 1.2}
-# BESS 收益：SOC 贴边（超出当前风速档安全带）时的折减系数。
-# 【本轮变更】取消该机制: 1.0 → 上层 BESS 盈利不再随 SOC 位置打折。
-#   原值 0.7 会让 H 在 SOC 贴边时低估套利收益（软刹车）; 现由 SOC 目标机制接管
-#   (H 给目标 → L 用 c2 跟踪 → H 块末按 |目标−实际| 计惩罚), 收益侧不再额外打折。
-#   改回 0.7 即一键恢复原行为。
+# BESS 收益：分段系数已取消 ⇒ wB ≡ 1.0（原 LOW=0.8 / MEDIUM=1.0 / HIGH=1.2）
+#   理由: BESS 由 SOC + RuleBasedBESS 硬窗口调控, 基本不存在安全问题。
+#   改回原三档值即一键恢复。
+WB_PRICE = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.0}
+# BESS 收益：SOC 贴边折减（原 0.7 → 1.0）⇒ get_wB 恒返回 1.0
+#   收益侧不再按电价档 / 风档 / SOC 位置给 BESS 打折; 由 SOC 目标机制接管。
 WB_SOC_OUTSIDE = 1.0
 
-# c1 风险系数：三档（LOW≠MEDIUM≠HIGH, 与 td3prrbb 一致）
-C1_RISK = {'LOW': 0.8, 'MEDIUM': 1.0, 'HIGH': 1.2}
+# c1 风险系数：分段系数已取消 ⇒ 恒 1.0（原 LOW=0.8 / MEDIUM=1.0 / HIGH=1.2）
+#   理由: 风力变化本身已证明控制完成, 无需再按风档加/减波动风险罚。
+C1_RISK = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.0}
 
 
 def get_wT(wind_level, price_level):
@@ -156,12 +158,12 @@ def get_wT(wind_level, price_level):
 
 
 def get_wB(price_level, wind_level, SOC):
-    """BESS revenue weight: price × SOC-margin decomposition.
+    """BESS revenue weight —— 【本轮变更】恒为 1.0（分段系数已去掉）。
 
-    【本轮变更】SOC 贴边折减已取消 (WB_SOC_OUTSIDE = 1.0): wB 只由电价档决定,
-    即 wB = WB_PRICE[price_level] * 1.0, SOC 位置不再影响上层 BESS 盈利权重。
-    安全带判定 (SOC_SAFE_RANGES) 与其分支保留: 把 WB_SOC_OUTSIDE 改回 0.7
-    即一键恢复"带外 ×0.7"。wind_level / SOC 参数继续保留以保证调用签名不变。
+    WB_PRICE 三档均 1.0 且 WB_SOC_OUTSIDE = 1.0 ⇒ 两条分支都返回 1.0,
+    r1 的 BESS 项退化为物理净收益 -pr*pbrule*time。
+    历史机制保留在下方代码里: 把 WB_PRICE / WB_SOC_OUTSIDE 改回原值即一键恢复。
+    wind_level / SOC 参数继续保留以保证调用签名不变 (relabel 也按位置传参)。
     """
     soc_min, soc_max = SOC_SAFE_RANGES[wind_level]
     w_soc = 1.0 if soc_min <= SOC <= soc_max else WB_SOC_OUTSIDE
@@ -178,7 +180,7 @@ def Cal_r1_PRRBB(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
     PRRBB upper-level r1 — 机会/风险分离的分段收益分解 (与 td3prrbb 一致).
 
     r1 = wT * (pr * ptur * time)           ← 风机收益, wT = wT_u(u)×wT_p(pr)
-       + wB * (-pr * pbrule * time)        ← BESS 收益, wB = wB_p(pr) (已取消 SOC 贴边折减)
+       + wB * (-pr * pbrule * time)        ← BESS 收益, wB ≡ 1.0 (【本轮变更】分段系数已去掉)
        - BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time  ← 退化 (H 看 BESS 净收益)
        - penalty_NN_H
 
@@ -433,7 +435,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     PRRBB reward: 机会/风险分离 (与 td3prrbb 一致);
     Upper r1 = wT*pr*ptur*dt + wB*(-pr*pbrule*dt) - 退化 - penalty_NN_H
              （wT/wB 乘法分解: wT=wT_u×wT_p, wB=wB_p (SOC 贴边折减已取消)）
-    Upper c1 = C1_RISK[wind档]*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
+    Upper c1 = 1.0*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap  (【本轮变更】C1_RISK 分段系数已去掉)
              （H 的 SOC 跟踪惩罚 c1_soc_track 在块末结算, 见 soc_track_penalty,
                不在此逐步入账）
     Lower r2 = -min(100*(clip_amount + l_clip_over), L_CLIP_PEN_TOTAL_CAP)

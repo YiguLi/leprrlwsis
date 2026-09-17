@@ -5,11 +5,15 @@ Upper layer (H, RL):
   r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
        - 490*max(-pbrule,0)*time            (电池退化, 由命令方 H 付费)
        - penalty_NN_H
-       wT = wT_u(u) × wT_p(pr),  wB = wB_p(pr) × wB_soc(SOC, wind)
+       wT = wT_u(u) × wT_p(pr)
+       wB ≡ 1.0  【本轮变更】BESS 收益项分段系数已去掉
+                 (BESS 由 SOC + RuleBasedBESS 硬窗口调控, 基本不存在安全问题)
 
-  c1 = C1_RISK[wind] * [ 10*(P_F-3)+ + 0.1*P_F ]      (波动越限 + 平滑)
+  c1 = 1.0 * [ 10*(P_F-3)+ + 0.1*P_F ]                (波动越限 + 平滑)
        + W_GAP * unfeasible_gap                       (平抑可行性缺口)
        + [块末结算] gap_penalty                        (SOC 目标可行性罚)
+       【本轮变更】波动风险项分段系数已去掉 ⇒ 系数恒 1.0
+       (风力变化本身已证明控制完成)
 
   a6 = SOC 目标信号 (-0.5 ~ 0.5)  →  soc_target = 3 + 5*a6 ∈ [0.5, 5.5]
        块级(每 5 步)固定; 上层为"不可行的目标"付费。
@@ -68,15 +72,19 @@ def get_wind_level(u):
 # =============================================================================
 # 2. Segmented weight lookup (multiplicative decomposition)
 # =============================================================================
-# 机会侧（利润）与风险侧（c1）分离: wT = wT_u(u)×wT_p(pr), wB = wB_p(pr)×wB_soc(SOC,wind)
+# 机会侧（利润）与风险侧（c1）分离: wT = wT_u(u)×wT_p(pr), wB ≡ 1.0 (分段系数已去掉)
 
 WT_WIND = {'LOW': 1.2, 'MEDIUM': 1.0, 'HIGH': 0.9}
 WT_PRICE = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.05}
-WB_PRICE = {'LOW': 0.8, 'MEDIUM': 1.0, 'HIGH': 1.2}
-WB_SOC_OUTSIDE = 0.7
+# BESS 收益：分段系数已取消 ⇒ wB ≡ 1.0（原 LOW=0.8 / MEDIUM=1.0 / HIGH=1.2）
+#   理由: BESS 由 SOC + RuleBasedBESS 硬窗口调控, 基本不存在安全问题。
+WB_PRICE = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.0}
+# BESS 收益：SOC 贴边折减同步取消（原 0.7）⇒ get_wB 恒返回 1.0
+WB_SOC_OUTSIDE = 1.0
 
-# c1 风险系数：三档
-C1_RISK = {'LOW': 0.8, 'MEDIUM': 1.0, 'HIGH': 1.2}
+# c1 风险系数：分段系数已取消 ⇒ 恒 1.0（原 LOW=0.8 / MEDIUM=1.0 / HIGH=1.2）
+#   理由: 风力变化本身已证明控制完成, 无需再按风档加/减波动风险罚。
+C1_RISK = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.0}
 # unfeasible_gap（平抑可行性缺口, MW）进入 c1 的系数
 W_GAP = 10.0
 
@@ -100,7 +108,13 @@ def get_wT(wind_level, price_level):
 
 
 def get_wB(price_level, wind_level, SOC):
-    """BESS revenue weight: price × SOC-margin decomposition."""
+    """BESS revenue weight —— 【本轮变更】恒为 1.0（分段系数已去掉）。
+
+    历史机制保留在下方代码里（一键恢复）: wB = WB_PRICE[price] × w_soc,
+    w_soc = 1.0（SOC 在 SOC_SAFE_RANGES[wind] 带内）/ WB_SOC_OUTSIDE（带外）。
+    现 WB_PRICE 三档均 1.0 且 WB_SOC_OUTSIDE = 1.0 ⇒ 两条分支都返回 1.0。
+    恢复旧行为: 把 WB_PRICE / WB_SOC_OUTSIDE 改回原值即可（签名与调用点不变）。
+    """
     soc_min, soc_max = SOC_SAFE_RANGES[wind_level]
     w_soc = 1.0 if soc_min <= SOC <= soc_max else WB_SOC_OUTSIDE
     return WB_PRICE[price_level] * w_soc
