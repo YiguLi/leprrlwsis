@@ -262,11 +262,14 @@ python td3leprrlrb/td3leprrlrb_main.py    # 需配置 LLM
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--warmup` | 200 | 纯随机填充块数 |
+| `--warmup` | 200 | warmup 块数（**已不再纯随机**，见文末附注） |
+| `--warmup_sched` | `fixed` | warmup 上层动作调度：`fixed` = 0.33 起每块 ±0.05、clip[0.20,0.45]、信号维恒 0；`random` = 旧 `random_action()`（对照臂） |
 | `--discount` | 0.99 | 折扣因子（以 5 min 的"块"为单位） |
 | `--policy_delay` | 2 | TD3 延迟策略更新频率 |
 | `--phase_feat` | 1 | H 观测加入 24h 相位特征（4→6 维） |
 | `--wt_bias_init` | 1 | 风机输出层 bias 初始化到 Cp 高效区 |
+| `--critic_bias_init` | `estimate` | critic 输出层 bias（价值基线）初始化：`estimate` = 用 warmup 块均值估计 `r̄/(1−γ)`；`none` = 对照臂 |
+| `--critic_bias_p/_c` | −1 | 显式覆盖利润/成本基线（>0 生效，**须保持 `--critic_bias_init estimate`**） |
 | `--epsilon` | 4000 | 探索 ε 从 1 衰减到 0 的**决策次数**（× 5 = 环境步数） |
 | `--rbb_fluctuation_limit` | 3.0 | RBB 波动限值（MW） |
 | `--rbb_rated_power` | 10.0 | RBB 额定功率（MW） |
@@ -433,6 +436,38 @@ $env:DEEPSEEK_API_KEY = "sk-..."
 * **不变量测试**：`python test_c1_uniform.py` —— 断言 8 个项目的 `Cal_Rew_*` 在 uniform 下返回**逐位相同**的 c1（`P_F∈{0,0.5,2.9,3,3.5,5,8}` 偏差 0），legacy 分支与旧公式逐项相符，且 `Σ₅ fluct_cost(3.0) = 15 = d_block`（硬约束当量自洽）。
 * 有效价参照（pr = 580）：边际收益 `pr·dt = 9.67 元/(MW·step)`；平滑 0.967（10%）；越限 20.3（2.1×）。
 * 各 `*_myfunc.py` 的文档字符串描述的仍是 **legacy** 公式（`--c1-mode legacy` 可达）；uniform 下 c1 由 `hsrl_cost.c1_apply()` 替换。
+
+---
+
+## 附：warmup 重构 + critic bias 触发修复（`--warmup_sched`，9 个方法共用单一真源 `hsrl_warmup.py`）
+
+**问题（`output/TD3PRRLRB-run3` day0 实测）**
+
+1. **bias 初始化从不触发**：触发条件写成"块末分支内 `step == args.warmup`"，而 episode 长度
+   1440 是 5 的倍数 ⇒ 块末步恒为 `step ≡ 4 (mod 5)`，默认 `--warmup 200 ≡ 0` **永不相等**。
+   结果 critic 起点 = `fc3.bias` 的 PyTorch 默认值（实测 `q_p_mean = 0.0497`）。
+2. **warmup 自身是唯一"BESS 疯狂 churn"的窗口**：上层全随机 ⇒ `soc_target` 每块跳 ±2.5 MWh，
+   而 RBB 窗口内每块只能移动 0.36~0.52 MWh（85% 的块目标不可达）⇒ `SocTracker` 全程顶格往返；
+   退化只按放电毛量计（`490 元/MWh`），实测块收益 `r̄ = −82.0 元/块`（其中退化 −151.0）。
+   该 `r̄` 经 `r̄/(1−γ)` 得到的基线是 **−8196**，与 day0 真实价值量级
+   （全状态平均 `Σγᵏr = +9983`）**反号**。
+
+**改动**
+
+| 层 | 旧 | 新 |
+|---|---|---|
+| 上层动作 | `random_action()`（wt ~ U(0,0.5)、信号 ~ U(−0.5,0.5)） | `WarmupSchedule`：wt 各维 0.33 起、每块 ±0.05、clip **[0.20,0.45]**（Cp 保持最优的 86%~100%，E[ΣCp]=2.82 ≈ 95% 最优）；信号维**恒 0**（SOC 目标语义 ⇒ `soc_target ≡ 3`；影子电价语义 ⇒ 中性 0）——两者都等于 actor 的 `init_wt_action_bias(..., sig_value=0.0)`，即 warmup 与策略起步**同分布** |
+| bias 触发 | `step == args.warmup`（不可达） | `hsrl_agent_init.BiasInitTracker`：warmup 期逐块收集，在 **warmup 之后第一个块末**一次性应用（`first_trigger_step(warmup)`），且排在 `step > warmup` 的首次更新之前 |
+
+**效果（同 day0 序列，离线干跑 5 seed）**：`r̄ = +70.4 元/块 ⇒ b_p ≈ +7042`（与 +9983 差 1.4×、同号），
+退化降到 **17.5 元/块**（其中 712 元是"把 SOC 从 episode 随机初值拉到 3"的一次性对齐放电，
+之后稳态只剩 0.2 元/块），c1 = 5.7 元/块。自动估计偏保守（成本通道 c1 只有策略段的 ~42%），
+需要更贴近策略量级时可显式给 `--critic_bias_p 8000 --critic_bias_c 1000`。
+
+**开关**：`--warmup_sched {fixed,random}`、`--warmup_wt_start/_step/_lo/_hi`。
+**不变量测试**：`python test_warmup_schedule.py` —— 触发点（warmup∈{199,200,201,204,500} 各恰好
+触发一次且在首次更新前）、旧条件反例、调度边界/可复现/不吃全局 RNG、规则行为体与 `SocTracker.act`
+逐位一致（20000 组随机含 3080 组不可行窗口，max|Δ|=0）、transition 填入计数。
 
 ---
 

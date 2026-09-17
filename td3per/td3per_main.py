@@ -77,6 +77,7 @@ import matlab
 import matlab.engine
 import hsrl_cost as hc   # H 层 c1/λ/d_block 统一口径
 import hsrl_agent_init as hinit   # critic 输出层 bias(价值基线)
+import hsrl_warmup as hwarm       # warmup 调度 + 规则下层 + transition 填入
 engine = matlab.engine.start_matlab()
 
 
@@ -200,8 +201,14 @@ def train(num_iterations_H,
     phase_mismatch = 0
     phase_checked = 0
 
-    # ---- critic 输出层 bias(价值基线)初始化: 收集 warmup 期块样本 ----
-    _warm_blocks = []
+    # ---- warmup 期调度 + critic bias 触发状态 ----
+    #   warmup_sched: 上层确定性动作调度 (wt 0.33 起每块 ±0.05 clip[0.20,0.45]; 信号维恒 0
+    #                 ⇒ SOC 目标语义的项目 soc_target ≡ 3, 影子电价语义的项目影子价 ≡ 0)
+    #   bias_init   : warmup 块样本收集 + bias 一次性应用
+    #                 (修 step == args.warmup 与块末 episode_steps%5==4 不同余导致永不触发的 bug;
+    #                  触发点 = warmup 之后第一个块末, 仍在首次策略更新之前)
+    warmup_sched, warmup_rule, bess_fill_stats = hwarm.build_from_args(args, agent_H)
+    bias_init = hinit.BiasInitTracker.from_args(args)
     while step < num_iterations_H:
         # start of episode 重置环境
         prYellow('########### step:{} ###########'.format(step))
@@ -231,7 +238,9 @@ def train(num_iterations_H,
             sum_c2 = 0     # L 层 5 步块累计成本 (喂 EMA 对偶)
             sum_gap_pen = 0.0
             if step <= args.warmup:
-                applied_action_H = original_action_H = agent_H.random_action()
+                _wa = warmup_sched.action()          # None ⇒ 对照臂 (--warmup_sched random)
+                applied_action_H = original_action_H = (
+                    agent_H.random_action() if _wa is None else _wa)
                 penalty_NN_H = 0
             else:
                 original_action_H = agent_H.select_action(norm_observation)
@@ -384,16 +393,8 @@ def train(num_iterations_H,
 
         # ---- 块末: H/L 两层各自结算 (H 用块级 sum, L 用步级 transition) ----
         if episode_steps % 5 == 4:
-            # ---- critic 输出层 bias(价值基线)初始化 (在首次策略更新前生效) ----
-            if getattr(args, 'critic_bias_init', 'estimate') != 'none' and step <= args.warmup:
-                _warm_blocks.append((float(sum_r1), float(sum_c1)))
-                if step == args.warmup:
-                    _b_p, _b_c = hinit.bias_from_block_samples(_warm_blocks, args.discount)
-                    if getattr(args, 'critic_bias_p', -1.0) > 0:
-                        _b_p = float(args.critic_bias_p)
-                    if getattr(args, 'critic_bias_c', -1.0) > 0:
-                        _b_c = float(args.critic_bias_c)
-                    hinit.init_critic_bias(agent_H, _b_p, _b_c)
+            # ---- critic 输出层 bias(价值基线): warmup 后首个块末一次性应用 ----
+            bias_init.on_block_end(step, sum_r1, sum_c1, agent_H)
 
             agent_H.observe_jump(norm_observation_H, original_action_H,
                                  sum_r1, sum_c1, norm_observation2, done)
@@ -941,6 +942,7 @@ if __name__ == "__main__":
                         help='显式指定成本 critic 基线 (>0 生效, 覆盖 estimate)')
     parser.add_argument('--max_steps', default=0, type=int,
                         help='>0 时覆盖 train_iter_H, 用于短程 A/B')
+    hwarm.add_warmup_args(parser)
     args = parser.parse_args()
     hc.set_mode(args.c1_mode)
     _HCFG = hc.h_settings()
