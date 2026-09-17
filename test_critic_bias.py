@@ -66,8 +66,11 @@ for name in done:
     exp = B_P if name in ('critic_p', 'critic_target_p', 'critic_p2',
                           'critic_target_p2') else B_C
     assert abs(b - exp) < 1e-6, (name, b, exp)
-# 权重未被改动（只动 bias）
-assert abs(float(agent.critic_p.fc3.weight.abs().mean()) - 1.0 / np.sqrt(50) / 2) < 0.02
+# 权重未被改动（只动 bias）—— 注意 model.py:62 把 fc3.weight 显式设为 ±init_w=±0.003，
+# 而 fc3.bias 是 PyTorch 默认 ±1/√50=±0.1414 ⇒ 初始输出几乎就等于 bias（实测 0.0804≈0.0812），
+# 即"状态变化量"在初始化时为 0，baseline 初始化正好是那个唯一该动的旋钮。
+assert abs(float(agent.critic_p.fc3.weight.abs().mean()) - 0.003 / 2) < 0.002, \
+    float(agent.critic_p.fc3.weight.abs().mean())
 
 # ---- 3) DDPG 风格（只有 p/c，没有 p2/c2）----
 class _DDPGLike:
