@@ -165,7 +165,11 @@ class WarmupBessRule:
 # 3. BESS-RL 项目的 transition "事后填入"
 # =============================================================================
 class BessFillStats:
-    """统计 warmup 期规则动作入池的条数与一致性（日志/断言用）。"""
+    """统计 warmup 期规则动作入池的条数与一致性（日志/断言用）。
+
+    `maybe_report_on_policy_step()`：warmup 结束后的第一条**非 warmup** transition
+    到达时自动打印一次小结（不需要主循环额外挂打印点）。
+    """
 
     def __init__(self):
         self.n_total = 0
@@ -174,6 +178,7 @@ class BessFillStats:
         self.max_abs_gap = 0.0
         self.sum_reward = 0.0
         self.sum_cost = 0.0
+        self.printed = False
 
     def summary(self):
         return ('[bess-fill] 入池 {} 条 (其中 warmup 规则动作 {} 条, 与施加值不一致 {} 条, '
@@ -181,9 +186,21 @@ class BessFillStats:
                 .format(self.n_total, self.n_warmup, self.n_mismatch,
                         self.max_abs_gap, self.sum_reward, self.sum_cost))
 
+    def maybe_report_on_policy_step(self):
+        """warmup → 策略期的第一次调用时打印小结（幂等）。"""
+        if self.printed or self.n_warmup == 0:
+            return self.printed
+        self.printed = True
+        try:
+            from util import prCyan
+        except Exception:                                   # pragma: no cover
+            prCyan = print
+        prCyan(self.summary() + ' (warmup 结束)')
+        return True
+
 
 def fill_bess_transition(agent_L, s_L, a_L, r2, c2, s_L_next, done_L,
-                         applied_pb=None, warmup=False, stats=None):
+                         applied_pb=None, warmup=False, stats=None, **kwargs):
     """BESS-RL 项目**下层 transition 入池的唯一入口**。
 
     warmup 期下层由规则行为体驱动，"事后填入"= 用**规则的命令动作**与它产生的
@@ -199,8 +216,16 @@ def fill_bess_transition(agent_L, s_L, a_L, r2, c2, s_L_next, done_L,
         |a_L − applied_pb| 是否为 0（非 0 仅应在"窗口不可行"的罕见步出现）并计数。
     warmup  : bool  是否处于 warmup 期（用于统计）
     stats   : BessFillStats or None
+    **kwargs : 透传给 observe_jump（如 prle/td3prle 的 context）
+
+    注意：这些项目的 r2/c2 定义使 warmup 期的奖励**天然接近 0**
+    （规则动作正是 c2 的零参照；影子价恒 0 ⇒ shadow_profit ≡ 0），
+    因此本机制保证的是"环境侧行为正常 + H 层基线可用 + L buffer 内是真实行"，
+    **不等价于对 L 的行为克隆**。
     """
     if stats is not None:
+        if not warmup:
+            stats.maybe_report_on_policy_step()
         stats.n_total += 1
         if warmup:
             stats.n_warmup += 1
@@ -211,7 +236,7 @@ def fill_bess_transition(agent_L, s_L, a_L, r2, c2, s_L_next, done_L,
                 stats.max_abs_gap = max(stats.max_abs_gap, gap)
                 if gap > 1e-9:
                     stats.n_mismatch += 1
-    return agent_L.observe_jump(s_L, a_L, r2, c2, s_L_next, done_L)
+    return agent_L.observe_jump(s_L, a_L, r2, c2, s_L_next, done_L, **kwargs)
 
 
 def add_warmup_args(parser):

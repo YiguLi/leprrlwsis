@@ -193,7 +193,7 @@ def train(num_iterations_H,
     #   bias_init   : warmup 块样本收集 + bias 一次性应用
     #                 (修 step == args.warmup 与块末 episode_steps%5==4 不同余导致永不触发的 bug;
     #                  触发点 = warmup 之后第一个块末, 仍在首次策略更新之前)
-    warmup_sched, warmup_rule, bess_fill_stats = hwarm.build_from_args(args, agent_H)
+    warmup_sched, warmup_rule, bess_fill_stats = hwarm.build_from_args(args, agent_H, agent_L)
     bias_init = hinit.BiasInitTracker.from_args(args)
     while step < num_iterations_H:
         # start of episode 重置环境
@@ -248,7 +248,15 @@ def train(num_iterations_H,
 
         # agent pick action 下层选择动作
         if step <= args.warmup:
-            applied_action_L = original_action_L = agent_L.random_action()
+            # warmup 期下层 = 规则行为体 (RBB 窗口内一步填平跟踪 SOC 目标; 无随机数)
+            if warmup_rule is not None:
+                _w_obs = rbb_system.compute_pbrule(
+                    pb_original=0.0, ptur=float(pw_tru),
+                    pg_prev=float(observation[-1]), E=float(observation[2]))[1]
+                applied_action_L = original_action_L = warmup_rule.action(
+                    float(observation[2]), _w_obs["pbrulemin"], _w_obs["pbrulemax"])
+            else:                                   # 对照臂 (--warmup_bess random)
+                applied_action_L = original_action_L = agent_L.random_action()
             penalty_NN_L = 0
         else:
             original_action_L = agent_L.select_action(norm_observation_L)
@@ -390,11 +398,13 @@ def train(num_iterations_H,
             done_L = True
         # L 层每步过渡也存上下文 {u_t, SOC_new, soc_target}: c2 = 10·(SOC_new−target)²
         # 目标由 H 信号给定 (与风速档无关), 故 relabel 时把存档目标原样传回即为恒等
-        agent_L.observe_jump(norm_observation_L, original_action_L, r2, c2,
-                             norm_observation2_L, done_L,
-                             context=[{'u': float(observation[1]),
-                                       'SOC_new': float(observation2[2]),
-                                       'soc_target': float(soc_target_H)}])
+        hwarm.fill_bess_transition(
+            agent_L, norm_observation_L, original_action_L, r2, c2,
+            norm_observation2_L, done_L,
+            applied_pb=float(pbrule), warmup=bool(step <= args.warmup),
+            stats=bess_fill_stats, context=[{'u': float(observation[1]),
+                             'SOC_new': float(observation2[2]),
+                             'soc_target': float(soc_target_H)}])
 
         if step > args.warmup:
             #--------------------Update----------------------

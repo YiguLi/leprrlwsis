@@ -264,6 +264,8 @@ python td3leprrlrb/td3leprrlrb_main.py    # 需配置 LLM
 |---|---|---|
 | `--warmup` | 200 | warmup 块数（**已不再纯随机**，见文末附注） |
 | `--warmup_sched` | `fixed` | warmup 上层动作调度：`fixed` = 0.33 起每块 ±0.05、clip[0.20,0.45]、信号维恒 0；`random` = 旧 `random_action()`（对照臂） |
+| `--warmup_bess` | `rule` | BESS-RL 项目（per/prrbb/prle/td3per/td3prrbb/td3prle）warmup 下层行为：`rule` = RBB 窗口 + SOC 目标跟踪（确定性，无随机）；`random` = 旧 `agent_L.random_action()`（对照臂） |
+| `--warmup_soc_target` | 3.0 | warmup 期规则下层跟踪的 SOC 目标（MWh） |
 | `--discount` | 0.99 | 折扣因子（以 5 min 的"块"为单位） |
 | `--policy_delay` | 2 | TD3 延迟策略更新频率 |
 | `--phase_feat` | 1 | H 观测加入 24h 相位特征（4→6 维） |
@@ -457,6 +459,7 @@ $env:DEEPSEEK_API_KEY = "sk-..."
 | 层 | 旧 | 新 |
 |---|---|---|
 | 上层动作 | `random_action()`（wt ~ U(0,0.5)、信号 ~ U(−0.5,0.5)） | `WarmupSchedule`：wt 各维 0.33 起、每块 ±0.05、clip **[0.20,0.45]**（Cp 保持最优的 86%~100%，E[ΣCp]=2.82 ≈ 95% 最优）；信号维**恒 0**（SOC 目标语义 ⇒ `soc_target ≡ 3`；影子电价语义 ⇒ 中性 0）——两者都等于 actor 的 `init_wt_action_bias(..., sig_value=0.0)`，即 warmup 与策略起步**同分布** |
+| 下层 BESS（BESS-RL 的 6 个项目） | `agent_L.random_action()`（每步随机 pb） | `WarmupBessRule`：RBB 窗口内"一步填平"跟踪 SOC 目标（语义与各项目 `SocTracker.act` 逐位相同，有对照断言）；该步**真实的** (s_L, a_L=规则命令, r2, c2, s_L′) 经 `fill_bess_transition()` 入池（"事后填入"，a_L 不再取 agent 抽的随机值） |
 | bias 触发 | `step == args.warmup`（不可达） | `hsrl_agent_init.BiasInitTracker`：warmup 期逐块收集，在 **warmup 之后第一个块末**一次性应用（`first_trigger_step(warmup)`），且排在 `step > warmup` 的首次更新之前 |
 
 **效果（同 day0 序列，离线干跑 5 seed）**：`r̄ = +70.4 元/块 ⇒ b_p ≈ +7042`（与 +9983 差 1.4×、同号），
@@ -464,10 +467,17 @@ $env:DEEPSEEK_API_KEY = "sk-..."
 之后稳态只剩 0.2 元/块），c1 = 5.7 元/块。自动估计偏保守（成本通道 c1 只有策略段的 ~42%），
 需要更贴近策略量级时可显式给 `--critic_bias_p 8000 --critic_bias_c 1000`。
 
-**开关**：`--warmup_sched {fixed,random}`、`--warmup_wt_start/_step/_lo/_hi`。
+**开关**：`--warmup_sched {fixed,random}`、`--warmup_bess {rule,random}`、
+`--warmup_wt_start/_step/_lo/_hi`、`--warmup_soc_target`。
 **不变量测试**：`python test_warmup_schedule.py` —— 触发点（warmup∈{199,200,201,204,500} 各恰好
 触发一次且在首次更新前）、旧条件反例、调度边界/可复现/不吃全局 RNG、规则行为体与 `SocTracker.act`
 逐位一致（20000 组随机含 3080 组不可行窗口，max|Δ|=0）、transition 填入计数。
+
+**注（"事后填入"能做什么、不能做什么）**：BESS-RL 项目的 warmup 期 r2/c2 在这些奖励定义下
+**天然接近 0** —— `td3per` 的 `c2 = 1000·slack` 以规则动作作为零参照（slack≡0）、`r2 = −100·clip_amount≡0`；
+`prrbb/prle/td3prrbb/td3prle` 的 `r2 = 10·shadow_profit − 100·clip_amount` 而影子价恒 0（`shadow_profit≡0`）。
+所以本机制保证的是**环境侧行为正常 + H 层 warmup 基线可用 + L buffer 内是真实的 (s,a,r,c,s′) 行**，
+**不等价于对 L 的行为克隆**；若要 L 真正 warm start 到规则，需要另加监督项或塑形奖励（见 `hsrl_warmup.py` 文档）。
 
 ---
 
