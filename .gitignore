@@ -5,6 +5,11 @@
 # 1) 训练产物：本地 7 GB+，每步 CSV 与 TensorBoard 日志，不入库
 /output/
 
+# 1b) Python 字节码缓存（曾一度入库，噪音大且随解释器版本变动；已从索引移除）
+__pycache__/
+*.pyc
+*.pyo
+
 # 2) 压缩包
 *.zip
 *.7z
