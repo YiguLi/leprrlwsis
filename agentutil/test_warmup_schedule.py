@@ -16,9 +16,11 @@ import sys
 import numpy as np
 import torch
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-os.chdir(ROOT)
-sys.path.insert(0, ROOT)
+_HERE = os.path.dirname(os.path.abspath(__file__))     # agentutil/
+ROOT = os.path.dirname(_HERE)                          # 仓库根
+os.chdir(ROOT)                                         # 相对数据/输出路径以仓库根为基准
+sys.path.insert(0, ROOT)                               # 项目模块 (hsrl_*, myfunc, util, td3*/...)
+sys.path.insert(0, _HERE)                              # agentutil 内互相 import
 sys.path.insert(0, os.path.join(ROOT, 'td3prrlrb'))
 
 for _s in (sys.stdout, sys.stderr):

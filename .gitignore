@@ -19,3 +19,12 @@ __pycache__/
 *.tgz
 # 例外：documentation/documentation.7z 由 documentation/.gitignore 中的
 # !documentation.7z 规则显式保留在库中（该目录的规则优先于本文件）。
+
+# 3) agentutil/ —— 脚本入库，运行产物不入库
+#    （约定见 AGENTS.md：项目无关的临时/自建脚本一律放这里）
+/agentutil/_scratch/
+/agentutil/*.csv
+/agentutil/*.png
+/agentutil/*.log
+/agentutil/*.tb
+/agentutil/runs/

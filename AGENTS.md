@@ -38,10 +38,44 @@
 - 回退前若工作区有未提交改动，先按上文做一次快照。
 - 除非用户明确要求，禁止 `git reset --hard`、强制推送、删除 `.git` 或改写历史。
 
+## 目录约定：`agentutil/` 放所有"项目无关"的自建文件
+
+**设定（每次会话都必须遵守）**：
+
+- **所有项目无关的临时/自建文件一律放进 `agentutil/`**，包括：一次性脚本、
+  探针（probe）、分析工具、回归测试（test_*）、临时草稿、调试用的对比脚本。
+  **不要**散落在仓库根目录或各项目子目录（`td3*/`、`per*/`、`prrbb/`、`prle/`、`rbb/` …）。
+- **必须留在根目录**的是"生产依赖"：`hsrl_cost.py` / `hsrl_agent_init.py` /
+  `hsrl_warmup.py`（9 个 main 直接 import）、`test_scenario.py`（7 个 `*_myfunc.py`
+  的 `nine_case_test` import）、`myfunc.py` / `util.py` / `env.py` / `model.py` /
+  `PER_buffer.py` / `*_ddpg.py` / `*_main.py`，以及根目录的评测主脚本
+  `test_five_days.py`、`test_simple.py`、`test_compare_projects.py`、
+  `compare_*.py`、`extract_training_wind_days.py`、`generate_day_sequence.py`。
+- **方向性约束**：`agentutil/` 可以 import 项目模块；**项目代码不得 import
+  `agentutil/`**（否则训练路径会被工具目录绑架）。
+- **新脚本必须自带路径 bootstrap**（可被任意 CWD、任意路径调用）：
+
+  ```python
+  import os
+  import sys
+
+  _HERE = os.path.dirname(os.path.abspath(__file__))     # agentutil/
+  ROOT = os.path.dirname(_HERE)                          # 仓库根
+  os.chdir(ROOT)                                         # 相对数据/输出路径以仓库根为基准
+  sys.path.insert(0, ROOT)                               # 项目模块
+  sys.path.insert(0, _HERE)                              # agentutil 内互相 import
+  ```
+
+  禁止 `ROOT = dirname(__file__)`（那是 agentutil 自己）与硬编码
+  `C:\Users\...` 绝对路径。
+- 目录内脚本清单与运行前置见 `agentutil/README.md`。
+
 ## 已忽略的内容
 
 `output/`、`未命名/`、`FFC_Mast_Wind_Data/`、大体积 CSV、`__pycache__/` 等
 由 `.gitignore` 排除，不参与版本控制。若用户要求纳入，先修改 `.gitignore` 再提交。
+`agentutil/` **纳入版本控制**（其中的回归测试是正式资产）；只有其运行产物
+（`*.csv`/`*.png`/日志）会被 `.gitignore` 排除。
 
 ## 关联 skill
 

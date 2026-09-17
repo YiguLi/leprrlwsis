@@ -145,13 +145,25 @@ HSRL/
 │
 ├── test_five_days.py         ★ 五天随机风速统一评测（兼容 9 个方法，多组模型）
 ├── test_compare_projects.py  多项目统一风力测试对比
-├── test_scenario.py          场景化测试（给定风速/电价序列）
+├── test_scenario.py          场景化测试（给定风速/电价序列；被 7 个 *_myfunc 的 nine_case_test import）
 ├── test_simple.py            单模型随机风速测试
 ├── test.py                   早期综合测试（⚠️ 会因缺失模块报错，见 §12）
 ├── compare_wind_speed.py     风速数据对比（平滑 vs 加噪）
 ├── compare_episode_reward.py 多项目 Episode Reward 对比（MAPE）
 ├── extract_training_wind_days.py   训练风速日提取到 TensorBoard
 ├── generate_day_sequence.py  训练日随机序列生成器
+│
+├── agentutil/                ★ agent 自建的**项目无关**工具与回归测试（约定目录，见下）
+│   ├── README.md                     目录约定 + 脚本清单 + bootstrap 模板
+│   ├── test_c1_uniform.py            H 层 c1 口径不变量
+│   ├── test_critic_bias.py           critic 输出层 bias（价值基线）初始化
+│   ├── test_warmup_schedule.py       warmup 调度 + bias 触发点
+│   ├── test_value_scale.py           H 层 --value_scale 归一化
+│   ├── test_l_lower_unit.py          RL-BESS 下层口径 ÷100
+│   ├── analyse_q_scale.py            Q 尺度瞬态 / 相对 TD 误差
+│   ├── ab_critic_bias.py             同 seed 短程 A/B 驱动
+│   ├── probe_action_symmetry.py      ∂Q/∂a 动作对称性探针
+│   └── probe_value_scale.py          归一化两臂学习曲线诊断
 │
 ├── DEPENDENCIES.md           ★ 完整依赖清单（Python / MATLAB / 第三方库）
 ├── CHANGELOG.md              分段奖励函数版本记录
@@ -323,6 +335,26 @@ python compare_wind_speed.py       # 风速数据对比
 python compare_episode_reward.py   # Episode Reward 对比（MAPE）
 ```
 
+### `agentutil/` —— agent 自建的项目无关工具与回归测试
+
+约定：**所有项目无关的临时/自建文件一律放 `agentutil/`**（详见 `AGENTS.md` 与
+`agentutil/README.md`）。目录内脚本自带路径 bootstrap，可从任意 CWD 调用：
+
+```bash
+# 纯 Python 不变量测试（不需要 MATLAB）
+python agentutil/test_c1_uniform.py        # H 层 c1 口径统一
+python agentutil/test_critic_bias.py       # critic bias 初始化
+python agentutil/test_warmup_schedule.py   # warmup 调度 + bias 触发点
+python agentutil/test_value_scale.py       # H 层 --value_scale 归一化
+python agentutil/test_l_lower_unit.py      # RL-BESS 下层口径 ÷100
+
+# 分析 / 诊断 / A-B 驱动
+python agentutil/analyse_q_scale.py                       # 扫 output/*/update_stats_H.csv
+python agentutil/ab_critic_bias.py --project td3perrb --dry-run
+python agentutil/probe_action_symmetry.py output/<run1> [run2 ...]
+python agentutil/probe_value_scale.py
+```
+
 ---
 
 ## 10. LLM 配置
@@ -388,8 +420,14 @@ $env:DEEPSEEK_API_KEY = "sk-..."
 5. **MATLAB 引擎多实例**：`myfunc.py` 与多个 `*_main.py` 各自 `matlab.engine.start_matlab()`，
    可能启动多个 MATLAB 实例，注意内存占用。
 6. **`from pickle import FALSE`**：项目多处使用该非常规导入，运行时会触发 `ImportWarning`。
-7. **必须 `cd` 到项目根运行**：除 `test_five_days.py` 外，脚本均不做 `chdir`，
-   相对路径（`FFC_speed_noise_1.csv`、`test_scenarios.csv`）依赖 CWD。
+7. **必须 `cd` 到项目根运行**：除 `test_five_days.py` 与 `agentutil/` 下的脚本外，
+   其余脚本均不做 `chdir`，相对路径（`FFC_speed_noise_1.csv`、`test_scenarios.csv`）依赖 CWD。
+   `agentutil/` 下的脚本自带 bootstrap（`chdir` 到仓库根 + 把仓库根与 `agentutil/`
+   都放进 `sys.path`），因此可以用任意 CWD、任意路径调用。
+8. **新文件放哪里**：项目无关的临时/自建脚本（探针、分析、回归测试）一律放
+   `agentutil/`，不要散落在根目录或各方法目录；生产模块（`hsrl_*.py`、`myfunc.py`、
+   `*_main.py` 等，被 9 个 main 直接 import）必须留在根目录。详见 `AGENTS.md` 与
+   `agentutil/README.md`。
 
 ---
 
@@ -435,7 +473,7 @@ $env:DEEPSEEK_API_KEY = "sk-..."
 | 块末 SOC 追踪罚 | **移出 c1 → 进 r1**（`sum_r1 -= gap_pen`），固定价 10 元/MWh | 偏好用固定价、约束才配对偶；避免 λ 同时定价追踪。5 个项目原系数均为 10，已核对一致 |
 
 * `--c1-mode uniform`（默认）走统一口径；`--c1-mode legacy` 保留各项目原公式作为**对照臂**；启动时打印当前口径与有效价格。
-* **不变量测试**：`python test_c1_uniform.py` —— 断言 8 个项目的 `Cal_Rew_*` 在 uniform 下返回**逐位相同**的 c1（`P_F∈{0,0.5,2.9,3,3.5,5,8}` 偏差 0），legacy 分支与旧公式逐项相符，且 `Σ₅ fluct_cost(3.0) = 15 = d_block`（硬约束当量自洽）。
+* **不变量测试**：`python agentutil/test_c1_uniform.py` —— 断言 8 个项目的 `Cal_Rew_*` 在 uniform 下返回**逐位相同**的 c1（`P_F∈{0,0.5,2.9,3,3.5,5,8}` 偏差 0），legacy 分支与旧公式逐项相符，且 `Σ₅ fluct_cost(3.0) = 15 = d_block`（硬约束当量自洽）。
 * 有效价参照（pr = 580）：边际收益 `pr·dt = 9.67 元/(MW·step)`；平滑 0.967（10%）；越限 20.3（2.1×）。
 * 各 `*_myfunc.py` 的文档字符串描述的仍是 **legacy** 公式（`--c1-mode legacy` 可达）；uniform 下 c1 由 `hsrl_cost.c1_apply()` 替换。
 
@@ -457,11 +495,11 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 | actor loss `−(Q_p − λ·Q_c)` | 自动 | 两通道同除 s ⇒ 正因子，Adam 下等价，**λ 语义不变** |
 | `hsrl_agent_init.BiasInitTracker` | **缩** | 它读的是 main 里的**原始**块收益累加器 ⇒ 写入 `fc3.bias` 前 `/s`（含 `--critic_bias_p/_c` 覆盖值，按原始口径给出）。估计量对样本线性，故 SE/块数/触发点/γ 都不用重调 |
 | λ 区间、EMA 对偶（`ema_cost` vs `d_block_H`）、curriculum | **不缩** | 乘性对偶对 r1/c1 的换算一无所知 |
-| `update_stats_H.csv` / TensorBoard（`q_*` / `td_*` / `target_*`） | 还原 | agent 内部 `×s` 还原成原始口径 ⇒ 与历史 run、`analyse_q_scale.py` 直接可比 |
+| `update_stats_H.csv` / TensorBoard（`q_*` / `td_*` / `target_*`） | 还原 | agent 内部 `×s` 还原成原始口径 ⇒ 与历史 run、`agentutil/analyse_q_scale.py` 直接可比 |
 | PER 优先级 `|TD_p|/mean_p + |TD_c|/mean_c + ε` | 不缩 | 自归一化比值，对 s 免疫（`ε` 加在 O(1) 量上，占比不变） |
 | L 层 `r2`/`c2` | **不缩** | `value_scale` 默认 1.0；L 值函数尺度本就 O(1)（`d_block_L` = 20 / 2.5） |
 
-**实测（`test_value_scale.py` B 段，真实 `SP_TD3` + 同一批数据，合成常数回归 R=5000）**
+**实测（`agentutil/test_value_scale.py` B 段，真实 `SP_TD3` + 同一批数据，合成常数回归 R=5000）**
 
 * **语义等价（守住）**：`reward/cost/target` 四个纯收益字段两臂**还原后逐位相等**；
   `q_*`/`min_p_next` 类字段两臂**精确差 s 倍**（证明还原生效）；两臂最终收敛到同一目标
@@ -477,10 +515,10 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 **用法与测试**
 
 * `--value_scale 1000`（默认）；`--value_scale 1`（或 0）关闭归一化，用作对照臂。
-* `python test_value_scale.py` —— 覆盖性（8 个 agent + 9 个 main 的换算点齐全，且
+* `python agentutil/test_value_scale.py` —— 覆盖性（8 个 agent + 9 个 main 的换算点齐全，且
   `sum_r1`/`sum_c1`/对偶/curriculum/relabel/warmup 填入**均未被缩放**）+ 上述数值不变量
   + `Σ₅ fluct_cost(3) = 15` 与 λ 语义正交。
-* `python probe_value_scale.py` —— 学习曲线/隐层激活量级的诊断（复现上面"速度未变快"
+* `python agentutil/probe_value_scale.py` —— 学习曲线/隐层激活量级的诊断（复现上面"速度未变快"
   的观测）。
 
 ---
@@ -516,11 +554,11 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 * **日志口径变化**：`r2`/`c2` 相关列（`sum_c2`、`df_episode_*.csv` 的 L 成本列、
   TensorBoard 的 `reward_lower/*`）全部 ÷100 —— 跨版本对比绝对数值时要乘回 100。
 * `Cal_r2_PER_baseline()`（prrbb/prle/td3prrbb）是 **LEGACY 基线**，其系数（10 / 700）
-  **刻意保持原值**，用于对照旧 PER 设计；`test_l_lower_unit.py` 对此有断言。
+  **刻意保持原值**，用于对照旧 PER 设计；`agentutil/test_l_lower_unit.py` 对此有断言。
 * 测试夹具（`myfunc.py` 的 `S_test`/`nine_case_test`、`test_simple.py`、
   `test_compare_projects.py`、`test_five_days.py` 的注释）已同步为同一口径。
 
-**不变量测试**：`python test_l_lower_unit.py`
+**不变量测试**：`python agentutil/test_l_lower_unit.py`
 
 * 六项的系数/预算/`cost_limit`/η2 与目标值一致；
 * **物理量守恒**：`d_block_L / c2系数` 与 `η2 × c2系数` 与 ÷100 之前逐位一致
@@ -558,7 +596,7 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 
 **开关**：`--warmup_sched {fixed,random}`、`--warmup_bess {rule,random}`、
 `--warmup_wt_start/_step/_lo/_hi`、`--warmup_soc_target`。
-**不变量测试**：`python test_warmup_schedule.py` —— 触发点（warmup∈{199,200,201,204,500} 各恰好
+**不变量测试**：`python agentutil/test_warmup_schedule.py` —— 触发点（warmup∈{199,200,201,204,500} 各恰好
 触发一次且在首次更新前）、旧条件反例、调度边界/可复现/不吃全局 RNG、规则行为体与 `SocTracker.act`
 逐位一致（20000 组随机含 3080 组不可行窗口，max|Δ|=0）、transition 填入计数。
 

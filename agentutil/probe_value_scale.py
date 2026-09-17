@@ -5,12 +5,19 @@
 末层 bias 走 lr? 还是隐层放大 (Σ|∂Q/∂θ| 随训练增长)?
 """
 import argparse
+import os
 import random
 import sys
 
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 import numpy as np
 import torch
+
+_HERE = os.path.dirname(os.path.abspath(__file__))     # agentutil/
+ROOT = os.path.dirname(_HERE)                          # 仓库根
+os.chdir(ROOT)                                         # 相对数据/输出路径以仓库根为基准
+sys.path.insert(0, ROOT)                               # 项目模块 (hsrl_*, myfunc, util, td3*/...)
+sys.path.insert(0, _HERE)                              # agentutil 内互相 import
 
 from td3perrb.td3perrb_ddpg import SP_TD3
 
