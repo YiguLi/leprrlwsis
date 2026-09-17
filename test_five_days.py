@@ -121,6 +121,7 @@ per/prrbb/prle 用 3.0；td3per/td3prrbb/td3prle/td3prrlrb/td3perrb/td3leprrlrb
          --episode-length 120               # 只跑前 120 步（冒烟测试用）
          --viol-limit 3.0 --deg-cost 490
          --no-save-steps                    # 不写每步明细
+         --by-day-sort profit|viol|excess   # 汇总 C（每天×每方法）的排序键（默认 profit）
          --no-tensorboard                   # 只写 CSV（默认两者都写）
          --list-projects
 
@@ -129,6 +130,7 @@ per/prrbb/prle 用 3.0；td3per/td3prrbb/td3prle/td3prrlrb/td3perrb/td3leprrlrb
     <output>/five_day_days.csv             每天 × 每方法 × 每组模型（三项指标）
     <output>/five_day_summary.csv          每方法 × 每组模型的 5 天均值/标准差
     <output>/five_day_method_summary.csv   每方法跨「全部模型 × 全部天」mean±std ★主表
+    <output>/five_day_by_day.csv           每天 × 每方法（跨模型均值 + 当天名次，按 --by-day-sort 排序）
     <output>/five_day_steps.csv            每步明细（可 --no-save-steps 关闭）
     <output>/tensorboard/                  TB 日志（可 --no-tensorboard 关闭）
 """
@@ -796,6 +798,11 @@ def parse_args():
     p.add_argument('--device', choices=['auto', 'cpu', 'cuda'], default='auto')
     p.add_argument('--no-save-steps', action='store_true',
                    help='不写每步明细 CSV')
+    p.add_argument('--by-day-sort', choices=['profit', 'viol', 'excess'],
+                   default='profit',
+                   help='“汇总 C：每天 × 每方法”表内的排序键：'
+                        'profit=利润/天降序(高者优) | viol=越限次数升序 | '
+                        'excess=越限总量升序（默认 profit）')
     p.add_argument('--no-tensorboard', action='store_true',
                    help='不写 TensorBoard（默认 CSV 与 TB 双份保存）')
     p.add_argument('--list-projects', action='store_true',
@@ -954,6 +961,106 @@ def _std0(v):
     return 0.0 if f != f else f
 
 
+# 按天排序键 → (排序列, 升序?, 显示名)
+_BY_DAY_SORT = {
+    'profit': ('profit_rmb_mean', False, '利润/天 ↓（高者优）'),
+    'viol':   ('viol_count_mean', True,  '越限次数/天 ↑（低者优）'),
+    'excess': ('viol_excess_mw_mean', True, '越限总量/天 ↑（低者优）'),
+}
+
+
+def build_by_day_table(df_days, keys, sort_by='profit'):
+    """按【天 × 方法】排表：每行 = 该方法在当天的全部模型均值。
+
+    与"汇总 B"（跨全部模型×全部天）不同，本表把"天"作为独立区组展示，
+    因此能看到**同一天内方法之间的直接对比**（天间的巨大差异被隔离在块之间），
+    并给出当天内的名次。
+
+    返回列
+    ------
+    day_idx, wind_iloc, wind_mean               该天标识（第几天 / 风速列 / 日均风速）
+    project                                     方法 label
+    n_models, samples                           当天参与的模型组数 / 样本数
+    viol_count_mean/_std                        跨模型的越限次数（mean ± std, ddof=1）
+    viol_excess_mw_mean/_std                    跨模型的越限总量
+    profit_rmb_mean/_std                        跨模型的利润
+    soc_end_mean, discharge_mwh_mean            辅助量（末 SOC / 放电量）
+    rank_profit / rank_viol / rank_excess       当天内名次（1 = 最好），三种口径都给
+    """
+    want = [PROJECTS[k]['label'] for k in keys]
+    sub = df_days[df_days['project'].isin(want)]
+    # 只聚合实际存在的列（对缺少辅助列的旧 CSV / 部分数据也鲁棒），
+    # 缺列在结果里补 NaN，保持 CSV 列结构稳定。
+    spec = [('n_models', 'run', 'nunique'),
+            ('samples', 'run', 'size'),
+            ('wind_iloc', 'wind_iloc', 'first'),
+            ('wind_mean', 'wind_mean', 'mean'),
+            ('viol_count_mean', 'viol_count', 'mean'),
+            ('viol_count_std', 'viol_count', 'std'),
+            ('viol_excess_mw_mean', 'viol_excess_mw', 'mean'),
+            ('viol_excess_mw_std', 'viol_excess_mw', 'std'),
+            ('profit_rmb_mean', 'profit_rmb', 'mean'),
+            ('profit_rmb_std', 'profit_rmb', 'std'),
+            ('soc_end_mean', 'soc_end', 'mean'),
+            ('discharge_mwh_mean', 'discharge_mwh', 'mean')]
+    agg = {out: (src, fn) for out, src, fn in spec if src in sub.columns}
+    g = sub.groupby(['day_idx', 'project'], as_index=False).agg(**agg)
+    for out, src, fn in spec:
+        if out not in g.columns:
+            g[out] = np.nan
+    # 三种口径的名次（1 = 最好）
+    g['rank_profit'] = (g.groupby('day_idx')['profit_rmb_mean']
+                        .rank(ascending=False, method='min').astype(int))
+    g['rank_viol'] = (g.groupby('day_idx')['viol_count_mean']
+                      .rank(ascending=True, method='min').astype(int))
+    g['rank_excess'] = (g.groupby('day_idx')['viol_excess_mw_mean']
+                        .rank(ascending=True, method='min').astype(int))
+    col, asc, _ = _BY_DAY_SORT[sort_by]
+    # 主键排序；并列时再按利润降序、方法名，保证输出稳定可复现
+    g = g.sort_values(['day_idx', col, 'profit_rmb_mean', 'project'],
+                      ascending=[True, asc, False, True]).reset_index(drop=True)
+    return g
+
+
+def print_by_day_summary(df_bd, keys, sort_by='profit'):
+    """打印【汇总 C】：每天一个块，块内按表现排序打印各方法（跨模型均值）。"""
+    col, asc, desc = _BY_DAY_SORT[sort_by]
+    rank_col = 'rank_{}'.format(sort_by)
+    print()
+    print('=' * 108)
+    print('  汇总 C：每天 × 每方法（跨全部模型均值，当天内按表现排序）')
+    print('=' * 108)
+    for day_idx in sorted(df_bd['day_idx'].unique()):
+        sub = df_bd[df_bd['day_idx'] == day_idx]
+        if len(sub) == 0:
+            continue
+        wi = int(sub['wind_iloc'].iloc[0])
+        wm = float(sub['wind_mean'].iloc[0])
+        print()
+        print('  ' + '-' * 104)
+        print('  day{}   (wind_iloc={:>4d}, 日均风速 {:5.2f} m/s)      排序: {}'
+              .format(int(day_idx), wi, wm, desc))
+        print('  ' + '-' * 104)
+        print('  {:>4s} {:>12s} {:>6s}  {:>19s} {:>21s} {:>22s}'
+              .format('排名', '方法', '模型数', '越限次数/天', '越限总量/天(MW)',
+                      '利润/天(元)'))
+        for _, r in sub.iterrows():
+            print('  {:>4d} {:>12s} {:>6d}  {:>8.2f} ± {:<8.2f} {:>9.4f} ± {:<9.4f} '
+                  '{:>10.2f} ± {:<10.2f}'
+                  .format(int(r[rank_col]), str(r['project']),
+                          int(r['n_models']),
+                          r['viol_count_mean'], _std0(r['viol_count_std']),
+                          r['viol_excess_mw_mean'], _std0(r['viol_excess_mw_std']),
+                          r['profit_rmb_mean'], _std0(r['profit_rmb_std'])))
+    print()
+    print('=' * 108)
+    print('  说明: 每行 = 该方法在【当天】全部模型上的均值 ± 跨模型标准差 (ddof=1, 单模型显示 0.00);')
+    print('        “排名”按表头排序键给出; CSV 同时含 rank_profit / rank_viol / rank_excess 三种口径;')
+    print('        注意: 同一方法的多组模型在该天共享同一条风速序列 ⇒ 这是"同天直接对比",')
+    print('              不是独立重复; 方法级显著性仍需按模型(簇)或配对检验判定。')
+    print('=' * 108)
+
+
 def main():
     args = parse_args()
 
@@ -1019,6 +1126,7 @@ def main():
     days_csv = os.path.join(out_dir, 'five_day_days.csv')
     summary_csv = os.path.join(out_dir, 'five_day_summary.csv')            # 每方法×每run
     method_csv = os.path.join(out_dir, 'five_day_method_summary.csv')      # 每方法(跨run)
+    by_day_csv = os.path.join(out_dir, 'five_day_by_day.csv')              # 每天×每方法
     if os.path.isfile(step_csv):
         os.remove(step_csv)
 
@@ -1140,6 +1248,10 @@ def main():
     df_run.to_csv(summary_csv, index=False)
     df_m.to_csv(method_csv, index=False)
 
+    # ---- 每天 × 每方法（跨模型均值，按天分块排序）----
+    df_bd = build_by_day_table(df_days, keys, args.by_day_sort)
+    df_bd.to_csv(by_day_csv, index=False)
+
     # ---- 每天明细 ----
     print('\n' + '=' * 108)
     print('  每天明细')
@@ -1159,11 +1271,13 @@ def main():
 
     print_run_summary(df_run, keys)
     print_method_summary(df_m, keys)
+    print_by_day_summary(df_bd, keys, args.by_day_sort)
 
     print('\n输出文件:')
     print('  每天汇总     : {}'.format(days_csv))
     print('  每方法×每run : {}'.format(summary_csv))
     print('  每方法主表   : {}'.format(method_csv))
+    print('  每天×每方法  : {}'.format(by_day_csv))
     if not args.no_save_steps:
         print('  每步明细     : {}  ({} 行)'.format(step_csv, n_step_rows))
     if writer is not None:
