@@ -1,6 +1,5 @@
-# Ignore all files in this directory and recursively any subdirectories
-*.*
-
-# Add exclusions for:
+# 本目录内容（含解压出的 PDF 文档）全部入库。
+# 只有 output/ 与压缩包不入库，规则见仓库根目录 .gitignore；
+# documentation.7z 在此显式保留（压缩包规则由本文件的取反规则豁免）。
 !.gitignore
 !documentation.7z

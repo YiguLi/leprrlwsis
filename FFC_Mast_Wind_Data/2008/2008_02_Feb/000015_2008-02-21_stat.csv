@@ -1,0 +1,30 @@
+# instrument NDL485-1413800052
+# measurement 000015
+# pollperiod=1
+# statperiod=600
+# pollexcitate=0
+# function="v80a (m/s)",{mean,sigma,max,min},"0.048 * b2 + 0.2 * (b2>0)"
+# function="v80b (m/s)",{mean,sigma,max,min},"0.048 * b4 + 0.2 * (b4>0)"
+# function="v60 (m/s)",{mean,sigma,max,min},"0.048 * b6 + 0.2 * (b6>0)"
+# function="v30 (m/s)",{mean,sigma,max,min},"0.048 * b8 + 0.2 * (b8>0)"
+# function="v10 (m/s)",{mean,sigma,max,min},"0.048 * b10 + 0.2 * (b10>0)"
+# function="Dir78.5 (deg)",{mean,sigma},"(358 * (c28-a1)/c28) % 360"
+# function="Dir28.5 (deg)",{mean,sigma},"(358 * (c29-a2)/c29) % 360"
+# function="Temp80 (°C)",mean,100*a3-30
+# function="Temp05 (°C)",mean,100*a4-30
+# function="rHum05 (%RH)",mean,100*a5
+# function="pBaro (hPa)",mean,c25
+# function="uSupply (V)",{mean,max,min},a8
+# function="uCC1 (V)",{mean,max,min},c28
+# function="uCC2 (V)",{mean,max,min},c29
+# pollbaudrate=19200
+# pollchardelay=0
+# pollteledelay=0.1
+# polltimeout=1
+# pollretry=0
+# poll=analog
+# poll=digital
+# poll=#54\r
+
+"date","time","period","v80a (m/s)_mean","v80a (m/s)_sigma","v80a (m/s)_max","v80a (m/s)_min","v80b (m/s)_mean","v80b (m/s)_sigma","v80b (m/s)_max","v80b (m/s)_min","v60 (m/s)_mean","v60 (m/s)_sigma","v60 (m/s)_max","v60 (m/s)_min","v30 (m/s)_mean","v30 (m/s)_sigma","v30 (m/s)_max","v30 (m/s)_min","v10 (m/s)_mean","v10 (m/s)_sigma","v10 (m/s)_max","v10 (m/s)_min","Dir78.5 (deg)_mean","Dir78.5 (deg)_sigma","Dir28.5 (deg)_mean","Dir28.5 (deg)_sigma","Temp80 (°C)_mean","Temp05 (°C)_mean","rHum05 (%RH)_mean","pBaro (hPa)_mean","uSupply (V)_mean","uSupply (V)_max","uSupply (V)_min","uCC1 (V)_mean","uCC1 (V)_max","uCC1 (V)_min","uCC2 (V)_mean","uCC2 (V)_max","uCC2 (V)_min"
+2008-02-21,15:30:00,241,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,246.541,5.17813,268.46,38.5007,-30,-30,0,1004.71,13.8128,13.9226,13.683,3.04431,3.049,3.039,2.1134,2.498,0.001

@@ -1,56 +1,16 @@
-# ===== Python =====
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.ipynb_checkpoints/
-.eggs/
-*.egg-info/
-build/
-dist/
+# ===== 排除范围 =====
+# 仅排除两类：训练产物目录 output/ 与压缩包。
+# 其余所有文件（源码、数据、文档、编译缓存等）全部入库。
 
-# ===== MATLAB =====
-*.asv
-*.mexw64
-*.mexw32
-*.mexa64
-*.mexmaci64
-*.mlappinstall
-*.mlpkginstall
-
-# ===== OS / editor junk =====
-.DS_Store
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-$RECYCLE.BIN/
-
-# ===== Generated output & large raw data (not code) =====
-# Training output — hundreds of MB of per-run artifacts
+# 1) 训练产物：本地 7 GB+，每步 CSV 与 TensorBoard 日志，不入库
 /output/
 
-# A full duplicate copy of the project ("未命名" = "unnamed"); not tracked
-/未命名/
-
-# Raw wind measurement data (44 MB, 2007-2010)
-/FFC_Mast_Wind_Data/
-
-# Large generated wind-speed sequences
-/FFC_speed_1.csv
-/FFC_speed_noise_1.csv
-
-# Project archives are not versioned (HSRL.zip 137 MB, td3prrlrb.zip)
+# 2) 压缩包
 *.zip
-
-# data_LES/ and documentation/ manage themselves via their own .gitignore
-
-# ===== LaTeX build artifacts (paper/) =====
-*.aux
-*.bbl
-*.blg
-*.fdb_latexmk
-*.fls
-*.log
-*.out
-*.run.xml
-*.synctex.gz
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+# 例外：documentation/documentation.7z 由 documentation/.gitignore 中的
+# !documentation.7z 规则显式保留在库中（该目录的规则优先于本文件）。

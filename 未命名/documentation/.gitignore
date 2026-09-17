@@ -1,0 +1,4 @@
+# 本目录内容（含解压出的 PDF 文档）全部入库。
+# documentation.7z 在此显式保留（豁免根目录的压缩包规则）。
+!.gitignore
+!documentation.7z
