@@ -105,6 +105,7 @@ warnings.filterwarnings("ignore")
 
 import matlab
 import matlab.engine
+import hsrl_cost as hc   # H 层 c1/λ/d_block 统一口径
 engine = matlab.engine.start_matlab()
 
 
@@ -138,8 +139,9 @@ def train(num_iterations_H,
     # H 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_H (与 sum_c1 同口径)
     # PRLE 标定: c1 = c1_risk_coeff*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
     #            (HIGH 风速 ×1.2, LOW/MEDIUM ×0.8; W_GAP=10, td3prle 调参: 原 50 → 10)
-    d_block_H = 12.0        # 初值: 每块 sum_c1 预算 (平滑系数曾 0.1→1.0 ×10 重标; 现已回调 0.1, 预算未随动)
-    d_block_H_min = 3.0     # curriculum 收紧地板
+    _h = hc.h_settings()   # uniform: 统一 d=15 / legacy: 原值
+    d_block_H = _h['d_block'] if _h else 12.0        # 初值: 每块 sum_c1 预算 (平滑系数曾 0.1→1.0 ×10 重标; 现已回调 0.1, 预算未随动)
+    d_block_H_min = _h['d_block_min'] if _h else 3.0     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
     # c2 = C2_SOC_COEFF(10)*(SOC_new−soc_target)² 目标中心二次势;
     # 预算 d_block_L = 40 = 10·2² (单步贴 ±2 MWh 处的成本值; ×10 系数下与旧
@@ -350,7 +352,10 @@ def train(num_iterations_H,
             # 计入 c1 约束口 (与波动/不可行缺口同一预算 d_block_H), 由 lam1 对偶驱动
             # H 给出下层实际可达的目标; 块内逐步 c1 不入账本项 (一次性结算)。
             c1_soc_track = soc_track_penalty(soc_target_H, float(observation2[2]))
-            sum_c1 = sum_c1 + c1_soc_track
+            if hc.mode() == 'uniform':
+                sum_r1 -= c1_soc_track   # uniform: 追踪偏好进 r (固定价 W_GAP=10 元/MWh)
+            else:
+                sum_c1 = sum_c1 + c1_soc_track
             # episode 结算成本同口径累计 (df_episode.episode_cost = 逐步波动成本 + 块末跟踪项)
             episode_cost += c1_soc_track
             # TD3PRLE: pass accumulated sub-step context for reward relabeling
@@ -362,7 +367,7 @@ def train(num_iterations_H,
             # H 层 EMA 对偶上升 —— 用 5 步块实际成本 sum_c1 更新 lam1 (与 d_block_H 同口径)
             if step > args.warmup:
                 agent_H.update_ema_cost(sum_c1)
-                agent_H.update_lam_ema(d_block_H)
+                hc.dual_update(agent_H, d_block_H)   # uniform=乘性 / legacy=加性
             # L 层 EMA 对偶上升 —— 用 5 步块实际成本 sum_c2 更新 lam2 (与 d_block_L 同口径)
             if step > args.warmup:
                 agent_L.update_ema_cost(sum_c2)
@@ -951,7 +956,14 @@ if __name__ == "__main__":
                         help='风速分段起点方法: percentile | kmeans | expert (默认 expert); '
                              '启动后由 LLM 元控制器在此基础上在线调整')
 
+    parser.add_argument('--c1-mode', default='uniform',
+                        choices=['uniform', 'legacy'],
+                        help='H 层 c1 口径: uniform=波动当量(默认, hsrl_cost 单一真源); '
+                             'legacy=各项目原公式(对照臂)')
     args = parser.parse_args()
+    hc.set_mode(args.c1_mode)
+    _HCFG = hc.h_settings()
+    prCyan(hc.summary())
     args.output = get_output_folder(args.output, args.env)
     if args.resume == 'default':
         args.resume = 'output/{}-run0'.format(args.env)
@@ -1027,14 +1039,16 @@ if __name__ == "__main__":
     # H 层对偶改 EMA 实际成本更新 —— lam1 不再读 critic (Q_c)；
     #     lam1 ∈ [50, 500] 初始 100.0 (高初值+高下限: 对偶恒处强惩罚区, 上限放宽留裕度)
     agent_H = SP_TD3_PRLE(nb_states = 4, nb_actions = 6, args = args,
-                          lam_max=500.0, lam_min=50.0,
+                          lam_max=(_HCFG['lam_max'] if _HCFG else 500.0), lam_min=(_HCFG['lam_min'] if _HCFG else 50.0),
                           ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                           record_update_stats=True,
                           policy_delay=args.policy_delay,
                           policy_noise=args.policy_noise,
                           noise_clip=args.noise_clip,
                           cost_critic_mode=args.cost_critic_mode)
-    agent_H.lam = 100.0
+    agent_H.lam = _HCFG['lam_init'] if _HCFG else 100.0
+    if _HCFG:
+        agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c), 与 td3prrbb 同配置;
     #     lam2 ∈ [2, 200] 初始 100.0 (min=2: 带内拖拽 < 套利边际, 保留 ±2 软裕度;
     #     max=200 顶配), ema_alpha=0.02, ema_lam_lr=0.01

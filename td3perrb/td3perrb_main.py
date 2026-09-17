@@ -69,6 +69,7 @@ warnings.filterwarnings("ignore")
 
 import matlab
 import matlab.engine
+import hsrl_cost as hc   # H 层 c1/λ/d_block 统一口径
 engine = matlab.engine.start_matlab()
 
 
@@ -158,8 +159,9 @@ def train(num_iterations_H,
     consecutive_satisfied_H = 0
     # H 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_H (与 sum_c1 同口径)
     #   sum_c1 的构成: 波动成本 + 10*unfeasible_gap + 块末 SOC 跟踪罚
-    d_block_H = 50.0        # 初值: 每块 sum_c1 预算 (先松后紧)
-    d_block_H_min = 5.0     # 地板(min): 10*max(0,|δ|-0.1) ≤ 5 → 含死区总 |δ| ≤ 0.6
+    _h = hc.h_settings()   # uniform: 统一 d=15 / legacy: 原值
+    d_block_H = _h['d_block'] if _h else 50.0        # 初值: 每块 sum_c1 预算 (先松后紧)
+    d_block_H_min = _h['d_block_min'] if _h else 5.0     # 地板(min): 10*max(0,|δ|-0.1) ≤ 5 → 含死区总 |δ| ≤ 0.6
     if use_csv:
         # 增量落盘: 只把新增行追加进 CSV
         df_rows = []
@@ -282,7 +284,10 @@ def train(num_iterations_H,
         target_feasible = True
         if episode_steps % 5 == 4:
             gap_pen = gap_penalty(soc_target, float(observation2[2]), tol=soc_tol_upper)
-            sum_c1 += gap_pen
+            if hc.mode() == 'uniform':
+                sum_r1 -= gap_pen   # uniform: 追踪偏好进 r (固定价 W_GAP=10 元/MWh)
+            else:
+                sum_c1 += gap_pen
             sum_gap_pen += gap_pen
 
         # ---- 可达性诊断: 规则控制在本块的最大能力 ----
@@ -326,7 +331,7 @@ def train(num_iterations_H,
             # H 层 EMA 对偶上升 —— 用块实际成本 sum_c1 更新 lam1 (与 d_block_H 同口径)
             if step > args.warmup:
                 agent_H.update_ema_cost(sum_c1)
-                agent_H.update_lam_ema(d_block_H)
+                hc.dual_update(agent_H, d_block_H)   # uniform=乘性 / legacy=加性
 
         if step > args.warmup:
             #--------------------Update----------------------
@@ -800,7 +805,14 @@ if __name__ == "__main__":
                         help='1: 把 actor 输出层 WT 5 维 bias 初始化到 Cp 高效区 '
                              '[0.25,0.40] (避免从"半停机"a≈0 出发); 0: 用 PyTorch 默认')
 
+    parser.add_argument('--c1-mode', default='uniform',
+                        choices=['uniform', 'legacy'],
+                        help='H 层 c1 口径: uniform=波动当量(默认, hsrl_cost 单一真源); '
+                             'legacy=各项目原公式(对照臂)')
     args = parser.parse_args()
+    hc.set_mode(args.c1_mode)
+    _HCFG = hc.h_settings()
+    prCyan(hc.summary())
     args.output = get_output_folder(args.output, args.env)
     if args.resume == 'default':
         args.resume = 'output/{}-run0'.format(args.env)
@@ -870,7 +882,7 @@ if __name__ == "__main__":
     print('H nb_states = {} (4 base + {} phase dims, --phase_feat={})'.format(
         nb_states_H, PHASE_DIM[int(getattr(args, 'phase_feat', 0))], args.phase_feat))
     agent_H = SP_TD3(nb_states=nb_states_H, nb_actions=6, args=args,
-                     lam_max=100.0, lam_min=3.0,
+                     lam_max=(_HCFG['lam_max'] if _HCFG else 100.0), lam_min=(_HCFG['lam_min'] if _HCFG else 3.0),
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                      record_update_stats=True,
                      policy_delay=args.policy_delay,
@@ -880,7 +892,9 @@ if __name__ == "__main__":
                      wt_noise=args.wt_noise,
                      sig_noise_max=args.sig_noise_max,
                      sig_noise_min=args.sig_noise_min)
-    agent_H.lam = 5.0
+    agent_H.lam = _HCFG['lam_init'] if _HCFG else 5.0
+    if _HCFG:
+        agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     # ---- P0.1: WT 输出层 bias 初始化到 Cp 高效区 (避免"半停机"起步) ----
     if args.wt_bias_init:
         init_wt_action_bias(agent_H, lo=0.25, hi=0.40, sig_value=0.0)

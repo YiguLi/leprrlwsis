@@ -35,6 +35,7 @@ kmeans / expert 三种起点。
 """
 
 import numpy as np
+import hsrl_cost as hc
 import pandas as pd
 from copy import deepcopy
 
@@ -259,7 +260,7 @@ def relabel_c1_substep(u, P_F, unfeasible_gap=0.0):
         c1 = coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F)
     else:
         c1 = coeff * (0.1 * P_F)
-    return c1 + W_GAP * unfeasible_gap
+    return hc.c1_apply(c1 + W_GAP * unfeasible_gap, P_F)
 
 
 # =============================================================================
@@ -380,6 +381,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     else:
         c1 = c1_risk_coeff * (0.1 * P_F)
     c1 = c1 + W_GAP * unfeasible_gap
+    c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样)
 
     # ==== Lower Level (L) ====
     # r2: 影子套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）

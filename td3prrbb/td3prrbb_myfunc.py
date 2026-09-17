@@ -33,6 +33,7 @@ Lower (L):
 """
 
 import numpy as np
+import hsrl_cost as hc
 import pandas as pd
 from copy import deepcopy
 
@@ -319,6 +320,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     else:
         c1 = c1_risk_coeff * (0.1 * P_F)
     c1 = c1 + W_GAP * unfeasible_gap
+    c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样)
 
     # ==== Lower Level (L) ====
     # r2: 影子套利利润 - 100*clip_amount (纯信号跟随, 无真实利润项)

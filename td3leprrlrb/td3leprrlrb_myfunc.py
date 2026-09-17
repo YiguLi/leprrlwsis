@@ -52,6 +52,7 @@ WIND  分档: 动态 —— 初值 7.0/11.0, 由 --seg 覆盖, 之后 LLM 在 ±
 """
 
 import numpy as np
+import hsrl_cost as hc
 import pandas as pd
 
 from util import *
@@ -292,7 +293,7 @@ def relabel_c1_substep(u, P_F, unfeasible_gap=0.0, gap_pen=0.0):
         base = coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F)
     else:
         base = coeff * (0.1 * P_F)
-    return base + W_GAP * unfeasible_gap + float(gap_pen)
+    return hc.c1_apply(base + W_GAP * unfeasible_gap + float(gap_pen), P_F)
 
 
 # =============================================================================
@@ -373,6 +374,7 @@ def Cal_Rew_RLRB(observation, observation2, action_rbb, rbb_info,
     else:
         c1 = c1_risk_coeff * (0.1 * P_F)
     c1 = c1 + W_GAP * unfeasible_gap
+    c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样)
 
     # ==== details ====
     w_wind = get_wT(wind_level, price_level)

@@ -27,6 +27,7 @@ warnings.filterwarnings("ignore")
 
 import matlab
 import matlab.engine
+import hsrl_cost as hc   # H 层 c1/λ/d_block 统一口径
 engine = matlab.engine.start_matlab()
 
 # H 层 c1 中 unfeasible_gap 的惩罚权重 (MW→成本系数, 与 PRRBB W_GAP 一致)
@@ -56,8 +57,9 @@ def train(num_iterations_H,
     consecutive_satisfied_H = 0
     consecutive_satisfied_L = 0
     # H 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_H (与 sum_c1 同口径)
-    d_block_H = 1.2         # 初值: 每块 sum_c1 预算 (与 PRRBB H 同量级)
-    d_block_H_min = 0.3     # curriculum 收紧地板
+    _h = hc.h_settings()   # uniform: 统一 d=15 / legacy: 原值
+    d_block_H = _h['d_block'] if _h else 1.2         # 初值: 每块 sum_c1 预算 (与 PRRBB H 同量级)
+    d_block_H_min = _h['d_block_min'] if _h else 0.3     # curriculum 收紧地板
     # B1: L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
     d_block_L = 20.0        # 初值: 每块 sum_c2 预算 (≈每步 4, 按 c2 系数 1000 标定)
     d_block_L_min = 2.5     # curriculum 收紧地板 (≈每步 0.5)
@@ -202,7 +204,7 @@ def train(num_iterations_H,
             # H 层 EMA 对偶上升 —— 用 5 步块实际成本 sum_c1 更新 lam1 (与 d_block_H 同口径)
             if step > args.warmup:
                 agent_H.update_ema_cost(sum_c1)
-                agent_H.update_lam_ema(d_block_H)
+                hc.dual_update(agent_H, d_block_H)   # uniform=乘性 / legacy=加性
             # B1: L 层 EMA 对偶上升 —— 用 5 步块实际成本 sum_c2 更新 lam2 (与 d_block_L 同口径)
             if step > args.warmup:
                 agent_L.update_ema_cost(sum_c2)
@@ -564,7 +566,14 @@ if __name__ == "__main__":
     parser.add_argument('--rbb_rated_power', default=10.0, type=float,
                         help='BESS rated charge/discharge power (MW)')
 
+    parser.add_argument('--c1-mode', default='uniform',
+                        choices=['uniform', 'legacy'],
+                        help='H 层 c1 口径: uniform=波动当量(默认, hsrl_cost 单一真源); '
+                             'legacy=各项目原公式(对照臂)')
     args = parser.parse_args()
+    hc.set_mode(args.c1_mode)
+    _HCFG = hc.h_settings()
+    prCyan(hc.summary())
     args.output = get_output_folder(args.output, args.env)
     if args.resume == 'default':
         args.resume = 'output/{}-run0'.format(args.env)
@@ -622,10 +631,12 @@ if __name__ == "__main__":
     # H 层对偶改 EMA 实际成本更新 —— lam1 不再读 critic (Q_c)；
     #     lam1 ∈ [3, 20] 初始 5.0 (与 PRRBB H 层同配置, c1 公式同量级)
     agent_H = SP_DDPG(nb_states = 4, nb_actions = 6, args = args,
-                      lam_max=20.0, lam_min=3.0,
+                      lam_max=(_HCFG['lam_max'] if _HCFG else 20.0), lam_min=(_HCFG['lam_min'] if _HCFG else 3.0),
                       ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                       record_update_stats=True)
-    agent_H.lam = 5.0
+    agent_H.lam = _HCFG['lam_init'] if _HCFG else 5.0
+    if _HCFG:
+        agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     # B1: L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
     #     lam2 ∈ [10, 500]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
     agent_L = SP_DDPG(nb_states = 5, nb_actions = 1, args = args,

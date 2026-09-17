@@ -50,6 +50,7 @@ Lower (L):
 """
 
 import numpy as np
+import hsrl_cost as hc
 import pandas as pd
 from copy import deepcopy
 
@@ -284,8 +285,8 @@ def relabel_c1_substep(u, P_F, unfeasible_gap=0.0):
     """
     coeff = get_c1_risk_coeff(get_wind_level(u))
     if P_F > 3.0 + 1e-4:
-        return coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F) + W_GAP * unfeasible_gap
-    return coeff * (0.1 * P_F) + W_GAP * unfeasible_gap
+        return hc.c1_apply(coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F) + W_GAP * unfeasible_gap, P_F)
+    return hc.c1_apply(coeff * (0.1 * P_F) + W_GAP * unfeasible_gap, P_F)
 
 
 # =============================================================================
@@ -501,6 +502,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
         c1 = c1_risk_coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F) + W_GAP * unfeasible_gap
     else:
         c1 = c1_risk_coeff * (0.1 * P_F) + W_GAP * unfeasible_gap
+    c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样) —— 置于 if/else 之外
 
     # ==== Lower Level (L) ====
     # r2: 裁剪惩罚 (两项同系数合成一项):

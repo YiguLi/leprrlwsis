@@ -89,6 +89,7 @@ warnings.filterwarnings("ignore")
 
 import matlab
 import matlab.engine
+import hsrl_cost as hc   # H 层 c1/λ/d_block 统一口径
 engine = matlab.engine.start_matlab()
 
 
@@ -266,8 +267,9 @@ def train(num_iterations_H,
     consecutive_satisfied_H = 0
     # H 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_H (与 sum_c1 同口径)
     #   sum_c1 的构成: 波动成本 + 10*unfeasible_gap + 块末 SOC 跟踪罚
-    d_block_H = 50.0        # 初值: 每块 sum_c1 预算 (先松后紧)
-    d_block_H_min = 5.0     # 地板(min): 10*max(0,|δ|-0.1) ≤ 5 → 含死区总 |δ| ≤ 0.6
+    _h = hc.h_settings()   # uniform: 统一 d=15 / legacy: 原值
+    d_block_H = _h['d_block'] if _h else 50.0        # 初值: 每块 sum_c1 预算 (先松后紧)
+    d_block_H_min = _h['d_block_min'] if _h else 5.0     # 地板(min): 10*max(0,|δ|-0.1) ≤ 5 → 含死区总 |δ| ≤ 0.6
 
     # ---- LEPRRLRB: LLM 元控制器状态 ----
     window_stats = WindowStats()          # 一个 LLM 调整窗口内的运行统计
@@ -402,7 +404,10 @@ def train(num_iterations_H,
             # 但若把 --tracker_dead_zone 调成 > --soc_tol, 幽灵税会回归。
             gap_pen = gap_penalty(soc_target, float(observation2[2]),
                                   tol=soc_tol_upper)
-            sum_c1 += gap_pen
+            if hc.mode() == 'uniform':
+                sum_r1 -= gap_pen   # uniform: 追踪偏好进 r (固定价 W_GAP=10 元/MWh)
+            else:
+                sum_c1 += gap_pen
             sum_gap_pen += gap_pen
 
         # ---- 可达性诊断: 规则控制在本块的最大能力 ----
@@ -480,7 +485,7 @@ def train(num_iterations_H,
             # H 层 EMA 对偶上升 —— 用块实际成本 sum_c1 更新 lam1 (与 d_block_H 同口径)
             if step > args.warmup:
                 agent_H.update_ema_cost(sum_c1)
-                agent_H.update_lam_ema(d_block_H)
+                hc.dual_update(agent_H, d_block_H)   # uniform=乘性 / legacy=加性
 
         if step > args.warmup:
             #--------------------Update----------------------
@@ -1091,7 +1096,14 @@ if __name__ == "__main__":
                         help='P0.3 24h 相位特征: 0=无(4 维) / 1(默认)=sin,cos(6 维) / '
                              '2=+[段内剩余比例, 剩余小时/8, 下一段电价/1000] (9 维)')
 
+    parser.add_argument('--c1-mode', default='uniform',
+                        choices=['uniform', 'legacy'],
+                        help='H 层 c1 口径: uniform=波动当量(默认, hsrl_cost 单一真源); '
+                             'legacy=各项目原公式(对照臂)')
     args = parser.parse_args()
+    hc.set_mode(args.c1_mode)
+    _HCFG = hc.h_settings()
+    prCyan(hc.summary())
     args.output = get_output_folder(args.output, args.env)
     if args.resume == 'default':
         args.resume = 'output/{}-run0'.format(args.env)
@@ -1220,14 +1232,16 @@ if __name__ == "__main__":
                args.phase_feat, _phase_dim, 4 + _phase_dim,
                PHASE_REP_MINUTE, REP_MINUTE))
     agent_H = SP_TD3_LEPRRLRB(nb_states=4 + _phase_dim, nb_actions=6, args=args,
-                              lam_max=100.0, lam_min=3.0,
+                              lam_max=(_HCFG['lam_max'] if _HCFG else 100.0), lam_min=(_HCFG['lam_min'] if _HCFG else 3.0),
                               ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                               record_update_stats=True,
                               policy_delay=args.policy_delay,
                               policy_noise=args.policy_noise,
                               noise_clip=args.noise_clip,
                               cost_critic_mode=args.cost_critic_mode)
-    agent_H.lam = 5.0
+    agent_H.lam = _HCFG['lam_init'] if _HCFG else 5.0
+    if _HCFG:
+        agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
 
     # ---- P0.1: 起始点 (覆写 actor/actor_target 输出层 bias) ----
     if args.wt_bias_init:

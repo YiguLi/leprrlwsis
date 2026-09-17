@@ -31,6 +31,7 @@ WIND  分档: <7.0 LOW, ≥11.0 HIGH, 其余 MEDIUM ← 仅诊断标签, 不进�
 """
 
 import numpy as np
+import hsrl_cost as hc
 import pandas as pd
 
 from util import *
@@ -241,6 +242,7 @@ def Cal_Rew_RB(observation, observation2, action_rbb, rbb_info,
     else:
         c1 = c1_risk_coeff * (0.1 * P_F)
     c1 = c1 + W_GAP * unfeasible_gap
+    c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样)
 
     # ==== details ====
     w_wind = get_wT(wind_level, price_level)
