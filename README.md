@@ -128,7 +128,7 @@ HSRL/
 ├── rbb/                      上层学习 + 下层规则 BESS（rbb_rule_bess 被 per/td3per 复用）
 ├── prrbb/                    DDPG + 分段奖励 + 学习型下层
 ├── prle/                     PRRBB + LLM 增强
-├── pernewact/                仅剩 .pyc 编译缓存，源文件已丢失，未入库
+├── pernewact/                仅剩 .pyc 编译缓存（源文件已丢失）
 ├── td3per/                   TD3 + PER（上层 td3perrb 口径：非分段 + SOC 目标信号；下层 RL BESS 追 SOC 目标）
 ├── td3prrbb/                 TD3 + 分段奖励 + 学习型下层
 ├── td3prle/                  TD3 + 分段奖励 + LLM
@@ -197,7 +197,7 @@ python setup.py install
 
 ---
 
-## 6. 数据准备（⚠️ 新克隆必读）
+## 6. 数据文件
 
 `env.py` 第 41 行硬依赖风速序列文件：
 
@@ -205,19 +205,22 @@ python setup.py install
 self.wind_noise = pd.read_csv("FFC_speed_noise_1.csv")
 ```
 
-**但该文件（约 4.93 MB）被 `.gitignore` 排除，不在仓库中** —— 直接克隆后运行会报
-`FileNotFoundError`。使用前需自备该文件并放在项目根目录。
+这些数据文件**均已随仓库入库**（本仓库的上传策略是：除 `output/` 与压缩包外，
+所有文件都进版本库），克隆后即可直接运行。
 
 | 文件 | 是否入库 | 说明 |
 |---|---|---|
-| `FFC_speed_noise_1.csv` | ❌ **未入库** | 训练/测试风速列池（195 列 ≈ 195 天），**必须自备** |
-| `FFC_speed_1.csv` | ❌ 未入库 | 平滑版风速序列（4.93 MB） |
+| `FFC_speed_noise_1.csv` | ✅ 已入库（4.93 MB） | 训练/测试风速列池（195 列 ≈ 195 天） |
+| `FFC_speed_1.csv` | ✅ 已入库（4.93 MB） | 平滑版风速序列 |
 | `test_scenarios.csv` | ✅ 已入库 | 测试场景配置 |
 | `fixed_day_sequence.csv` | ✅ 已入库 | 训练用固定随机日序列（`generate_day_sequence.py` 生成） |
 | `compare_per_prle_episode_profit.csv` | ✅ 已入库 | 对比实验结果 |
-| `FFC_Mast_Wind_Data/` | ❌ 未入库 | 原始测风数据（44 MB，2007–2010） |
-| `data_LES/*.mat` | ❌ 未入库 | TU Delft LES 参考数据 |
+| `FFC_Mast_Wind_Data/` | ✅ 已入库（44 MB，1018 文件） | 原始测风数据（2007–2010） |
+| `data_LES/*.mat` | ✅ 已入库（49 MB） | TU Delft LES 参考数据（2 涡轮 / 6 涡轮场景） |
 | 电价数据 | — | **不需要外部文件**，`env.py` 内硬编码峰谷平三档 |
+
+> 唯一未入库的是 `output/`（训练产物，本地 7 GB+）与压缩包
+> （`HSRL.zip` 137 MB、`td3prrlrb.zip`；`documentation/documentation.7z` 为例外，保留入库）。
 
 ---
 
@@ -350,9 +353,12 @@ $env:DEEPSEEK_API_KEY = "sk-..."
 
 | 路径 | 内容 | 版本控制 |
 |---|---|---|
-| `output/<METHOD>-runN/` | 每步明细、每 episode 汇总、9-case 测试、更新统计等 CSV | ❌ 已忽略（本地可达数 GB） |
-| `output/test_five_days/` | 五天评测的 CSV 与 TensorBoard | ❌ 已忽略 |
-| `runs/` | TensorBoard 训练日志（`events.out.tfevents.*`） | ⚠️ 当前已入库（3 个事件文件） |
+| `output/<METHOD>-runN/` | 每步明细、每 episode 汇总、9-case 测试、更新统计等 CSV | ❌ 已排除（本地 7 GB+） |
+| `output/test_five_days/` | 五天评测的 CSV 与 TensorBoard | ❌ 已排除 |
+| `runs/` | TensorBoard 训练日志（`events.out.tfevents.*`） | ✅ 已入库 |
+
+> 本仓库的排除范围只有两类：`output/` 与压缩包。其余文件（含编译缓存、
+> 测风数据、LES 数据、文档 PDF、`未命名/` 副本）全部入库。
 
 训练产生的记录文件以 `td3prrlrb` 为例：
 
@@ -367,7 +373,8 @@ $env:DEEPSEEK_API_KEY = "sk-..."
 
 ## 12. 已知问题
 
-1. **风速数据缺失**：`FFC_speed_noise_1.csv` 未入库，新克隆无法直接运行（见 §6）。
+1. **仓库体积约 130 MB**：测风数据（44 MB）、LES 参考数据（49 MB）、`未命名/` 副本（21 MB）
+   与两个 `documentation.7z` 均随仓库入库；`output/`（本地 7 GB+）与其余压缩包已排除。
 2. **缺失源文件的编译缓存**：`sac*.py`、`ppo.py`、`ae.py`、`rule.py`、`model2/3.py`、`O_*`、`W_*`
    等源文件已丢失，仅存 `.pyc`。`test.py` 会因导入这些模块抛 `ModuleNotFoundError`。
 3. **旧版 Python 缓存**：`bin/__pycache__/` 部分文件由 Python 3.6/3.7 编译，项目曾迁移版本。
