@@ -154,6 +154,10 @@ class SP_TD3(object):
         # ---- H 层更新数据记录（每批统计；主循环块末汇总写入 TB/csv） ----
         self.record_update_stats = record_update_stats
         self.update_stats = []
+        # 值函数回归空间缩放 s (见 hsrl_cost 文件末尾小节):
+        #   1.0 = 不归一化 (默认, 未接线时行为不变); main 只对 H 层设为 hc.value_scale(),
+        #   L 层保持 1.0 (r2/c2 本就 O(1))。
+        self.value_scale = 1.0
 
         # ---- TD3 specific ----
         self.policy_delay = policy_delay
@@ -225,6 +229,12 @@ class SP_TD3(object):
         # reshape data
         profit_batch = profit_batch.reshape(-1, 1)
         cost_batch = cost_batch.reshape(-1, 1)
+        # ---- 值函数回归空间归一化: r1/c1 进 critic 的唯一一次 /s ----
+        # buffer 里存的仍是原始口径 ⇒ relabel / warmup 填入 / 对偶 / 日志全部不受影响。
+        _S = float(getattr(self, 'value_scale', 1.0)) or 1.0
+        if _S != 1.0:
+            profit_batch = profit_batch / _S
+            cost_batch = cost_batch / _S
         terminal_batch = terminal_batch.reshape(-1, 1)
 
         # Ensure all tensors are on the correct device
@@ -321,7 +331,7 @@ class SP_TD3(object):
 
             # TODO update dual variable
             if not self.ema_lam:
-                lam_loss = (min_c_cur - self.cost_limit)
+                lam_loss = (min_c_cur * _S - self.cost_limit)   # 还原原始口径 (仅 non-EMA 分支)
                 lam_loss = lam_loss.mean().item()
                 self.lam_loss = lam_loss  # for curriculum convergence check
                 self.lam += lam_loss * self.lr_lam
@@ -341,8 +351,8 @@ class SP_TD3(object):
         # B2: 优先级 = |TD_p|/mean_p + |TD_c|/mean_c (去 lam，量纲归一化)
         min_p_cur_b = self._pair_min(q_batch_p, q_batch_p2)
         min_c_cur_b = self._aggregate_pair(q_batch_c, q_batch_c2)
-        TD_errors_p = abs(target_q_batch_p - min_p_cur_b)
-        TD_errors_c = abs(target_q_batch_c - min_c_cur_b)
+        TD_errors_p = abs(target_q_batch_p - min_p_cur_b) * _S   # ×s: PER/日志保持原始口径
+        TD_errors_c = abs(target_q_batch_c - min_c_cur_b) * _S
 
         td_errors_p_np = TD_errors_p.detach().cpu().numpy()
         td_errors_c_np = TD_errors_c.detach().cpu().numpy()
@@ -375,6 +385,15 @@ class SP_TD3(object):
                 'cost_mean': float(cost_batch.mean().item()),
                 'weight_mean': float(weights.mean().item()),
             })
+            # 值函数口径字段还原成原始口径 (s=1 时恒等) —— update_stats_H.csv /
+            # analyse_q_scale.py / 历史 run 因此可直接对比。
+            if _S != 1.0:
+                _d = self.update_stats[-1]
+                for _k in ('reward_mean', 'cost_mean', 'q_p_mean', 'q_p2_mean',
+                           'q_c_mean', 'q_c2_mean', 'min_p_next_mean',
+                           'min_c_next_mean', 'target_p_mean', 'target_c_mean'):
+                    if _k in _d:
+                        _d[_k] = float(_d[_k]) * _S
 
     # ========================================================================
     # EMA dual-ascent (actual-cost based lam update)

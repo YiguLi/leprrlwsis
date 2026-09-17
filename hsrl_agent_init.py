@@ -55,6 +55,8 @@ episode 长度 1440 是 5 的倍数 ⇒ `episode_steps ≡ step (mod 5)`，块�
 import numpy as np
 import torch
 
+import hsrl_cost as hc      # 值函数回归空间缩放 s（VALUE_SCALE）
+
 try:
     from util import prCyan
 except Exception:                                    # pragma: no cover
@@ -62,27 +64,32 @@ except Exception:                                    # pragma: no cover
         print(s)
 
 
-def bias_from_block_samples(samples, discount):
+def bias_from_block_samples(samples, discount, scale=1.0):
     """从 warmup 的块样本估计价值基线。
 
     Parameters
     ----------
     samples : list[(float, float)]
         每个 5 步块的 (sum_r1, sum_c1)（来自实际观测，不用 PER batch 均值）。
+        **原始口径**（main 里的累加器就是原始口径，与 buffer/日志一致）。
     discount : float
         块级折扣（H 层 γ）。
+    scale : float
+        值函数回归空间缩放 s（`hsrl_cost.value_scale()`）。返回的是 critic 输出层
+        bias **可直接写入的值** = 原始口径估计 / s；s=1 即原始口径。
 
     Returns
     -------
     (b_p, b_c) : (float, float) 或 (None, None)
-        利润/成本 critic 的基线估计 = 块均值 × 1/(1−γ)。
+        = 块均值 × 1/(1−γ) ÷ s。
     """
     if not samples:
         return None, None
     r = float(np.mean([float(s[0]) for s in samples]))
     c = float(np.mean([float(s[1]) for s in samples]))
     g = 1.0 / max(1e-9, (1.0 - float(discount)))
-    return r * g, c * g
+    s = float(scale) or 1.0
+    return r * g / s, c * g / s
 
 
 # (online, target, 用哪个基线)
@@ -155,20 +162,35 @@ class BiasInitTracker:
     * `mode == 'none'` ⇒ 不收样本、永不应用（对照臂，与旧行为一致）。
     * 触发点 = `first_trigger_step(warmup)`；该块**计入**估计样本
       （它的块首动作仍是 warmup 动作），因此样本数 = 触发点之前的全部块末数。
-    * `b_p/b_c > 0` 时覆盖自动估计值（`--critic_bias_p/_c`）。
+    * `b_p/b_c > 0` 时覆盖自动估计值（`--critic_bias_p/_c`，**原始口径**）。
+    * 样本与覆盖值都是**原始口径**，写入 fc3.bias 前统一 `/s`
+      （`value_scale`；None = 1.0，保持旧行为）。这不是调参：
+      估计量对样本线性 ⇒ 除 s 后偏差/方差/SE 同比例缩小，块数/触发点/γ 都不用动；
+      唯一要求是 bias 与 critic 的 TD 目标同量纲。
     """
 
     def __init__(self, mode='estimate', warmup=200, discount=0.99,
-                 b_p=-1.0, b_c=-1.0, verbose=True):
+                 b_p=-1.0, b_c=-1.0, verbose=True, value_scale=None):
         self.mode = str(mode)
         self.warmup = int(warmup)
         self.discount = float(discount)
         self.override_p = float(b_p)
         self.override_c = float(b_c)
         self.verbose = bool(verbose)
+        self.value_scale = value_scale
         self.blocks = []
         self.applied = False
         self.info = None
+
+    def scale(self):
+        """生效的值函数缩放 s。
+
+        `value_scale=None`（直接构造、未指定）⇒ **1.0**，即保持"原始口径"旧行为，
+        不会因为模块默认值静默地缩 1000 倍；生产路径由 `from_args` 从
+        `--value_scale`（默认 `hsrl_cost.VALUE_SCALE`）取得，与 agent 的
+        `agent_H.value_scale` 同源。
+        """
+        return 1.0 if self.value_scale is None else (float(self.value_scale) or 1.0)
 
     @classmethod
     def from_args(cls, args):
@@ -176,7 +198,8 @@ class BiasInitTracker:
                    warmup=int(getattr(args, 'warmup', 0)),
                    discount=float(getattr(args, 'discount', 0.99)),
                    b_p=float(getattr(args, 'critic_bias_p', -1.0)),
-                   b_c=float(getattr(args, 'critic_bias_c', -1.0)))
+                   b_c=float(getattr(args, 'critic_bias_c', -1.0)),
+                   value_scale=float(getattr(args, 'value_scale', hc.VALUE_SCALE)))
 
     @property
     def trigger_step(self):
@@ -194,23 +217,31 @@ class BiasInitTracker:
         self.blocks.append((float(sum_r1), float(sum_c1)))
         if int(step) < self.trigger_step:
             return None
-        b_p, b_c = bias_from_block_samples(self.blocks, self.discount)
+        s = self.scale()
+        b_p, b_c = bias_from_block_samples(self.blocks, self.discount, scale=s)
+        b_p_raw = None if b_p is None else b_p * s      # 原始口径 (对照日志/CSV)
+        b_c_raw = None if b_c is None else b_c * s
         if self.override_p > 0:
-            b_p = self.override_p
+            b_p = self.override_p / s                   # 覆盖值按原始口径给出
         if self.override_c > 0:
-            b_c = self.override_c
+            b_c = self.override_c / s
         init_critic_bias(agent, b_p, b_c, verbose=self.verbose)
         self.applied = True
         self.info = dict(b_p=b_p, b_c=b_c, n_blocks=len(self.blocks),
                          step=int(step), trigger_step=self.trigger_step,
+                         scale=s, b_p_raw=b_p_raw, b_c_raw=b_c_raw,
                          mean_r1=self.blocks and float(np.mean([b[0] for b in self.blocks])),
                          mean_c1=self.blocks and float(np.mean([b[1] for b in self.blocks])))
         if self.verbose:
             prCyan('BiasInitTracker: 触发于 step={} (warmup={}, 首块末={})，'
-                   '用 {} 个 warmup 块估计 r̄={:.2f} c̄={:.2f} → b_p={:.1f} b_c={:.3f}'
+                   '用 {} 个 warmup 块估计 r̄={:.2f} c̄={:.2f} → 原始口径 b_p={:.1f} '
+                   'b_c={:.3f}，除以 s={:g} 后写入 fc3.bias: b_p={:.4f} b_c={:.5f}'
                    .format(self.info['step'], self.warmup, self.trigger_step,
                            len(self.blocks), self.info['mean_r1'],
                            self.info['mean_c1'],
+                           -1.0 if b_p_raw is None else float(b_p_raw),
+                           -1.0 if b_c_raw is None else float(b_c_raw),
+                           s,
                            -1.0 if b_p is None else float(b_p),
                            -1.0 if b_c is None else float(b_c)))
         return self.info

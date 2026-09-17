@@ -717,6 +717,10 @@ if __name__ == "__main__":
                         choices=['percentile', 'kmeans', 'expert'],
                         help='风速分段方法: percentile | kmeans | expert (默认 expert)')
 
+    parser.add_argument('--value_scale', default=hc.VALUE_SCALE, type=float,
+                        help='H 层 r1/c1 进入值函数回归空间的统一缩放 s '
+                             '(默认 1000: 把回归目标从 O(1e4) 压到 O(10); '
+                             '1 = 关闭归一化, 只影响 critic 回归空间)')
     parser.add_argument('--c1-mode', default='uniform',
                         choices=['uniform', 'legacy'],
                         help='H 层 c1 口径: uniform=波动当量(默认, hsrl_cost 单一真源); '
@@ -734,6 +738,7 @@ if __name__ == "__main__":
     hwarm.add_warmup_args(parser)
     args = parser.parse_args()
     hc.set_mode(args.c1_mode)
+    hc.set_value_scale(args.value_scale)   # 值函数回归空间归一化 (单一真源)
     _HCFG = hc.h_settings()
     prCyan(hc.summary())
     args.output = get_output_folder(args.output, args.env)
@@ -806,6 +811,10 @@ if __name__ == "__main__":
                      noise_clip=args.noise_clip,
                      cost_critic_mode=args.cost_critic_mode)
     agent_H.lam = _HCFG['lam_init'] if _HCFG else 5.0
+    # 值函数回归空间归一化 (s = hc.value_scale()): 只作用于 H 层 r1/c1 进入
+    # critic 之前; buffer/对偶/日志/CSV 仍是原始口径 (见 hsrl_cost 末尾小节)。
+    agent_H.value_scale = hc.value_scale()
+
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
@@ -821,6 +830,8 @@ if __name__ == "__main__":
                      noise_clip=args.noise_clip,
                      cost_critic_mode=args.cost_critic_mode)
     agent_L.cost_limit = 10.0  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
+    agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
+
     prYellow('L 层(BESS)策略超参: policy_delay={}, policy_noise={} (H 层 TD3: delay={}, noise={})'.format(
         args.l_policy_delay, args.l_policy_noise, args.policy_delay, args.policy_noise))
     #TODO 是否预训练

@@ -816,6 +816,10 @@ if __name__ == "__main__":
                         help='1: 把 actor 输出层 WT 5 维 bias 初始化到 Cp 高效区 '
                              '[0.25,0.40] (避免从"半停机"a≈0 出发); 0: 用 PyTorch 默认')
 
+    parser.add_argument('--value_scale', default=hc.VALUE_SCALE, type=float,
+                        help='H 层 r1/c1 进入值函数回归空间的统一缩放 s '
+                             '(默认 1000: 把回归目标从 O(1e4) 压到 O(10); '
+                             '1 = 关闭归一化, 只影响 critic 回归空间)')
     parser.add_argument('--c1-mode', default='uniform',
                         choices=['uniform', 'legacy'],
                         help='H 层 c1 口径: uniform=波动当量(默认, hsrl_cost 单一真源); '
@@ -833,6 +837,7 @@ if __name__ == "__main__":
     hwarm.add_warmup_args(parser)
     args = parser.parse_args()
     hc.set_mode(args.c1_mode)
+    hc.set_value_scale(args.value_scale)   # 值函数回归空间归一化 (单一真源)
     _HCFG = hc.h_settings()
     prCyan(hc.summary())
     args.output = get_output_folder(args.output, args.env)
@@ -917,6 +922,10 @@ if __name__ == "__main__":
                      sig_noise_max=args.sig_noise_max,
                      sig_noise_min=args.sig_noise_min)
     agent_H.lam = _HCFG['lam_init'] if _HCFG else 5.0
+    # 值函数回归空间归一化 (s = hc.value_scale()): 只作用于 H 层 r1/c1 进入
+    # critic 之前; buffer/对偶/日志/CSV 仍是原始口径 (见 hsrl_cost 末尾小节)。
+    agent_H.value_scale = hc.value_scale()
+
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     # ---- P0.1: WT 输出层 bias 初始化到 Cp 高效区 (避免"半停机"起步) ----

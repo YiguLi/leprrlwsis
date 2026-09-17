@@ -441,6 +441,50 @@ $env:DEEPSEEK_API_KEY = "sk-..."
 
 ---
 
+## 附：H 层值函数回归空间归一化（`--value_scale`，默认 `s = 1000`）
+
+**问题**：`model.py` 的 `Critic` 输出层 `fc3(50→1)` 只把 weight 初始化到 ±3e-3，bias 保持
+PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益使回归目标达到 **O(10⁴)**
+（块收益均值 ~2.6e2 元 × `1/(1−γ)`，γ=0.99）——**初值与目标差 ~3e5 倍**。
+
+**做法**：让 H 层 critic 在**归一化空间**回归。`r1`/`c1` 只在**唯一一处**换算：各 agent
+`update_policy()` 采样之后 `profit_batch / s`、`cost_batch / s`；其余一切保持原始口径。
+
+| 对象 | 是否缩放 | 说明 |
+|---|---|---|
+| H 层 replay memory（warmup 填入 / 策略期写入 / `relabel_all()` 重写） | **不缩** | 三条路径都存原始口径 ⇒ 天然同口径，不存在混装；换算只发生在回归时 |
+| `critic_p/p2/c/c2` 四张网及其 target | **缩** | 共用同一个 `target_q_batch_{p,c}`，只有一处除法 |
+| actor loss `−(Q_p − λ·Q_c)` | 自动 | 两通道同除 s ⇒ 正因子，Adam 下等价，**λ 语义不变** |
+| `hsrl_agent_init.BiasInitTracker` | **缩** | 它读的是 main 里的**原始**块收益累加器 ⇒ 写入 `fc3.bias` 前 `/s`（含 `--critic_bias_p/_c` 覆盖值，按原始口径给出）。估计量对样本线性，故 SE/块数/触发点/γ 都不用重调 |
+| λ 区间、EMA 对偶（`ema_cost` vs `d_block_H`）、curriculum | **不缩** | 乘性对偶对 r1/c1 的换算一无所知 |
+| `update_stats_H.csv` / TensorBoard（`q_*` / `td_*` / `target_*`） | 还原 | agent 内部 `×s` 还原成原始口径 ⇒ 与历史 run、`analyse_q_scale.py` 直接可比 |
+| PER 优先级 `|TD_p|/mean_p + |TD_c|/mean_c + ε` | 不缩 | 自归一化比值，对 s 免疫（`ε` 加在 O(1) 量上，占比不变） |
+| L 层 `r2`/`c2` | **不缩** | `value_scale` 默认 1.0；L 值函数尺度本就 O(1)（`d_block_L` = 20 / 2.5） |
+
+**实测（`test_value_scale.py` B 段，真实 `SP_TD3` + 同一批数据，合成常数回归 R=5000）**
+
+* **语义等价（守住）**：`reward/cost/target` 四个纯收益字段两臂**还原后逐位相等**；
+  `q_*`/`min_p_next` 类字段两臂**精确差 s 倍**（证明还原生效）；两臂最终收敛到同一目标
+  （误差 2.1% vs 0.00%）。
+* **速度并未变快（预测被否证）**：原以为"初值↔目标距离 ∝ 1/s ⇒ 瞬态 ∝ 1/s"，
+  但 Adam 下 s=1 臂会把**隐层末级激活从 0.8 放大到 ~200**（实测 `|h5|` mean 202.6）
+  来把输出顶到 O(10⁴)，因此在 ~50 次更新内两臂都已贴近目标。
+  **归一化买到的是"内部尺度/条件数"（s=1000 臂用 O(1) 激活拟合同一目标），
+  不是步数**。真实收益需在 MATLAB 环境跑 A/B 才能定量。
+* warmup 路径：`fill_bess_transition` 原样透传 `r2/c2`（存储侧无缩放）；
+  `BiasInitTracker` 用原始块样本估计、写 `fc3.bias` 前 `/s`（`s=1` 时与旧行为逐位一致）。
+
+**用法与测试**
+
+* `--value_scale 1000`（默认）；`--value_scale 1`（或 0）关闭归一化，用作对照臂。
+* `python test_value_scale.py` —— 覆盖性（8 个 agent + 9 个 main 的换算点齐全，且
+  `sum_r1`/`sum_c1`/对偶/curriculum/relabel/warmup 填入**均未被缩放**）+ 上述数值不变量
+  + `Σ₅ fluct_cost(3) = 15` 与 λ 语义正交。
+* `python probe_value_scale.py` —— 学习曲线/隐层激活量级的诊断（复现上面"速度未变快"
+  的观测）。
+
+---
+
 ## 附：warmup 重构 + critic bias 触发修复（`--warmup_sched`，9 个方法共用单一真源 `hsrl_warmup.py`）
 
 **问题（`output/TD3PRRLRB-run3` day0 实测）**

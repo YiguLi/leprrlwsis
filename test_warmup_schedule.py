@@ -100,6 +100,29 @@ tr, agent, fired = _run_loop(200, mode='none')
 assert fired == [] and abs(float(agent.critic_p.fc3.bias.item())) < 1.0
 print('显式 --critic_bias_p 8000 生效；mode=none 不触发 ✓')
 
+# 值函数回归空间归一化: 样本/覆盖值都是原始口径, 写 fc3.bias 前统一 /s
+tr = hinit.BiasInitTracker(mode='estimate', warmup=200, discount=0.99, verbose=False,
+                           value_scale=1000.0)
+agent = _CriticStub()
+fired = []
+for step in range(900):
+    if step % 5 == 4:
+        info = tr.on_block_end(step, -82.0, 19.8, agent)
+        if info:
+            fired.append(info)
+info = fired[0]
+assert abs(info['b_p_raw'] - (-8200.0)) < 1e-6, info['b_p_raw']      # 原始口径
+assert abs(info['b_p'] - (-8.2)) < 1e-6, info['b_p']                 # = b_p_raw/s
+assert abs(float(agent.critic_p.fc3.bias.item()) - info['b_p']) < 1e-6
+tr = hinit.BiasInitTracker(mode='estimate', warmup=200, discount=0.99, verbose=False,
+                           value_scale=1000.0, b_p=8000.0)
+agent = _CriticStub()
+for step in range(900):
+    if step % 5 == 4:
+        tr.on_block_end(step, -82.0, 19.8, agent)
+assert abs(float(agent.critic_p.fc3.bias.item()) - 8.0) < 1e-9      # 覆盖值 8000/1000
+print('s=1000: b_p_raw=-8200 → fc3.bias=-8.2; 覆盖值 8000 → 8.0 ✓')
+
 # ---------------------------------------------------------------- 2) warmup 调度
 print('--- 2) warmup 上层调度 ---')
 sched = hw.WarmupSchedule(nb_turbine=5, nb_actions=6, seed=7)
