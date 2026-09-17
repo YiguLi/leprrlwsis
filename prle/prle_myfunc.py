@@ -20,10 +20,10 @@ Upper (H) r1（机会侧，乘法分解，与 prrbb_myfunc 一致）:
             (BESS 由 SOC + RuleBasedBESS 硬窗口调控, 基本不存在安全问题)
 
 Upper (H) c1（风险侧）:
-  c1 = C1_RISK × [10*(P_F-3)+ + 0.1*P_F] + W_GAP * unfeasible_gap
-    C1_RISK: 恒 1.0 —— 【本轮变更】波动风险项分段系数已去掉
-             (风力变化本身已证明控制完成, 无需按风档加减风险罚)
-    W_GAP = 50.0  (平抑可行性缺口 unfeasible_gap 的直接代价, 单位 MW)
+  c1 = 10*max(P_F-3,0) + c1_small[档] * P_F + W_GAP * unfeasible_gap
+    c1_small: 小额波动系数 (P_F 的线性项系数), 按风险区(风速档)分段标定
+              LOW(低风险)=0.1  MEDIUM(均衡)=0.2  HIGH(高风险)=0.5
+    越限项系数恒 10 (不随档位变化); W_GAP = 50.0 (平抑可行性缺口, 单位 MW)
 
 Lower (L):
   r2 = 10.0 * shadow_profit - 100.0 * clip_amount
@@ -128,9 +128,10 @@ WB_PRICE = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.0}
 # BESS 收益：SOC 贴边折减同步取消（原 0.7）⇒ get_wB 恒返回 1.0
 WB_SOC_OUTSIDE = 1.0
 
-# c1 风险系数：分段系数已取消 ⇒ 恒 1.0（原 LOW=0.8 / MEDIUM=1.0 / HIGH=1.2）
-#   理由: 风力变化本身已证明控制完成, 无需再按风档加/减波动风险罚。
-C1_RISK = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.0}
+# c1 小额波动系数：按风险区(风速档)分段标定
+#   LOW(低风险)=0.1  MEDIUM(均衡风险)=0.2  HIGH(高风险)=0.5
+#   越限项系数恒 10; W_GAP*unfeasible_gap 不随档位变化。
+C1_SMALL_FLUC = {'LOW': 0.1, 'MEDIUM': 0.2, 'HIGH': 0.5}
 # unfeasible_gap（平抑可行性缺口, MW）进入 c1 的系数
 W_GAP = 50.0
 
@@ -222,17 +223,18 @@ def relabel_r1_substep(u, pr, turbine_raw, bess_raw, degradation, penalty_NN_H,
     return w_wind * turbine_raw + w_bess * bess_raw - degradation - penalty_NN_H
 
 
-def get_c1_risk_coeff(wind_level):
-    """c1 风险系数三档（PRRBB）: LOW=0.8, MEDIUM=1.0, HIGH=1.2."""
-    return C1_RISK[wind_level]
+def get_c1_small_fluc(wind_level):
+    """c1 小额波动系数 (c1 中 P_F 的线性项系数), 按风险区(风速档)查表:
+    LOW=0.1 / MEDIUM=0.2 / HIGH=0.5 (越限项系数恒 10)。"""
+    return C1_SMALL_FLUC[wind_level]
 
 
 def relabel_c1_substep(u, P_F, unfeasible_gap=0.0):
     """
     Recompute c1 for a single sub-step using CURRENT wind thresholds
-    (PRRBB: 三档风险系数 + unfeasible_gap 直接付费).
+    (PRRBB: 按风险区分段的小额波动系数 + unfeasible_gap 直接付费).
 
-    c1 = C1_RISK[wind_level] * (10.0 * max(0, P_F - 3.0) + 0.1 * P_F)
+    c1 = 10.0 * max(0, P_F - 3.0) + C1_SMALL_FLUC[wind_level] * P_F
        + W_GAP * unfeasible_gap
 
     The base fluctuation penalty and the feasibility gap term are
@@ -254,11 +256,11 @@ def relabel_c1_substep(u, P_F, unfeasible_gap=0.0):
     c1 : float
         Recomputed fluctuation cost under current wind thresholds.
     """
-    coeff = get_c1_risk_coeff(get_wind_level(u))
+    c1_small = get_c1_small_fluc(get_wind_level(u))
     if P_F > 3.0 + 1e-4:
-        c1 = coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F)
+        c1 = 10.0 * (P_F - 3.0) + c1_small * P_F
     else:
-        c1 = coeff * (0.1 * P_F)
+        c1 = c1_small * P_F
     return c1 + W_GAP * unfeasible_gap
 
 
@@ -370,15 +372,16 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 
     # c1: fluctuation penalty
     #   越限部分 10.0*(P_F-3.0) 仅在 P_F > 3.0 时生效；
-    #   平滑项 0.1*P_F 对任意波动值 P_F（不仅限于越限值）都生效。
-    #   风险系数三档（PRRBB）: LOW×0.8, MEDIUM×1.0, HIGH×1.2。
+    #   小额波动项 c1_small*P_F 对任意波动值 P_F（不仅限于越限值）都生效。
+    #   小额波动系数三档（PRRBB）: LOW=0.1, MEDIUM=0.2, HIGH=0.5 (越限项恒 10)。
     #   unfeasible_gap（平抑可行性缺口, MW）进入 c1: H 制造了物理上
     #   无法平抑的波动时直接付费（风速/SOC/轴向因子/BESS额定 的综合体现）。
-    c1_risk_coeff = C1_RISK[wind_level]
+    # 越限项系数恒 10; 小额波动项 (P_F 线性) 系数按风险区分段标定
+    c1_small = get_c1_small_fluc(wind_level)
     if P_F > 3.0 + 1e-4:
-        c1 = c1_risk_coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F)
+        c1 = 10.0 * (P_F - 3.0) + c1_small * P_F
     else:
-        c1 = c1_risk_coeff * (0.1 * P_F)
+        c1 = c1_small * P_F
     c1 = c1 + W_GAP * unfeasible_gap
 
     # ==== Lower Level (L) ====

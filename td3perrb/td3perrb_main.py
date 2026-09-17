@@ -5,7 +5,7 @@ TD3PERRB (TD3 + PER + 非分段奖励 + Rule-Based BESS) — Main Training Loop
 新架构: 上层 = TD3 智能体 (唯一学习器), 下层 = 规则控制器 (SocTracker).
 
 自 td3prrlrb 改写而成 (td3prrlrb 原代码不做任何修改)。与 td3prrlrb 的【唯一差异】:
-**不使用分段奖励函数** —— 收益权重 wT/wB 与 c1 风险系数 C1_RISK 全部取固定 1.0,
+**不使用分段奖励函数** —— 收益权重 wT/wB 恒 1.0, c1 小额波动系数恒 0.5,
 不移植任何分段系数 (见 td3perrb_myfunc.py 第 2 节)。其余结构、超参、下层规则
 控制器均与 td3prrlrb 逐字一致。
 
@@ -24,7 +24,7 @@ L (规则, SocTracker, 1 维动作 pb):
 -----------
 H: r1 = 1.0*(pr*ptur*dt) + 1.0*(-pr*pbrule*dt) - 490*max(-pbrule,0)*dt - penalty_NN_H
        = pr*P_G*dt - 490*max(-pbrule,0)*dt - penalty_NN_H   (P_G = ptur - pbrule)
-    c1 = 1.0*[10*(P_F-3)+ + 0.1*P_F] + 10*unfeasible_gap
+    c1 = 10*max(P_F-3,0) + 0.5*P_F + 10*unfeasible_gap
          + [块末结算] 10*max(0, |soc_target - SOC_end| - SOC_TOL)
 
 对偶上升 (仅 H, EMA 实际块成本)

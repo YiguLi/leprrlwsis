@@ -10,7 +10,7 @@ Context storage:
   - H-agent transitions: list of 5 sub-step dicts
     {'u', 'pr', 'turbine_raw', 'bess_raw', 'degradation', 'penalty_NN_H',
      'P_F', 'soc', 'unfeasible_gap'}
-    ('soc' = decision-time SOC for the PRRBB wB_soc margin check,
+    ('soc' = decision-time SOC (wB ≡ 1.0 后仅供回退/诊断),
      'unfeasible_gap' = RBB feasibility gap entering c1 via W_GAP)
   - L-agent transitions: None (no relabeling context stored for L)
 

@@ -156,9 +156,9 @@ def train(num_iterations_H,
         elif soc > soc_safe_max:
             soc_deviation = soc - soc_safe_max
 
-        # c1: 拉格朗日惩罚 = 越限惩罚(c) + 平滑项 0.1*P_F + W_GAP*unfeasible_gap
+        # c1: 拉格朗日惩罚 = 越限惩罚(c) + 小额波动项 C1_SMALL_FLUC_COEF*P_F + W_GAP*unfeasible_gap
         #     （unfeasible_gap: 波动约束∩物理约束为空时的不可行缺口, 硬裁剪无法消除）
-        c1 = c + 0.1 * P_F + W_GAP * rbb_info['unfeasible_gap']
+        c1 = c + C1_SMALL_FLUC_COEF * P_F + W_GAP * rbb_info['unfeasible_gap']
         sum_r1 += r1
         sum_c1 += c1
         prGreen('r1 = {}'.format(round(r1, 3)))

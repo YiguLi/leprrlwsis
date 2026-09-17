@@ -36,10 +36,10 @@ Upper (H) r1 (机会侧, 乘法分解, 与 td3prrbb 一致):
         (BESS 由 SOC + RuleBasedBESS 硬窗口调控, 基本不存在安全问题)
 
 Upper (H) c1 (风险侧):
-  c1 = C1_RISK × [10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
+  c1 = 10*max(P_F-3,0) + c1_small[档]*P_F + W_GAP*unfeasible_gap
   块末结算再叠加 SOC 跟踪项: c1_soc_track = C1_SOC_TRACK × |soc_target − SOC_块末|
-  C1_RISK: 恒 1.0 【本轮变更】波动风险项分段系数已去掉
-           (风力变化本身已证明控制完成), W_GAP=10 (td3prle 调参: 原 50 → 10)
+  c1_small: 小额波动系数, 按风险区分段 LOW=0.1 / MEDIUM=0.2 / HIGH=0.5
+            (越限项系数恒 10), W_GAP=10 (td3prle 调参: 原 50 → 10)
 
 Wind boundaries: 动态 (main 按 --seg 定起点, LLM 每 7200 步在 原设定±1 m/s 内调整)
 
@@ -147,9 +147,10 @@ WB_PRICE = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.0}
 #   收益侧不再按电价档 / 风档 / SOC 位置给 BESS 打折; 由 SOC 目标机制接管。
 WB_SOC_OUTSIDE = 1.0
 
-# c1 风险系数：分段系数已取消 ⇒ 恒 1.0（原 LOW=0.8 / MEDIUM=1.0 / HIGH=1.2）
-#   理由: 风力变化本身已证明控制完成, 无需再按风档加/减波动风险罚。
-C1_RISK = {'LOW': 1.0, 'MEDIUM': 1.0, 'HIGH': 1.0}
+# c1 小额波动系数：按风险区(风速档)分段标定
+#   LOW(低风险)=0.1  MEDIUM(均衡风险)=0.2  HIGH(高风险)=0.5
+#   越限项系数恒 10; W_GAP*unfeasible_gap 不随档位变化。
+C1_SMALL_FLUC = {'LOW': 0.1, 'MEDIUM': 0.2, 'HIGH': 0.5}
 
 
 def get_wT(wind_level, price_level):
@@ -247,16 +248,17 @@ def relabel_r1_substep(u, pr, turbine_raw, bess_raw, degradation, penalty_NN_H,
 W_GAP = 10.0
 
 
-def get_c1_risk_coeff(wind_level):
-    """c1 风险系数三档 (与 td3prrbb 一致): LOW=0.8, MEDIUM=1.0, HIGH=1.2."""
-    return C1_RISK[wind_level]
+def get_c1_small_fluc(wind_level):
+    """c1 小额波动系数 (c1 中 P_F 的线性项系数), 按风险区(风速档)查表:
+    LOW=0.1 / MEDIUM=0.2 / HIGH=0.5 (越限项系数恒 10)。"""
+    return C1_SMALL_FLUC[wind_level]
 
 
 def relabel_c1_substep(u, P_F, unfeasible_gap=0.0):
     """
     Recompute c1 for a single sub-step using CURRENT wind thresholds.
 
-    c1 = c1_risk_coeff * (10.0 * max(0, P_F - 3.0) + 0.1 * P_F)
+    c1 = 10.0 * max(0, P_F - 3.0) + C1_SMALL_FLUC[wind_level] * P_F
        + W_GAP * unfeasible_gap
 
     The base fluctuation penalty is threshold-independent (the 3.0 MW limit
@@ -282,10 +284,10 @@ def relabel_c1_substep(u, P_F, unfeasible_gap=0.0):
     c1 : float
         Recomputed fluctuation cost under current wind thresholds.
     """
-    coeff = get_c1_risk_coeff(get_wind_level(u))
+    c1_small = get_c1_small_fluc(get_wind_level(u))
     if P_F > 3.0 + 1e-4:
-        return coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F) + W_GAP * unfeasible_gap
-    return coeff * (0.1 * P_F) + W_GAP * unfeasible_gap
+        return 10.0 * (P_F - 3.0) + c1_small * P_F + W_GAP * unfeasible_gap
+    return c1_small * P_F + W_GAP * unfeasible_gap
 
 
 # =============================================================================
@@ -435,7 +437,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     PRRBB reward: 机会/风险分离 (与 td3prrbb 一致);
     Upper r1 = wT*pr*ptur*dt + wB*(-pr*pbrule*dt) - 退化 - penalty_NN_H
              （wT/wB 乘法分解: wT=wT_u×wT_p, wB=wB_p (SOC 贴边折减已取消)）
-    Upper c1 = 1.0*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap  (【本轮变更】C1_RISK 分段系数已去掉)
+    Upper c1 = 10*max(P_F-3,0) + C1_SMALL_FLUC[档]*P_F + W_GAP*unfeasible_gap
              （H 的 SOC 跟踪惩罚 c1_soc_track 在块末结算, 见 soc_track_penalty,
                不在此逐步入账）
     Lower r2 = -min(100*(clip_amount + l_clip_over), L_CLIP_PEN_TOTAL_CAP)
@@ -493,14 +495,15 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 
     # c1: fluctuation penalty
     #   越限部分 10.0*(P_F-3.0) 仅在 P_F > 3.0 时生效；
-    #   平滑项 0.1*P_F 对任意波动值 P_F（不仅限于越限值）都生效。
-    #   风险系数三档 (与 td3prrbb 一致): LOW×0.8, MEDIUM×1.0, HIGH×1.2;
+    #   小额波动项 c1_small*P_F 对任意波动值 P_F（不仅限于越限值）都生效。
+    #   小额波动系数三档: LOW=0.1, MEDIUM=0.2, HIGH=0.5 (越限项系数恒 10);
     #   unfeasible_gap（平抑可行性缺口, MW）直接付费。
-    c1_risk_coeff = get_c1_risk_coeff(wind_level)
+    # 越限项系数恒 10; 小额波动项 (P_F 线性) 系数按风险区分段标定
+    c1_small = get_c1_small_fluc(wind_level)
     if P_F > 3.0 + 1e-4:
-        c1 = c1_risk_coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F) + W_GAP * unfeasible_gap
+        c1 = 10.0 * (P_F - 3.0) + c1_small * P_F + W_GAP * unfeasible_gap
     else:
-        c1 = c1_risk_coeff * (0.1 * P_F) + W_GAP * unfeasible_gap
+        c1 = c1_small * P_F + W_GAP * unfeasible_gap
 
     # ==== Lower Level (L) ====
     # r2: 裁剪惩罚 (两项同系数合成一项):

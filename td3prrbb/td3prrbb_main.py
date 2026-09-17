@@ -20,7 +20,7 @@ Reward structure (td3prrbb_myfunc.Cal_Rew_PRRBB):
   Upper (H): r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
                   - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                   wT = wT_u(u)×wT_p(pr), wB ≡ 1.0 (【本轮变更】BESS 分段系数已去掉)
-             c1 = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + 50*unfeasible_gap
+             c1 = 10*max(P_F-3,0) + C1_SMALL_FLUC[档]*P_F + 50*unfeasible_gap
   Lower (L): r2 = 10*shadow_profit - 100*clip_amount
              c2 = 700*soc_deviation   (wind-segmented SOC 安全带)
 
@@ -97,7 +97,7 @@ def train(num_iterations_H,
     consecutive_satisfied_H = 0
     consecutive_satisfied_L = 0
     # H 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_H (与 sum_c1 同口径)
-    # PRRBB 标定: c1 = r_u*[10*(P_F-3)+ + 0.1*P_F] + 50*unfeasible_gap
+    # PRRBB 标定: c1 = 10*max(P_F-3,0) + C1_SMALL_FLUC[档]*P_F + 50*unfeasible_gap
     d_block_H = 1.2         # 初值: 每块 sum_c1 预算
     d_block_H_min = 0.3     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)

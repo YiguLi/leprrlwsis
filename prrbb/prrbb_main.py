@@ -75,7 +75,7 @@ def train_prrbb(num_iterations_H,
       Upper (H): r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
                       - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                       wT=wT_u(u)*wT_p(pr), wB≡1.0 (【本轮变更】BESS 分段系数已去掉)
-                 c1 = r_u(u)*(10*max(0,P_F-3) + 0.1*P_F) + 50*unfeasible_gap
+                 c1 = 10*max(0,P_F-3) + C1_SMALL_FLUC[档]*P_F + 50*unfeasible_gap
       Lower (L): r2 = 10*shadow_profit - 100*clip_amount
                  c2 = 700*soc_deviation  (SOC-safe 项, 拉格朗日约束)
 

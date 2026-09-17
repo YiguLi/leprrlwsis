@@ -11,6 +11,12 @@ if _RBB_DIR not in sys.path:
     sys.path.insert(0, _RBB_DIR)
 from rbb_rule_bess import RuleBasedBESS
 
+# c1 小额波动系数 (c1 中 P_F 的线性项系数): per 为非分段方法 ⇒ 统一 0.5
+# （PER_main0.py: c1 = c + C1_SMALL_FLUC_COEF * P_F + W_GAP * unfeasible_gap,
+#   越限项 c = 10*max(P_F-3, 0) 的系数恒 10）
+C1_SMALL_FLUC_COEF = 0.5
+
+
 def Cal_Rew(observation, observation2, action_all, cost_single_cons = 3.):
     time = 1/60
     pr = observation[0]

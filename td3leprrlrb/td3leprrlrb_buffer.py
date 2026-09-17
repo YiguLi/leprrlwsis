@@ -11,7 +11,7 @@ Why relabeling is needed
 
   r1 = wT(wind,price)·(pr·ptur·dt) + wB(price,wind,SOC)·(−pr·pbrule·dt)
        − 退化 − penalty_NN_H
-  c1 = C1_RISK[wind]·[10·(P_F−3)⁺ + 0.1·P_F] + W_GAP·unfeasible_gap
+  c1 = 10·max(P_F−3,0) + C1_SMALL_FLUC[wind]·P_F + W_GAP·unfeasible_gap
 
 阈值一变, 同一条历史轨迹的 wind 档就变了 → 存进回放池的 (r,c) 与"当前
 奖励函数"不再一致。若不重算, 智能体会拿两套口径混在一起的目标去拟合
@@ -23,7 +23,7 @@ Context storage (与 td3prrlrb 的 5 步块一一对应)
       {'u', 'pr', 'turbine_raw', 'bess_raw', 'degradation',
        'penalty_NN_H', 'SOC', 'P_F', 'unfeasible_gap', 'gap_pen'}
   其中前三类 "raw" 项与阈值无关 (只含 pr/ptur/pbrule/dt), 阈值相关的只有
-  分档权重 (wT/wB) 与风险系数 (C1_RISK), 所以 relabel 只需重算这两处。
+  分档权重 (wT) 与小额波动系数 (C1_SMALL_FLUC), 所以 relabel 只需重算这两处。
 
   与 td3prle 的差异 (本项目修正): td3prle 的 blk 末尾 SOC 跟踪罚写在块级、
   未进 context, 于是 relabel 时被静默丢掉; 这里把 gap_pen 存进块内最后一个

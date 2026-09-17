@@ -3,7 +3,7 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
 =========================================================================
 本文件是 td3per 的 "td3perrb 化" 改造:
   * 上层 (H) 的奖励/成本/信号语义 **完全移植自 td3perrb_myfunc.py**
-    (非分段奖励: 收益权重与 c1 风险系数恒 1.0);
+    (非分段奖励: 收益权重恒 1.0, c1 小额波动系数恒 0.5);
   * 下层 (L) 仍是 td3per 自己的 RL BESS (TD3 + PER + EMA 对偶), 只把
     "信号 / 追踪目标" 由影子电价换成 **SOC 目标**。
 
@@ -85,8 +85,8 @@ def get_wind_level(u):
 W_TURBINE = 1.0      # wT: 非分段 ⇒ 恒为 1.0 (不做 风况×电价 加权)
 W_BESS = 1.0         # wB: 非分段 ⇒ 恒为 1.0 (不做 电价加权 / SOC 贴边折减)
 
-# c1 风险系数: 非分段 ⇒ 单一系数 (不按风况分档)
-C1_RISK_COEF = 1.0
+# c1 小额波动系数: 非分段 ⇒ 单一系数 0.5 (不按风况分档)
+C1_SMALL_FLUC_COEF = 0.5   # 非分段 ⇒ c1 小额波动系数统一 0.5
 # unfeasible_gap（平抑可行性缺口, MW）进入 c1 的系数
 W_GAP = 10.0
 
@@ -223,11 +223,12 @@ def Cal_Rew_RB(observation, observation2, action_rbb, rbb_info,
                            wind_level, price_level, SOC=SOC_decision, time=time)
 
     # ==== c1 (H 风险侧) ====
-    c1_risk_coeff = C1_RISK_COEF   # 非分段 ⇒ 恒为 1.0 (不做风况分档)
+    # 非分段 ⇒ 小额波动系数取统一定值 0.5 (越限项系数恒 10)
+    c1_small = C1_SMALL_FLUC_COEF
     if P_F > 3.0 + 1e-4:
-        c1 = c1_risk_coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F)
+        c1 = 10.0 * (P_F - 3.0) + c1_small * P_F
     else:
-        c1 = c1_risk_coeff * (0.1 * P_F)
+        c1 = c1_small * P_F
     c1 = c1 + W_GAP * unfeasible_gap
 
     # ==== details ====
