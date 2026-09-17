@@ -29,12 +29,12 @@ Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
                    与 td3prrbb 的差异仅在于此)
              c1 = 1.0*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
                   + 块末结算项 c1_soc_track = 10*|soc_target − SOC_块末|
-  Lower (L): r2 = -min(100*(clip_amount + clip_over), 1000)
+  Lower (L): r2 = -min(1*(clip_amount + clip_over), 10)
              (clip_amount = 送进 RBB 的动作被可行窗口夹掉的量;
               clip_over = 原始意图被 CheckAction 夹到 ±10 MW 之外的部分,
               两项同系数合成同一个裁剪惩罚, 并受【总上限】封顶 1000 RMB/step
-              ⇔ 合计裁剪量 ≤10 MW; 见 myfunc.L_CLIP_PEN_COEF / _TOTAL_CAP)
-             c2 = 10*(SOC_new − soc_target)²   (目标中心二次势, ×10 惩罚系数)
+              ⇔ 合计裁剪量 ≤10 MW (原 1000 元/step 封顶 ÷100); 见 myfunc.L_CLIP_PEN_COEF / _TOTAL_CAP)
+             c2 = 0.1*(SOC_new − soc_target)²  (目标中心二次势, ×0.1 惩罚系数)
 
 【信号语义 (本轮变更)】H 第 6 维输出 signal 不再是影子价格, 而是 SOC 目标的归一化指令;
   H 输出范围不变 ((-0.5, 0.5)), 由下层线性映射 (myfunc.signal_to_soc_target):
@@ -145,11 +145,11 @@ def train(num_iterations_H,
     d_block_H = _h['d_block'] if _h else 12.0        # 初值: 每块 sum_c1 预算 (平滑系数曾 0.1→1.0 ×10 重标; 现已回调 0.1, 预算未随动)
     d_block_H_min = _h['d_block_min'] if _h else 3.0     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    # c2 = C2_SOC_COEFF(10)*(SOC_new−soc_target)² 目标中心二次势;
-    # 预算 d_block_L = 40 = 10·2² (单步贴 ±2 MWh 处的成本值; ×10 系数下与旧
+    # c2 = C2_SOC_COEFF(0.1)*(SOC_new−soc_target)² 目标中心二次势;
+    # 预算 d_block_L = 0.4 = 0.1·2² (单步贴 ±2 MWh 处的成本值; ×0.1 系数下与旧
     #     100·(SOC−3)² / 400 同刻度), 地板 = 初值 → 预算永不收紧。
-    d_block_L = 40.0        # 初值: 每块 sum_c2 预算 (目标中心二次势标定)
-    d_block_L_min = 40.0    # 收紧地板 = 初值 → max(d/2, 40)≡40, 预算永不收紧:
+    d_block_L = 0.4        # 初值: 每块 sum_c2 预算 (目标中心二次势标定)
+    d_block_L_min = 0.4    # 收紧地板 = 初值 → max(d/2, 0.4)≡0.4, 预算永不收紧:
                             # SOC 保持软裕度, 不随 curriculum 渐渐被钉向目标
 
     # ---- TD3PRLE: Window statistics for LLM analysis ----
@@ -263,7 +263,7 @@ def train(num_iterations_H,
             applied_action_L, penalty_NN_L = CheckAction(original_action_L)
         # L 层原始意图被【执行器上限 ±charge(±10 MW)】夹掉的量 (MW, ≥0):
         #   |original_action_L| − |applied_action_L|; 计入 r2 的裁剪惩罚
-        #   (与 clip_amount 同系数 100, 见 myfunc.L_CLIP_PEN_COEF)
+        #   (与 clip_amount 同系数 1, 见 myfunc.L_CLIP_PEN_COEF)
         l_clip_over = float(np.sum(np.maximum(
             np.abs(np.asarray(original_action_L, dtype=float)) -
             np.abs(np.asarray(applied_action_L, dtype=float)), 0.0)))
@@ -1098,19 +1098,19 @@ if __name__ == "__main__":
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c), 与 td3prrbb 同配置;
     #     lam2 ∈ [2, 200] 初始 100.0 (min=2: 带内拖拽 < 套利边际, 保留 ±2 软裕度;
-    #     max=200 顶配), ema_alpha=0.02, ema_lam_lr=0.01
+    #     max=200 顶配), ema_alpha=0.02, ema_lam_lr=1.0  (c2 口径 ÷100 后同步 ×100)
     #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
     # L 层(步骤A): policy_delay/--policy_noise 独立于 H —— 放松到 delay=1+noise≈0 时节奏接近 DDPG
     # (twin critic 与 EMA 对偶仍保留, 仅去掉延迟更新与 target smoothing 对窄可行窗的抹平)
     agent_L = SP_TD3_PRLE(nb_states = 5, nb_actions = 1, args = args,
                           lam_max=200.0, lam_min=2.0,
-                          ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
+                          ema_lam=True, ema_alpha=0.02, ema_lam_lr=1.0,
                           policy_delay=args.l_policy_delay,
                           policy_noise=args.l_policy_noise,
                           noise_clip=args.noise_clip,
                           cost_critic_mode=args.cost_critic_mode)
     agent_L.lam = 100.0
-    agent_L.cost_limit = 10.0  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
+    agent_L.cost_limit = 0.1  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
 
     # L 层折扣与 H 解耦: 步级语义, L episode = 5 步块 → bootstrap 视野 ≤5 步

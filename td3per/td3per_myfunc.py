@@ -20,9 +20,9 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
   观测 (5 维蒸馏) = [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
       第 3 维由原 shadow_price(∈(−1,1)) 改为 **SOC 目标** (与 SOC 同刻度, 便于网络
       直接比较"目标 vs 自身"); 见 build_L_obs_distilled()。
-  r2 = −100 · clip_amount            (clip_amount = |pb − pbrule|, RBB 硬裁剪量)
+  r2 = −1 · clip_amount              (clip_amount = |pb − pbrule|, RBB 硬裁剪量)
       —— 原影子套利项 (−pr·pbrule 形式) 随信号语义一起删除。
-  c2 = 1000 · slack                  (能力内追踪失败量, 进拉格朗日约束口)
+  c2 = 10 · slack                    (能力内追踪失败量, 进拉格朗日约束口)
       slack = max(0, |target − SOC'| − |target − SOC_best|),
       SOC_best = SOC + g·clip(δ/g, 窗口)   ← 规则 SocTracker 的动作
       —— 只罚"本步能做到却没做"的部分: 块首够不着的跳变(结构性不可行)不计费,
@@ -278,10 +278,10 @@ def Cal_Rew_RB(observation, observation2, action_rbb, rbb_info,
 # 6b. 下层 (L) 的观测 / 奖励 / 成本 —— SOC 目标追踪口径
 # =============================================================================
 
-# 下层 r2 的 RBB 硬裁剪惩罚系数 (td3per 原值 100)
-L_CLIP_COEF = 100.0
-# 下层 c2 的 SOC 目标追踪误差系数 (td3per 原 c2 系数 1000/MWh)
-L_SOC_COEF = 1000.0
+# 下层 r2 的 RBB 硬裁剪惩罚系数 (td3per 原值 100, 全库统一 ÷100 后为 1)
+L_CLIP_COEF = 1.0
+# 下层 c2 的 SOC 目标追踪误差系数 (td3per 原 c2 系数 1000/MWh, ÷100 后为 10)
+L_SOC_COEF = 10.0
 
 
 def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
@@ -395,10 +395,10 @@ def lower_cost_soc_track(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax,
 
     标定 (d_block_L)
     -----------------
-    尽力追的 L: sum_c2 ≡ 0; 完全不动而 |δ|≥A: 每步 ~1000·A ≈ 50, 每块 ~250;
-    最坏 (反向满功率): 每步 ≤ 1000·2A ≈ 340。
-    因此 d_block_L = 20 现读作"允许每块浪费 ≈0.02 MWh 的可达量 (≈0.4 步能力)",
-    地板 2.5 相应为"允许 ≈0.05 步能力"。想更松可取 20~50。
+    尽力追的 L: sum_c2 ≡ 0; 完全不动而 |δ|≥A: 每步 ~10·A ≈ 0.5, 每块 ~2.5;
+    最坏 (反向满功率): 每步 ≤ 10·2A ≈ 3.4。
+    因此 d_block_L = 0.2 现读作"允许每块浪费 ≈0.02 MWh 的可达量 (≈0.4 步能力)",
+    地板 0.025 相应为"允许 ≈0.05 步能力"。想更松可取 0.2~0.5。
     """
     slack, info = soc_track_slack(soc_target, SOC_prev, SOC_next,
                                   pbrulemin, pbrulemax, **kw)

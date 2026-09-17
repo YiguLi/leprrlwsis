@@ -202,8 +202,8 @@ def main():
                 shadow_profit = -signal * 2.0 * float(pbrule)
                 soc = float(obs2[2])
                 soc_dev = max(1.5 - soc, 0.0) + max(soc - 4.5, 0.0)
-                r2 = 10.0 * shadow_profit - 100.0 * float(rbb_info['clip_amount'])
-                c2 = 1000.0 * soc_dev
+                r2 = 0.1 * shadow_profit - 1.0 * float(rbb_info['clip_amount'])
+                c2 = 10.0 * soc_dev
 
             ep_profit += profit_step
             ep_reward += (r1 + r2)

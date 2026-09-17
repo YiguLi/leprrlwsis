@@ -12,7 +12,7 @@ TD3 (Twin Delayed Deep Deterministic Policy Gradient) 结合 PER 与拉格朗日
     可行性罚进入 c1, H 观测 = 4 维基础 + 24h 相位特征, lam1 ∈ [3,100]。
   * 下层 L 保留 td3per 自己的 BESS 操作 (TD3+PER+EMA 对偶+RBB 硬裁剪),
     只把信号/追踪目标换成 SOC 目标: 5 维蒸馏观测第 3 维 = soc_target/10,
-    r2 = −100·clip_amount, c2 = 1000·slack (能力内追踪失败量:
+    r2 = −1·clip_amount, c2 = 10·slack (能力内追踪失败量:
     slack = max(0, |target−SOC'| − |target−SOC_best|),
     SOC_best = SOC + g·clip(δ/g, RBB 窗口) 即规则下层动作), lam2 ∈ [10,500]。
 

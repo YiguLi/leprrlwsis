@@ -26,8 +26,8 @@ Upper (H) c1（风险侧）:
     W_GAP = 50.0  (平抑可行性缺口 unfeasible_gap 的直接代价, 单位 MW)
 
 Lower (L):
-  r2 = 10.0 * shadow_profit - 100.0 * clip_amount
-  c2 = 700.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束, 保留原系数)
+  r2 = 0.1 * shadow_profit - 1.0 * clip_amount
+  c2 = 7.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束; 全库下层口径 ÷100)
 
 Wind boundaries: dynamic (default LOW < 8.5 m/s, HIGH >= 12.0 m/s, 专家起点),
 由 LLM 元控制器在 1440 步窗口边界处调整；启动时可用 --seg 选择 percentile /
@@ -327,7 +327,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
                    penalty_NN_H=0.0, time=1.0 / 60, ptur=None):
     """
     PRRBB reward: wind × price joint segmentation (upper);
-    lower r2 = 10*shadow_profit - 100*clip_amount, c2 = 700*soc_deviation.
+    lower r2 = 0.1*shadow_profit - 1*clip_amount, c2 = 7*soc_deviation.
 
     Parameters
     ----------
@@ -384,12 +384,12 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样)
 
     # ==== Lower Level (L) ====
-    # r2: 影子套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
+    # r2: 影子套利利润 - 1*clip_amount（pbrule 裁剪惩罚进入 r2）
     # c2: SOC 越界项进入拉格朗日约束（保留原系数 700/MWh）
     shadow_profit = -shadow_price * pbrule
     soc_dev = Cal_soc_deviation(SOC_new, wind_level)
-    r2 = 10.0 * shadow_profit - 100.0 * clip_amount
-    c2 = 700.0 * soc_dev
+    r2 = 0.1 * shadow_profit - 1.0 * clip_amount
+    c2 = 7.0 * soc_dev
 
     # ==== Details ====
     turbine_profit = w_wind * pr_old * ptur * time

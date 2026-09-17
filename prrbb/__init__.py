@@ -22,9 +22,9 @@
 #     unfeasible_gap: 平抑可行性缺口 (MW)，风速/SOC/轴向因子/BESS额定的综合体现
 #
 # Lower layer (L):
-#   r2 = 10.0 * shadow_profit - 100.0 * clip_amount
+#   r2 = 0.1 * shadow_profit - 1.0 * clip_amount
 #        + 0.5 * (-pr * pbrule - 490.0 * max(-pbrule, 0.0)) * time  ← 真实利润项
-#   c2 = 700.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束, 保留原系数)
+#   c2 = 7.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束; 原 700 ÷100)
 #   soc_deviation: wind-segmented safe ranges
 #     LOW [0.5, 5.5] / MEDIUM [1.0, 5.0] / HIGH [1.5, 4.5]
 #

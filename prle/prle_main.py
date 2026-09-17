@@ -81,8 +81,8 @@ def train_prle(num_iterations_H,
       Upper (H): r1 = w_wind*pr*ptur*time + w_bess*(-pr*pbrule*time)
                       - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                  c1 = risk_coeff * (10*max(0,P_F-3) + 0.1*P_F)
-      Lower (L): r2 = 10*shadow_profit - 100*clip_amount
-                 c2 = 700*soc_deviation  (SOC-safe 项, 拉格朗日约束)
+      Lower (L): r2 = 0.1*shadow_profit - 1*clip_amount
+                 c2 = 7*soc_deviation  (SOC-safe 项, 拉格朗日约束)
 
     PRLE additions:
       - Sub-step context accumulation for reward relabeling
@@ -106,8 +106,8 @@ def train_prle(num_iterations_H,
     _h = hc.h_settings()   # uniform: 统一 d=15 / legacy: 原值
     d_block_H = _h['d_block'] if _h else 1.2          # 每块 sum_c1 的约束目标（初始, 与 PRRBB H 同量级）
     d_block_H_min = _h['d_block_min'] if _h else 0.3      # curriculum 收紧地板
-    d_block_L = 14.0         # 每块 sum_c2 的约束目标（初始, 按 700 系数标定）
-    d_block_L_min = 1.75     # curriculum 收紧地板
+    d_block_L = 0.14         # 每块 sum_c2 的约束目标（初始, 按 7 系数标定）
+    d_block_L_min = 0.0175     # curriculum 收紧地板
 
     # ---- PRLE: Window statistics for LLM analysis ----
     window_stats = WindowStats()
@@ -887,8 +887,8 @@ if __name__ == "__main__":
     # L 层对偶改 EMA 实际成本更新; lam2 ∈ [10, 200] (500→200, 抑制对偶顶格后成本通道失效)
     agent_L = PRLE_DDPG(nb_states=5, nb_actions=1, args=args,
                         lam_max=200.0, lam_min=10.0,
-                        ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01)
-    agent_L.cost_limit = 10.0  # L-layer c2 dedicated initial value (EMA 模式下不使用)
+                        ema_lam=True, ema_alpha=0.02, ema_lam_lr=1.0)
+    agent_L.cost_limit = 0.1  # L-layer c2 dedicated initial value (EMA 模式下不使用)
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
 
 

@@ -207,9 +207,9 @@ def S_test(agent_H, agent_L, env_test, rbb_system, num_iterations = 5, test_csv 
         )
         clip_amount_test = rbb_info_test['clip_amount']
         pbclip_test = clip_amount_test  # distance from pboriginal to [pbrulemin, pbrulemax]; PER does NOT clip pb
-        # r2: 影子套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
+        # r2: 影子套利利润 - 1*clip_amount（pbrule 裁剪惩罚进入 r2）
         shadow_price_test = action[5] * 2  # (-0.5,0.5) → (-1,1)
-        r2 = 10.0 * (-shadow_price_test * pbrule_test) - 100.0 * clip_amount_test
+        r2 = 0.1 * (-shadow_price_test * pbrule_test) - 1.0 * clip_amount_test
         # c2: SOC 越界项进入拉格朗日约束（原系数 1000/MWh，安全带 [1.5, 4.5]）
         soc_test = float(obs2[2])
         soc_dev_test = 0.0
@@ -217,7 +217,7 @@ def S_test(agent_H, agent_L, env_test, rbb_system, num_iterations = 5, test_csv 
             soc_dev_test = 1.5 - soc_test
         elif soc_test > 4.5:
             soc_dev_test = soc_test - 4.5
-        c2 = 1000.0 * soc_dev_test
+        c2 = 10.0 * soc_dev_test
         if test_csv:
             df = pd.concat([df, pd.DataFrame([{
                 'step': step,
@@ -372,9 +372,9 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             E=float(obs[2]),
         )
         clip_amount_test = rbb_info_test['clip_amount']
-        # r2: 影子套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
+        # r2: 影子套利利润 - 1*clip_amount（pbrule 裁剪惩罚进入 r2）
         shadow_price_test = action[5] * 2  # (-0.5,0.5) → (-1,1)
-        r2 = 10.0 * (-shadow_price_test * pbrule_test) - 100.0 * clip_amount_test
+        r2 = 0.1 * (-shadow_price_test * pbrule_test) - 1.0 * clip_amount_test
         # c2: SOC 越界项进入拉格朗日约束（原系数 1000/MWh，安全带 [1.5, 4.5]）
         soc_test = float(obs2[2])
         soc_dev_test = 0.0
@@ -382,7 +382,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             soc_dev_test = 1.5 - soc_test
         elif soc_test > 4.5:
             soc_dev_test = soc_test - 4.5
-        c2 = 1000.0 * soc_dev_test
+        c2 = 10.0 * soc_dev_test
 
         bi = step // 5
         pc = per_case[bi]

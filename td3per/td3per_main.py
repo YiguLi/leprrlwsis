@@ -17,8 +17,8 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
       只把"信号 / 追踪目标"换成 SOC 目标:
       - 观测 (5 维蒸馏) = [pbrulemin/10, pbrulemax/10, **soc_target/10**, SOC/10, u/10]
         (第 3 维原为 shadow_price);
-      - r2 = −100 · clip_amount            (原影子套利项随信号语义一起删除);
-      - c2 = 1000 · slack,  slack = max(0, |target−SOC'| − |target−SOC_best|),
+      - r2 = −1·clip_amount            (原影子套利项随信号语义一起删除);
+      - c2 = 10·slack,  slack = max(0, |target−SOC'| − |target−SOC_best|),
         SOC_best = SOC + g·clip(δ/g, RBB 窗口)  ← 规则 SocTracker 的动作;
         只罚"本步能做到却没做"的部分 —— 块首够不着的目标跳变不计费, 零成本动作
         恰好是规则下层 (见 td3per_myfunc.soc_track_slack);
@@ -30,8 +30,8 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
 H: r1 = pr·P_G·dt − 490·max(−pbrule,0)·dt − penalty_NN_H          (P_G = ptur − pbrule)
     c1 = 1.0·[10·(P_F−3)⁺ + 0.1·P_F] + 10·unfeasible_gap
          + [块末] 10·max(0, |soc_target − SOC_末| − 0.1)
-L: r2 = −100·clip_amount
-    c2 = 1000·slack,  slack = max(0, |target−SOC'| − |target−SOC_best|)
+L: r2 = −1·clip_amount
+    c2 = 10·slack,  slack = max(0, |target−SOC'| − |target−SOC_best|)
          SOC_best = SOC + g·clip(δ/g, RBB窗口)   (能力内追踪失败量; 见 myfunc)
 
 对偶上升 (两层都是 EMA 实际块成本)
@@ -172,13 +172,13 @@ def train(num_iterations_H,
     d_block_H = _h['d_block'] if _h else 50.0        # 初值: 每块 sum_c1 预算 (先松后紧; 与 td3perrb 一致)
     d_block_H_min = _h['d_block_min'] if _h else 5.0     # 地板: 10·max(0,|δ|−0.1) ≤ 5 → 含死区总 |δ| ≤ 0.6
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    #   sum_c2 = 1000·slack 的块内累计, slack = "能力内追踪失败量" (见 myfunc)
+    #   sum_c2 = 10·slack 的块内累计, slack = "能力内追踪失败量" (见 myfunc)
     #   * 尽力追的 L: sum_c2 ≡ 0;  完全不动而 |δ|≥A: 每步 ~50, 每块 ~250;
     #     最坏 (反向满功率): 每步 ≤ 340。
     #   * 于是 d_block_L = 20 现读作"允许每块浪费 ≈0.02 MWh 的可达量 (≈0.4 步能力)",
     #     地板 2.5 为"≈0.05 步能力" —— 是一个**可满足**的约束, lam2 不再必然贴顶。
-    d_block_L = 20.0        # 初值: 每块 sum_c2 预算
-    d_block_L_min = 2.5     # curriculum 收紧地板
+    d_block_L = 0.2        # 初值: 每块 sum_c2 预算
+    d_block_L_min = 0.025     # curriculum 收紧地板
     if use_csv:
         # 增量落盘: 只把新增行追加进 CSV
         df_rows = []
@@ -344,8 +344,8 @@ def train(num_iterations_H,
 
         # ================================================================
         # 下层 L 奖励/成本 (SOC 目标追踪口径)
-        #   r2 = −100·clip_amount                 (RBB 硬裁剪量)
-        #   c2 = 1000·slack, slack = max(0, |target−SOC'| − |target−SOC_best|)
+        #   r2 = −1·clip_amount                 (RBB 硬裁剪量)
+        #   c2 = 10·slack, slack = max(0, |target−SOC'| − |target−SOC_best|)
         #        SOC_best = SOC + g·clip(δ/g, 窗口) —— 规则 SocTracker 的动作;
         #        只罚"本步能做到却没做"的部分 (块首够不着的跳变不计费)
         # ================================================================
@@ -1043,19 +1043,19 @@ if __name__ == "__main__":
 
     # 下层 L: 保留 td3per 自己的 RL BESS 操作
     #   * 观测 5 维蒸馏 = [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
-    #   * r2 = −100·clip_amount
-    #   * c2 = 1000·slack (能力内追踪失败量: 只罚"本步能做到却没做"的部分,
+    #   * r2 = −1·clip_amount
+    #   * c2 = 10·slack (能力内追踪失败量: 只罚"本步能做到却没做"的部分,
     #        零成本动作 = 规则 SocTracker 的 clip(δ/g, 窗口); 见 myfunc.soc_track_slack)
     #   * lam2 ∈ [10, 500] 初始 10.0; 每块 10 次更新; 步级折扣 --l_discount
     agent_L = SP_TD3(nb_states=5, nb_actions=1, args=args,
                      lam_max=500.0, lam_min=10.0,
-                     ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
+                     ema_lam=True, ema_alpha=0.02, ema_lam_lr=1.0,
                      policy_delay=args.l_policy_delay,
                      policy_noise=args.l_policy_noise,
                      noise_clip=args.noise_clip,
                      cost_critic_mode=args.cost_critic_mode)
     agent_L.lam = 10.0
-    agent_L.cost_limit = 10.0  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
+    agent_L.cost_limit = 0.1  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
 
     agent_L.discount = args.l_discount          # L 步级折扣 (与 H 的块级折扣解耦)
@@ -1065,8 +1065,8 @@ if __name__ == "__main__":
              '探索衰减: L 每 {} 次决策 / H 每 {} 次决策'.format(
                  args.l_policy_delay, args.l_policy_noise, args.policy_delay, args.policy_noise,
                  agent_L.discount, agent_H.discount, args.l_epsilon, args.epsilon))
-    prCyan('下层奖励/成本口径: r2 = -100·clip_amount; '
-           'c2 = 1000·slack, slack = max(0, |target-SOC\'| - |target-SOC_best|), '
+    prCyan('下层奖励/成本口径: r2 = -1·clip_amount; '
+           'c2 = 10·slack, slack = max(0, |target-SOC\'| - |target-SOC_best|), '
            'SOC_best = SOC + g·clip(δ/g, RBB窗口) (能力内追踪失败量); '
            'L 观测第 3 维 = soc_target/10 (原 shadow_price)')
     #TODO 是否预训练

@@ -44,8 +44,8 @@ Upper (H) c1 (风险侧):
 Wind boundaries: 动态 (main 按 --seg 定起点, LLM 每 7200 步在 原设定±1 m/s 内调整)
 
 Lower (L):
-  r2 = -100.0 * clip_amount      (取消影子套利项: signal 不再是价格, L 由 c2 跟踪驱动)
-  c2 = 10.0 * (SOC_new − soc_target)²   (目标中心二次势, ×10 惩罚系数;
+  r2 = -1.0 * clip_amount        (取消影子套利项: signal 不再是价格, L 由 c2 跟踪驱动; 全库口径 ÷100)
+  c2 = 0.1 * (SOC_new − soc_target)²    (目标中心二次势, ×0.1 惩罚系数; 全库 ÷100
        沿革: 固定中心 3 线性 dev 700→60→100 → 固定中心 100·(SOC−3)² → 目标中心 10·(SOC−target)²)
 """
 
@@ -326,9 +326,9 @@ def signal_to_soc_target(signal):
 
 # c2 系数 (目标中心二次势): c2 = C2_SOC_COEFF * (SOC_new − soc_target)²。
 # 沿革: 线性 dev 700 → 60 → 100 → 固定中心二次势 100·(SOC−3)² → 本轮改目标中心 + ×10
-#   (C2_SOC_COEFF = 10, 中心 = H 给定的 SOC 目标; d_block_L 同步 400 → 40 = 10·2²,
+#   (C2_SOC_COEFF = 0.1, 中心 = H 给定的 SOC 目标; d_block_L 同步 4 → 0.4 = 0.1·2²,
 #    lam2 上下限/初值不变): L 层按 ×10 计费跟踪 H 的目标偏差。
-C2_SOC_COEFF = 10.0
+C2_SOC_COEFF = 0.1
 
 # H 层块末结算的 SOC 跟踪惩罚系数:
 #   c1_soc_track = C1_SOC_TRACK * |soc_target − SOC_块末|  (MWh 线性计费)
@@ -409,7 +409,8 @@ def relabel_c2_substep(u, SOC_new, soc_target=None):
 # 6. Combined Reward Function (forward computation during data collection)
 # =============================================================================
 
-# L 层 pbrule 裁剪惩罚系数 (r2): r2 = -min(L_CLIP_PEN_COEF*(clip_amount + l_clip_over),
+# L 层 pbrule 裁剪惩罚系数 (r2; 全库下层口径 ÷100 后 L_CLIP_PEN_COEF=1, _TOTAL_CAP=10):
+#   r2 = -min(L_CLIP_PEN_COEF*(clip_amount + l_clip_over),
 #                                          L_CLIP_PEN_TOTAL_CAP)
 #   两项同系数、合成同一个惩罚项:
 #   - clip_amount = |pb_original − pbrule|: 送进 RBB 的动作被【可行窗口】夹掉的量;
@@ -418,7 +419,7 @@ def relabel_c2_substep(u, SOC_new, soc_target=None):
 #   动机: 只惩罚窗口裁剪时, 原始意图一旦超过 ±10, 回报在动作维度上是平的
 #   (clip_amount 与 raw 无关) → ∂Q/∂a ≡ 0, 策略无法被拉回区间内 (run165 曾出现
 #   |raw|≈900 MW 而 clip=10 的死区)。加上 l_clip_over 后该方向重新有斜率。
-L_CLIP_PEN_COEF = 100.0
+L_CLIP_PEN_COEF = 1.0
 
 # 裁剪惩罚【总上限】(RMB/step, 与 r2 同刻度) —— 对 (clip_amount + clip_over) 合计封顶,
 # 等价于"总裁剪量 ≤ 10 MW"。动机与 H 层 PENALTY_NN_H_CAP 相同 (见 b50d1bc):
@@ -427,7 +428,7 @@ L_CLIP_PEN_COEF = 100.0
 # 取值权衡: 正常运行时 clip 仅 0.02~0.08 MW (罚 2~8 RMB, 远低于上限, 不受影响);
 #   上限只在病态饱和区截断, 而"拉回 ±10 以内"所需的斜率在 0~10 MW 区间已完整保留
 #   (100 RMB/MW)。改这一个常数即可调松紧 (1000 ⇔ 10 MW)。
-L_CLIP_PEN_TOTAL_CAP = 1000.0
+L_CLIP_PEN_TOTAL_CAP = 10.0
 
 
 def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
@@ -439,11 +440,11 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     Upper c1 = 1.0*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap  (【本轮变更】C1_RISK 分段系数已去掉)
              （H 的 SOC 跟踪惩罚 c1_soc_track 在块末结算, 见 soc_track_penalty,
                不在此逐步入账）
-    Lower r2 = -min(100*(clip_amount + l_clip_over), L_CLIP_PEN_TOTAL_CAP)
+    Lower r2 = -min(1*(clip_amount + l_clip_over), L_CLIP_PEN_TOTAL_CAP)
              (clip_amount = 窗口裁剪量; l_clip_over = 超越执行器 ±10 的原始意图量;
-              两项合计封顶 L_CLIP_PEN_TOTAL_CAP=1000 RMB/step ⇔ 合计 ≤10 MW;
+              两项合计封顶 L_CLIP_PEN_TOTAL_CAP=10 RMB/step ⇔ 合计 ≤10 MW;
               信号已改为 SOC 目标, 不再有影子套利项)
-    Lower c2 = 10*(SOC_new − soc_target)²   (目标中心二次势, ×10 惩罚系数)
+    Lower c2 = 0.1*(SOC_new − soc_target)² (目标中心二次势, ×0.1 惩罚系数)
 
     Parameters
     ----------
@@ -459,7 +460,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     l_clip_over  : float, L 层原始意图被执行器上限 (±charge, ±10 MW) 夹掉的量
                    (MW, ≥0): l_clip_over = |original_action_L| − |applied_action_L|.
                    与 clip_amount 同系数计入 r2, 两者【合计】受
-                   L_CLIP_PEN_TOTAL_CAP (=1000 RMB/step) 封顶 (见 L_CLIP_PEN_COEF)。
+                   L_CLIP_PEN_TOTAL_CAP (=10 RMB/step) 封顶 (见 L_CLIP_PEN_COEF)。
 
     Returns
     -------
@@ -649,7 +650,7 @@ def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
 
     与 TD3PER/TD3PRRBB 同步的五维蒸馏观测: 当前可行域 (RBB, 与 pb 无关) +
     H 的 SOC 目标 (第 3 维, 下游映射后与 SOC 同刻度, 便于网络直接比较"目标 vs 自身")
-    + 自身 SOC + 风速。c2 = 10·(SOC−soc_target)² 为上层给定目标下的二次势;
+    + 自身 SOC + 风速。c2 = 0.1·(SOC−soc_target)² 为上层给定目标下的二次势;
     u 仍保留在观测中, 供可行域/其它风速相关逻辑使用。
     """
     soc_target = signal_to_soc_target(applied_action_H[-1])

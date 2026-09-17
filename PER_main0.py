@@ -63,8 +63,8 @@ def train(num_iterations_H,
     d_block_H = _h['d_block'] if _h else 1.2         # 初值: 每块 sum_c1 预算 (与 PRRBB H 同量级)
     d_block_H_min = _h['d_block_min'] if _h else 0.3     # curriculum 收紧地板
     # B1: L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    d_block_L = 20.0        # 初值: 每块 sum_c2 预算 (≈每步 4, 按 c2 系数 1000 标定)
-    d_block_L_min = 2.5     # curriculum 收紧地板 (≈每步 0.5)
+    d_block_L = 0.2        # 初值: 每块 sum_c2 预算 (≈每步 0.04, 按 c2 系数 10 标定)
+    d_block_L_min = 0.025     # curriculum 收紧地板 (≈每步 0.005)
     if use_csv:
         df = pd.DataFrame()
         df_episode = pd.DataFrame()
@@ -198,7 +198,7 @@ def train(num_iterations_H,
         is_infeasible = rbb_info['is_infeasible']
         inevitable_violation = rbb_info['inevitable_violation']
 
-        # r2: 影子套利利润 - 100*clip_amount（pbrule 裁剪惩罚进入 r2）
+        # r2: 影子套利利润 - 1*clip_amount（pbrule 裁剪惩罚进入 r2）
         # signal(影子价格) * 2 映射到(-1, 1), 再乘以 -pbrule 得利润
         shadow_price = signal * 2  # (-0.5,0.5) → (-1,1)
         # TODO: 对比试验 —— 暂时禁用影子电价奖励项
@@ -208,10 +208,10 @@ def train(num_iterations_H,
         else:
             shadow_profit = 0.0
 
-        r2 = 10.0 * shadow_profit - 100.0 * clip_amount
+        r2 = 0.1 * shadow_profit - 1.0 * clip_amount
 
-        # c2: SOC 越界项进入拉格朗日约束（保留原系数 1000/MWh）
-        c2 = 1000.0 * soc_deviation
+        # c2: SOC 越界项进入拉格朗日约束（系数 10/MWh = 原 1000 ÷100）
+        c2 = 10.0 * soc_deviation
         sum_c2 += c2  # B1: 累计块成本 (每 5 步归零)
 
         # prGreen('r2 = {}'.format(round(r2, 3)))
@@ -687,11 +687,11 @@ if __name__ == "__main__":
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     # B1: L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
-    #     lam2 ∈ [10, 500]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
+    #     lam2 ∈ [10, 500]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=1.0  (c2 口径 ÷100 后同步 ×100)
     agent_L = SP_DDPG(nb_states = 5, nb_actions = 1, args = args,
                       lam_max=500.0, lam_min=10.0,
-                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01)
-    agent_L.cost_limit = 10.0  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
+                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=1.0)
+    agent_L.cost_limit = 0.1  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
 
     #TODO 是否预训练

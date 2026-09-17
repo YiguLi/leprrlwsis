@@ -27,9 +27,9 @@ Upper (H) c1（风险侧）:
     W_GAP = 50.0  (平抑可行性缺口 unfeasible_gap 的直接代价, 单位 MW)
 
 Lower (L):
-  r2 = 10.0 * shadow_profit - 100.0 * clip_amount
+  r2 = 0.1 * shadow_profit - 1.0 * clip_amount
     shadow_profit = -shadow_price * pbrule  (影子电价引导套利)
-  c2 = 700.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束, 保留原系数)
+  c2 = 7.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束; 全库下层口径 ÷100)
 """
 
 import numpy as np
@@ -266,8 +266,8 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     Upper r1 = wT*pr*ptur*dt + wB*(-pr*pbrule*dt) - 退化 - penalty_NN_H
              （wT = wT_u×wT_p; wB ≡ 1.0 —— 【本轮变更】BESS 分段系数已去掉）
     Upper c1 = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
-    Lower r2 = 10*shadow_profit - 100*clip_amount
-    Lower c2 = 700*soc_deviation
+    Lower r2 = 0.1*shadow_profit - 1*clip_amount
+    Lower c2 = 7*soc_deviation
 
     Parameters
     ----------
@@ -324,12 +324,12 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样)
 
     # ==== Lower Level (L) ====
-    # r2: 影子套利利润 - 100*clip_amount (纯信号跟随, 无真实利润项)
+    # r2: 影子套利利润 - 1*clip_amount (纯信号跟随, 无真实利润项)
     # c2: SOC 越界项进入拉格朗日约束（保留原系数 700/MWh）
     shadow_profit = -shadow_price * pbrule
     soc_dev = Cal_soc_deviation(SOC_new, wind_level)
-    r2 = 10.0 * shadow_profit - 100.0 * clip_amount
-    c2 = 700.0 * soc_dev
+    r2 = 0.1 * shadow_profit - 1.0 * clip_amount
+    c2 = 7.0 * soc_dev
 
     # ==== Details ====
     turbine_profit = w_wind * pr_old * ptur * time

@@ -21,8 +21,8 @@ Reward structure (td3prrbb_myfunc.Cal_Rew_PRRBB):
                   - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                   wT = wT_u(u)×wT_p(pr), wB ≡ 1.0 (【本轮变更】BESS 分段系数已去掉)
              c1 = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + 50*unfeasible_gap
-  Lower (L): r2 = 10*shadow_profit - 100*clip_amount
-             c2 = 700*soc_deviation   (wind-segmented SOC 安全带)
+  Lower (L): r2 = 0.1*shadow_profit - 1*clip_amount
+             c2 = 7*soc_deviation   (wind-segmented SOC 安全带)
 
 Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
@@ -105,9 +105,9 @@ def train(num_iterations_H,
     d_block_H = _h['d_block'] if _h else 1.2         # 初值: 每块 sum_c1 预算
     d_block_H_min = _h['d_block_min'] if _h else 0.3     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    # PRRBB 标定: c2 = 700*soc_deviation
-    d_block_L = 14.0        # 初值: 每块 sum_c2 预算
-    d_block_L_min = 1.75    # curriculum 收紧地板
+    # PRRBB 标定: c2 = 7*soc_deviation
+    d_block_L = 0.14        # 初值: 每块 sum_c2 预算
+    d_block_L_min = 0.0175    # curriculum 收紧地板
     if use_csv:
         df = pd.DataFrame()
         df_episode = pd.DataFrame()
@@ -818,18 +818,18 @@ if __name__ == "__main__":
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
-    #     lam2 ∈ [10, 500]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=0.01
+    #     lam2 ∈ [10, 500]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=1.0  (c2 口径 ÷100 后同步 ×100)
     #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
     # L 层(步骤A): policy_delay/--policy_noise 独立于 H —— 放松到 delay=1+noise≈0 时节奏接近 DDPG
     # (twin critic 与 EMA 对偶仍保留, 仅去掉延迟更新与 target smoothing 对窄可行窗的抹平)
     agent_L = SP_TD3(nb_states = 5, nb_actions = 1, args = args,
                      lam_max=500.0, lam_min=10.0,
-                     ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
+                     ema_lam=True, ema_alpha=0.02, ema_lam_lr=1.0,
                      policy_delay=args.l_policy_delay,
                      policy_noise=args.l_policy_noise,
                      noise_clip=args.noise_clip,
                      cost_critic_mode=args.cost_critic_mode)
-    agent_L.cost_limit = 10.0  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
+    agent_L.cost_limit = 0.1  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
 
     prYellow('L 层(BESS)策略超参: policy_delay={}, policy_noise={} (H 层 TD3: delay={}, noise={})'.format(
