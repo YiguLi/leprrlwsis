@@ -6,7 +6,7 @@ TD3 (Twin Delayed Deep Deterministic Policy Gradient) 结合 PER 与拉格朗日
 原设计 (上层 H 学风机桨距 + 1 个信号, 下层 L 学 BESS 功率 pb)。
 
 本轮"td3perrb 化"改造 (2026, 原地修改 td3per):
-  * 上层 H 与 td3perrb 完全一致 —— 非分段奖励 (收益权重恒 1.0, c1 小额波动系数恒 0.5,
+  * 上层 H 与 td3perrb 完全一致 —— 非分段奖励 (收益权重/c1 风险系数恒 1.0,
     W_GAP=10), 第 6 维动作语义由"影子电价"改为 **SOC 目标信号**
     (a6 → soc_target = 3 + 5·a6 ∈ [0.5, 5.5], 块级固定), 块末 SOC 目标
     可行性罚进入 c1, H 观测 = 4 维基础 + 24h 相位特征, lam1 ∈ [3,100]。

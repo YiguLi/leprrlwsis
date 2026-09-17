@@ -252,7 +252,7 @@ class SP_TD3(object):
 
         min_p_next = self._pair_min(q_p1_next, q_p2_next)
         # cost aggregate: max (safe, avoid underestimation) or min (TD3 paper).
-        # clamp(min=0): costs are non-negative by construction (c1 = c + c1_small*P_F,
+        # clamp(min=0): costs are non-negative by construction (c1 = c+0.1*P_F,
         # c2 = 1000*slack >= 0), so a negative cost bootstrap target is
         # impossible and only corrupts the Lagrangian — clamp enforces it.
         min_c_next = self._aggregate_pair(q_c1_next, q_c2_next).clamp(min=0.0)

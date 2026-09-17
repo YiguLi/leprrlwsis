@@ -17,8 +17,8 @@ TD3PERRB — TD3 + PER + 规则下层 (Rule-Based BESS)
 | 项 | td3prrlrb (分段) | td3perrb (非分段) |
 |---|---|---|
 | 风机收益权重 `wT` | `WT_WIND[u] × WT_PRICE[pr]` | `W_TURBINE = 1.0` |
-| BESS 收益权重 `wB` | `W_BESS = 1.0` (分段系数已取消) | `W_BESS = 1.0` |
-| c1 小额波动系数 | `C1_SMALL_FLUC[wind] ∈ {0.1, 0.2, 0.5}` | `C1_SMALL_FLUC_COEF = 0.5` |
+| BESS 收益权重 `wB` | `WB_PRICE[pr] × wB_soc(SOC, wind)` | `W_BESS = 1.0` |
+| c1 风险系数 | `C1_RISK[wind] ∈ {0.8, 1.0, 1.2}` | `C1_RISK_COEF = 1.0` |
 | SOC 安全带 (仅日志) | 按风况分档 | 单一档 `[1.5, 4.5]` |
 
 其余一切 (下层规则、超参、观测、对偶 EMA、课程学习、记录列) 与 td3prrlrb 逐字一致。

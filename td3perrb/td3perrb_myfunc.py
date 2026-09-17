@@ -1,11 +1,9 @@
 """
 TD3PERRB — Non-Segmented Reward + Rule-Based BESS
 ====================================================
-与 TD3PRRLRB 的差异 (本轮更新后):
-  ① 收益权重: TD3PRRLRB 用 wT = wT_u(u)×wT_p(pr), 本方法恒 1.0;
-  ② c1 小额波动系数: TD3PRRLRB 按风险区分段 {LOW 0.1, MEDIUM 0.2, HIGH 0.5},
-     本方法 (非分段) 恒 0.5;
-  其余 (wB ≡ 1.0、越限项系数 10、W_GAP、块末 gap 罚) 两者完全相同。详见第 2 节。
+与 TD3PRRLRB 的差异: 不使用分段奖励函数 —— 收益权重与 c1 风险系数全部取固定 1.0。
+【更新】TD3PRRLRB 现已取消 wB 与 C1_RISK 的分段系数 (均恒 1.0), 故两者如今
+【只剩 wT = wT_u(u)×wT_p(pr) 一项不同】(TD3PRRLRB 保留 wT 分段)。详见第 2 节。
 
 Upper layer (H, RL):
   r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
@@ -13,7 +11,7 @@ Upper layer (H, RL):
        - penalty_NN_H
        wT = W_TURBINE = 1.0,  wB = W_BESS = 1.0    (非分段: 无档位加权)
 
-  c1 = 10*(P_F-3)+ + C1_SMALL_FLUC_COEF * P_F          (越限 + 小额波动系数恒 0.5)
+  c1 = C1_RISK_COEF * [ 10*(P_F-3)+ + 0.1*P_F ]        (波动越限 + 平滑)
        + W_GAP * unfeasible_gap                       (平抑可行性缺口)
        + [块末结算] gap_penalty                        (SOC 目标可行性罚)
 
@@ -79,18 +77,19 @@ def get_wind_level(u):
 # 非分段权重 —— TD3PERRB 与 TD3PRRLRB 的【唯一差异】
 # -----------------------------------------------------------------------------
 # TD3PRRLRB 使用【分段奖励函数】: 风机收益权重 wT = wT_u(风况档) × wT_p(电价档)。
-# 本方法 (非分段) 与 TD3PRRLRB (分段) 现在只差两处: wT 与 c1 小额波动系数。
+# 【更新】TD3PRRLRB 已取消 BESS 收益权重 wB 与 c1 风险系数的分段 (现均为 1.0),
+# 因此两者现在【只差 wT 一项】; 下文关于 wB/C1_RISK 的分段描述保留为历史口径。
 # TD3PERRB **不移植任何分段系数**, 三者全部固定为 1.0 ⇒ 回到非分段(连续)口径:
 #     r1 = 1.0*(pr*ptur*time) + 1.0*(-pr*pbrule*time)
 #          - 490*max(-pbrule,0)*time - penalty_NN_H
 #        = pr*P_G*time - 490*max(-pbrule,0)*time - penalty_NN_H  (P_G = ptur - pbrule)
-#     c1 = 10*(P_F-3)+ + 0.5*P_F + W_GAP*unfeasible_gap + [块末] gap_penalty
+#     c1 = 1.0*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap + [块末] gap_penalty
 # 风况/电价档位标签仍然计算, 但只作为日志与 CSV 的诊断列, 不进入任何系数。
 W_TURBINE = 1.0      # wT: 非分段 ⇒ 恒为 1.0 (不做 风况×电价 加权)
 W_BESS = 1.0         # wB: 非分段 ⇒ 恒为 1.0 (不做 电价加权 / SOC 贴边折减)
 
-# c1 小额波动系数: 非分段 ⇒ 单一系数 0.5 (不按风况分档)
-C1_SMALL_FLUC_COEF = 0.5   # 非分段 ⇒ c1 小额波动系数统一 0.5
+# c1 风险系数: 非分段 ⇒ 单一系数 (不按风况分档)
+C1_RISK_COEF = 1.0
 # unfeasible_gap（平抑可行性缺口, MW）进入 c1 的系数
 W_GAP = 10.0
 
@@ -236,12 +235,11 @@ def Cal_Rew_RB(observation, observation2, action_rbb, rbb_info,
                       wind_level, price_level, SOC=SOC_decision, time=time)
 
     # ==== c1 (H 风险侧) ====
-    # 非分段 ⇒ 小额波动系数取统一定值 0.5 (越限项系数恒 10)
-    c1_small = C1_SMALL_FLUC_COEF
+    c1_risk_coeff = C1_RISK_COEF   # 非分段 ⇒ 恒为 1.0 (不做风况分档)
     if P_F > 3.0 + 1e-4:
-        c1 = 10.0 * (P_F - 3.0) + c1_small * P_F
+        c1 = c1_risk_coeff * (10.0 * (P_F - 3.0) + 0.1 * P_F)
     else:
-        c1 = c1_small * P_F
+        c1 = c1_risk_coeff * (0.1 * P_F)
     c1 = c1 + W_GAP * unfeasible_gap
 
     # ==== details ====

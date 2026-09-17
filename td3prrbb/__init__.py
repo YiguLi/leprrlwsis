@@ -11,8 +11,8 @@ with PRRBB's Wind × Price Segmented Reward structure.
   with importance sampling, and EMA dual ascent on actual per-block
   cost.
 - Reward layer (from prrbb): Cal_Rew_PRRBB — 机会/风险分离的分段奖励:
-  H 层 r1: wT=wT_u(u)×wT_p(pr) 分段加权风机收益, wB ≡ 1.0 (不分段);
-  c1 的小额波动系数按风险区分段 (LOW=0.1 / MEDIUM=0.2 / HIGH=0.5)
+  H 层 r1 用 wT/wB 分段收益权重分解风机/BESS 收益 (wT=wT_u(u)×wT_p(pr),
+  wB=wB_p(pr)×wB_soc(SOC,wind)), c1 用 r_u(u) 风险系数
   + W_GAP*unfeasible_gap 编码波动/平抑可行性风险;
   L 层 r2 = 10*shadow_profit - 100*clip_amount,
   c2 = 700*soc_deviation (wind-segmented SOC 安全带).

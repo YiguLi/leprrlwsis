@@ -27,7 +27,7 @@ Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
                    【本轮变更】取消"按 SOC 位置折减 BESS 盈利 ×0.7"的机制,
                    WB_SOC_OUTSIDE 0.7 → 1.0, SOC 位置不再影响 H 的收益权重;
                    与 td3prrbb 的差异仅在于此)
-             c1 = 10*max(P_F-3,0) + C1_SMALL_FLUC[档]*P_F + W_GAP*unfeasible_gap
+             c1 = 1.0*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
                   + 块末结算项 c1_soc_track = 10*|soc_target − SOC_块末|
   Lower (L): r2 = -min(100*(clip_amount + clip_over), 1000)
              (clip_amount = 送进 RBB 的动作被可行窗口夹掉的量;
@@ -136,7 +136,7 @@ def train(num_iterations_H,
     consecutive_satisfied_H = 0
     consecutive_satisfied_L = 0
     # H 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_H (与 sum_c1 同口径)
-    # td3prle 标定: c1 = 10*max(P_F-3,0) + C1_SMALL_FLUC[档]*P_F + W_GAP*unfeasible_gap
+    # PRLE 标定: c1 = c1_risk_coeff*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
     #            (HIGH 风速 ×1.2, LOW/MEDIUM ×0.8; W_GAP=10, td3prle 调参: 原 50 → 10)
     d_block_H = 12.0        # 初值: 每块 sum_c1 预算 (平滑系数曾 0.1→1.0 ×10 重标; 现已回调 0.1, 预算未随动)
     d_block_H_min = 3.0     # curriculum 收紧地板

@@ -18,7 +18,7 @@ TD3PRRLRB 的 LLM 增强版 —— 关系类比 td3prrbb → td3prle。
   EMA dual ascent on actual per-block cost, per-episode SOC random
   reset [0.5, 5.5].
 - Reward layer (from prle): Cal_Rew_RLRB with DYNAMIC wind thresholds
-  (WT_WIND and C1_SMALL_FLUC keyed by wind_level; wB ≡ 1.0, its
+  (WT_WIND and C1_RISK keyed by wind_level; wB keyed by price only, its
   SOC-edge discount cancelled),
   per-sub-step context accumulation, WindowStats + LLM threshold
   adjustment at --llm_window boundaries (default 7200 steps = 5 days),

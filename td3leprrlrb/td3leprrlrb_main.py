@@ -22,7 +22,7 @@ L (规则, SocTracker, 1 维动作 pb):
 奖励 / 成本
 -----------
 H: r1 = wT*(pr*ptur*dt) + wB*(-pr*pbrule*dt) - 490*max(-pbrule,0)*dt - penalty_NN_H
-    c1 = 10*max(P_F-3,0) + C1_SMALL_FLUC[wind]*P_F + 10*unfeasible_gap
+    c1 = 1.0*[10*(P_F-3)+ + 0.1*P_F] + 10*unfeasible_gap  (【本轮变更】分段系数已去掉)
          + [块末结算] 10*max(0, |soc_target - SOC_end| - SOC_TOL)
 
 对偶上升 (仅 H, EMA 实际块成本)
@@ -440,7 +440,7 @@ def train(num_iterations_H,
         # ================================================================
         # LEPRRLRB: 逐子步 relabel 上下文 (阈值变动后据此精确重算历史 r1/c1)
         #   与阈值无关的原料全部缓存: pr·ptur·dt / −pr·pbrule·dt / 退化 /
-        #   越界罚; 阈值相关的只有 wT 与 c1 小额波动系数。
+        #   越界罚; 阈值相关的只有分档权重与风险系数。
         #   SOC 也一并缓存: 当前 WB_SOC_OUTSIDE=1.0 下 wB 已不依赖它, 但保留该
         #   字段才能让"改回 0.7 折减"的回退路径 relabel 依然精确。
         #   gap_pen 在块末回填到本块最后一个子步 (见下方 episode_steps%5==4)。
