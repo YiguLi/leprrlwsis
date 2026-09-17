@@ -198,4 +198,33 @@ assert stats.n_total == 3 and stats.n_warmup == 2, stats.summary()
 assert stats.n_mismatch == 1 and abs(stats.max_abs_gap - 0.5) < 1e-12
 print(stats.summary())
 
+# ---------------------------------------------------------------- 5) 命令行开关
+print('--- 5) 命令行开关 ---')
+import argparse  # noqa: E402
+
+ap = argparse.ArgumentParser()
+hw.add_warmup_args(ap)
+d = ap.parse_args([])
+assert d.warmup_sched == 'fixed' and d.warmup_bess == 'rule'
+assert abs(d.warmup_soc_target - 3.0) < 1e-12
+assert (d.warmup_wt_start, d.warmup_wt_step, d.warmup_wt_lo, d.warmup_wt_hi) == \
+    (0.33, 0.05, 0.20, 0.45)
+r = ap.parse_args(['--warmup_sched', 'random', '--warmup_bess', 'random',
+                   '--warmup_soc_target', '2.5'])
+assert (r.warmup_sched, r.warmup_bess, r.warmup_soc_target) == ('random', 'random', 2.5)
+
+
+class _HStub:
+    nb_turbine, nb_actions = 5, 6
+
+
+ns = argparse.Namespace(**{**vars(d), 'seed': 3, 'rbb_rated_power': 10.0})
+sched_a, rule_a, stats_a = hw.build_from_args(ns, _HStub(), object())
+assert rule_a is not None and stats_a is not None and sched_a.action() is not None
+ns_r = argparse.Namespace(**{**vars(r), 'seed': 3, 'rbb_rated_power': 10.0})
+sched_b, rule_b, stats_b = hw.build_from_args(ns_r, _HStub(), object())
+assert rule_b is None and sched_b.action() is None          # random 对照臂
+assert hw.build_from_args(ns, _HStub(), None)[2] is None    # 无 L agent ⇒ 无填入统计
+print('--warmup_sched/--warmup_bess/--warmup_soc_target/--warmup_wt_* 默认与对照臂 ✓')
+
 print('TEST OK')
