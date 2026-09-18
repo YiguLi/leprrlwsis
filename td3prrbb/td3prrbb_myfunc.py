@@ -27,7 +27,7 @@ Upper (H) c1（风险侧）:
     W_GAP = 50.0  (平抑可行性缺口 unfeasible_gap 的直接代价, 单位 MW)
 
 Lower (L):
-  r2 = −1 · clip_amount              (RBB 硬裁剪量; 影子套利项随信号语义删除)
+  r2 = −1 · min(clip_amount, 20)              (命令与实际之差 (两段 clip 合计); 影子套利项随信号语义删除)
 
     a6 → soc_target = clip(3+5·a6, 0.5, 5.5)   (SOC 目标, 块级固定)
   c2 = 1 · trackerr [MW]             (两区间分治: Soctrack范围 ∩ 平抑窗口;
@@ -269,7 +269,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
              （wT = wT_u×wT_p; wB ≡ 1.0 —— 【本轮变更】BESS 分段系数已去掉）
     Upper c1 = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
                (legacy 原式; uniform 默认走 hc.c1_apply ⇒ P_F + 20*(P_F-3)+)
-    Lower r2 = −1·clip_amount [MW]  (SOC 目标语义; 影子套利项已删除)
+    Lower r2 = −1·min(clip_amount, 20) [MW]  (SOC 目标语义; 影子套利项已删除)
     Lower c2 = +1·trackerr    [MW]  参考集合 = Soctrack范围 ∩ 平抑窗口;
               空交集 ⇒ **无范围, 只有纯粹一个竭力值 r*** (顶到才不罚)
     (LEGACY 基线 Cal_r2_PER_baseline 另用 10·shadow_profit − 700·soc_deviation)
@@ -330,7 +330,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样)
 
     # ==== Lower Level (L) —— 两区间分治 (单一真源 hsrl_soctarget) ====
-    #   r2 = −1·clip_amount [MW]  越出平抑窗口的裁剪量
+    #   r2 = −1·min(clip_amount, 20) [MW]  命令与实际之差 (两段 clip 合计)
     #   c2 = +1·trackerr    [MW]  实际施加 pb 到"Soctrack范围 ∩ 平抑窗口"的距离
     #                             (空交集 ⇒ 无范围, 只有纯粹一个竭力值 r*: 顶到才不罚)
     n_rem = n_rem if n_rem is not None else rbb_info.get('n_rem')

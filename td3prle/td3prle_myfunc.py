@@ -44,7 +44,7 @@ Upper (H) c1 (风险侧):
 Wind boundaries: 动态 (main 按 --seg 定起点, LLM 每 7200 步在 原设定±1 m/s 内调整)
 
 Lower (L) —— 两区间分治 (单一真源 hsrl_soctarget):
-  r2 = -1 * clip_amount   [MW]   越出平抑窗口的裁剪量 (取消影子套利项: signal 不再是价格)
+  r2 = -1 * min(clip_amount, 20)   [MW]   两段 clip 合计: ±10 执行器 + 平抑窗口 (取消影子套利项: signal 不再是价格)
   c2 = +1 * trackerr      [MW]   实际施加 pb (由 SOC 变化反解) 到**参考集合**的距离
        参考集合 = Soctrack范围[δ/(g·n_rem), δ/g] ∩ 平抑窗口 [pbrulemin, pbrulemax]
          F ≠ ∅ ⇒ 区间 (L 可在「摊还端…一步填平端」间任选努力水平);
@@ -386,7 +386,7 @@ def Cal_soc_deviation(SOC, wind_level='MEDIUM'):
 # 6. Combined Reward Function (forward computation during data collection)
 # =============================================================================
 
-# L 层 r2 口径: r2 = −1·clip_amount [MW] (hst.lower_reward) —— 与 prle/td3per/td3prrbb 相同。
+# L 层 r2 口径: r2 = −1·min(clip_amount, 20) [MW] (hst.lower_reward) —— 与 prle/td3per/td3prrbb 相同。
 # 注: 原始意图被 CheckAction 夹到 ±charge(±10 MW) 之外的部分 (旧 l_clip_over) 不再单独计费,
 #     该方向在 r2 上无斜率 (与 prle 现状一致, 是"越窗白罚"的已知代价)。
 
@@ -401,7 +401,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     Upper c1 = 1.0*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap  (【本轮变更】C1_RISK 分段系数已去掉)
              （H 的 SOC 跟踪惩罚在块末结算, 见 soc_track_penalty, 不在此逐步入账;
                uniform 时进 r1, legacy 进 c1）
-    Lower r2 = −1*clip_amount  [MW]   (越出平抑窗口的裁剪量; 影子套利项已删除)
+    Lower r2 = −1*min(clip_amount, 20)  [MW]   (命令与实际之差 (两段 clip 合计); 影子套利项已删除)
     Lower c2 = +1*trackerr     [MW]   实际施加 pb 到参考集合(=Soctrack范围 ∩ 平抑窗口)的距离;
                空交集 ⇒ **不存在范围, 只有纯粹一个竭力值 r*** (顶到才不罚)
 
@@ -464,7 +464,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样) —— 置于 if/else 之外
 
     # ==== Lower Level (L) —— 两区间分治 (单一真源 hsrl_soctarget) ====
-    #   r2 = −1·clip_amount [MW]  越出平抑窗口的裁剪量
+    #   r2 = −1·min(clip_amount, 20) [MW]  命令与实际之差 (两段 clip 合计)
     #   c2 = +1·trackerr    [MW]  实际施加 pb 到"参考集合 = Soctrack范围 ∩ 平抑窗口"的距离
     #        F ≠ ∅ ⇒ 区间内任选努力水平; F = ∅ ⇒ 无范围, 只有纯粹一个竭力值 r* (顶到才不罚)
     n_rem = n_rem if n_rem is not None else rbb_info.get('n_rem')

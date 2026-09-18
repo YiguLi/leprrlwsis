@@ -251,7 +251,7 @@ PROJECTS = {
     'td3per': dict(
         # 上层 = td3perrb 口径 (非分段奖励 + SOC 目标信号 + 相位观测);
         # 下层 = td3per 自己的 RL BESS, 蒸馏 5 维第 3 维 = soc_target/10,
-        #        r2 = -1·clip_amount, c2 = +1·trackerr [MW] (到参考集合的距离; 口径见 hsrl_soctarget)
+        #        r2 = -1·min(clip_amount,20), c2 = +1·trackerr [MW] (到参考集合的距离; 口径见 hsrl_soctarget)
         label='TD3PER',
         agent=('td3per.td3per_ddpg', 'SP_TD3'),
         myfunc='td3per.td3per_myfunc',

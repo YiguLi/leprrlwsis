@@ -128,7 +128,7 @@ def test_one_episode(env, agent_H, agent_L, rbb_system,
     Each project uses its own training reward structure:
       - PER:    r1 = revenue - penalty_NN_H - 490·max(-pbrule,0)·time
                 c1 = 10·max(P_F−3, 0)
-                r2 = -1·clip_amount, c2 = +1·trackerr [MW]  (SOC 目标支; 见 hsrl_soctarget)
+                r2 = -1·min(clip_amount,20), c2 = +1·trackerr [MW]  (SOC 目标支; 见 hsrl_soctarget)
                 c2 = 10·soc_deviation
       - PRRBB:  Cal_Rew_PRRBB (segmented wind×price reward)
       - PRLE:   same as PRRBB

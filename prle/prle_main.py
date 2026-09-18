@@ -84,7 +84,7 @@ def train_prle(num_iterations_H,
                       - [块末] W_GAP*max(0, |soc_target − SOC_末| − SOC_TOL)  (uniform: 进 r1)
                  c1: uniform(默认 --c1-mode) = P_F + 20*(P_F-3)+  [MW·step]
                      legacy = C1_RISK*(10*max(0,P_F-3) + 0.1*P_F) + W_GAP(50)*unfeasible_gap
-      Lower (L, SOC 目标语义): r2 = −1·clip_amount [MW] (影子套利项已删除)
+      Lower (L, SOC 目标语义): r2 = −1·min(clip_amount, 20) [MW] (影子套利项已删除)
                  c2 = +1·trackerr [MW] = 实际施加 pb 到参考集合的距离
                       参考集合 = Soctrack范围 ∩ 平抑窗口（两区间分治, hsrl_soctarget）
                         F ≠ ∅ ⇒ 区间；F = ∅ ⇒ **无范围, 只有纯粹一个竭力值 r***
@@ -224,7 +224,11 @@ def train_prle(num_iterations_H,
         # ================================================================
         # RBB: Rule-Based BESS Clipping (hard clipping before env.step)
         # ================================================================
-        pb_original = float(action[-1])
+        # 交给 RBB 的是**命令值**（CheckAction 之前）—— 这样 clip_amount = |cmd − pbrule|
+        # 自动含两段 clip: ① CheckAction 的 ±10 夹裁 + ② 平抑窗口夹裁。
+        # 因窗口 ⊆ ±10, 传命令值与传夹后值给出的 pbrule 逐位相同 (见 test_l_lower_unit);
+        # 若改回传夹后值, |cmd|>10 时该方向梯度恒 0 (死区)。见 hsrl_soctarget.lower_reward。
+        pb_original = float(np.ravel(np.asarray(original_action_L, dtype=float))[0])
         ptur = float(pw_tru)
         pg_prev = float(observation[-1])
         E_current = float(observation[2])

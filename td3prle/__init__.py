@@ -16,7 +16,7 @@ with PRLE's dynamic wind×price segmented reward and LLM meta-controller.
   accumulation, WindowStats + LLM threshold adjustment at 1440-step
   boundaries, batch reward relabeling when thresholds change.
   **下层 L 口径与 prle 逐位一致**（单一真源 hsrl_soctarget）：
-  `a6 → soc_target = clip(3+5·a6, 0.5, 5.5)`、`r2 = −1·clip_amount [MW]`、
+  `a6 → soc_target = clip(3+5·a6, 0.5, 5.5)`、`r2 = −1·min(clip_amount, 20) [MW]`、
   `c2 = +1·trackerr [MW]`（实际施加 pb 到参考集合 = Soctrack范围 ∩ 平抑窗口 的距离；
   空交集 ⇒ **不存在范围，只有纯粹一个竭力值 r***，顶到才不罚）；
   块末追踪罚 `10·max(0, |target−SOC_末| − SOC_TOL)` 进 r1（uniform）/ c1（legacy）；

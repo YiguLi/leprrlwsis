@@ -25,7 +25,7 @@ HSRL warmup 期调度助手（多项目共享）
 
 3. `fill_bess_transition` —— BESS-RL 项目的**下层 transition 入池唯一入口**（"事后填入"）：
       * warmup 期下层动作由规则给，真实后果（r2/c2/下一观测）与该动作配对入池；
-      * 记录的 a_L 是**命令值**（与 r2 里 −100·clip_amount 的语义一致），并顺带核对
+      * 记录的 a_L 是**命令值**（与 r2 的 −1·min(|cmd − pbrule|, 20) 语义一致），并顺带核对
         `|a_L − 实际施加的 pbrule|` 是否等于 RBB 裁剪量（正常情况下应为 0）；
       * 计数由 `BessFillStats` 累积，供启动/收尾日志核对"确实填了 N 条"。
 
@@ -210,7 +210,7 @@ def fill_bess_transition(agent_L, s_L, a_L, r2, c2, s_L_next, done_L,
     Parameters
     ----------
     agent_L : 下层 agent（须有 observe_jump）
-    a_L     : 记入 buffer 的动作 —— 命令值（与 r2 中 −100·clip_amount 的口径一致）
+    a_L     : 记入 buffer 的动作 —— 命令值（与 r2 的 min(|cmd − pbrule|, 20) 口径一致）
     applied_pb : float or None
         该步**实际施加**的 BESS 功率（RBB 夹窗口后的 pbrule）；给出时核对
         |a_L − applied_pb| 是否为 0（非 0 仅应在"窗口不可行"的罕见步出现）并计数。

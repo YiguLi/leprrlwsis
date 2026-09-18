@@ -3,18 +3,21 @@
 """六个 RL-BESS 下层数值口径的不变量测试 —— 不需要 MATLAB。
 
 分两支：
-  * **SOC 目标支**（td3per / td3prrbb / prle）：口径集中在单一真源 `hsrl_soctarget.py`
-    （`r2 = −1·clip`、`c2 = +1·trackerr`、`d_block_L = 1.2`、地板 0.15、`cost_limit = 0.6`、
-    L 对偶 η2 = 1.0）。本文件只查"接线是否都指向真源"；
-    **三项目逐位等价**与目标映射/零成本动作性质见 `test_soctarget_uniform.py`。
-  * **其它支**（per / prrbb 影子电价、td3prle 目标中心二次势）：系数仍在各自项目里，
-    本文件按项目核对取值，并断言"÷100 后物理量守恒"：
-        d_block_L / c2系数 = 0.02 MWh（td3prle 为 4 MWh²）、η2 × c2系数 = 10 / 7 / 0.1。
+  * **SOC 目标支**（td3per / td3prrbb / prle / td3prle）：口径集中在单一真源 `hsrl_soctarget.py`
+    （`r2 = −1·min(clip_amount, 20)`、`c2 = +1·trackerr`、`d_block_L = 1.2`、地板 0.15、
+    `cost_limit = 0.6`、L 对偶 η2 = 0.16）。本文件只查"接线是否都指向真源 + 是否把
+    **命令值**交给 RBB（两段 clip 都计费）"；
+    **四项目逐位等价**与目标映射/零成本动作性质见 `test_soctarget_uniform.py`。
+  * **其它支**（per / prrbb 影子电价）：系数仍在各自项目里，本文件按项目核对取值，
+    并断言"÷100 后物理量守恒"：d_block_L / c2系数 = 0.02 MWh、η2 × c2系数 = 10 / 7。
   * 三处的 `Cal_r2_PER_baseline`（LEGACY 基线）系数**刻意保持 ÷100 之前的原值**。
 """
+import importlib
 import os
 import re
 import sys
+
+import numpy as np
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(_HERE)
@@ -70,6 +73,7 @@ import hsrl_soctarget as hst                                     # noqa: E402
 assert (hst.L_CLIP_COEF, hst.L_TRACK_COEF, hst.L_D_BLOCK,
         hst.L_D_BLOCK_MIN, hst.L_COST_LIMIT, hst.L_EMA_LAM_LR) == \
        (1.0, 1.0, 1.2, 0.15, 0.6, 0.16)
+assert hst.L_CLIP_CAP == 20.0               # r2 封顶 (实测窗内容量 ≤20 ⇒ 不截断真实值)
 _g = 0.98 * (1.0 / 60.0)
 assert abs(hst.L_D_BLOCK * _g - 0.02) < 2e-3          # 物理等价: 允许搁置 0.02 MWh/块
 assert abs(hst.L_EMA_LAM_LR / _g - 10.0) < 0.3        # 对偶物理步长与旧口径一致
@@ -88,6 +92,8 @@ for proj, (main_py, mf_py) in SOC_FAMILY.items():
     assert re.search(r'(?:hst\.)?gap_penalty\(', mt), (proj, '块末 gap 罚未接真源')
     assert re.search(r'sum_r1 -= (?:gap_pen|c1_soc_track)\b', mt), \
         (proj, 'uniform 下块末追踪罚未进 r1')
+    assert re.search(r'pb_original = float\(np\.ravel\(np\.asarray\(original_action_L', mt), \
+        (proj, '未把**命令值**交给 compute_pbrule ⇒ clip_amount 只含窗口那段 (|cmd|>10 死区)')
     d = num_or_ref(mt, r'(?m)^\s*d_block_L = hst\.L_D_BLOCK\b',
                    r'(?m)^\s*d_block_L = ([0-9.]+)', proj + ' d_block_L')
     f = num_or_ref(mt, r'(?m)^\s*d_block_L_min = hst\.L_D_BLOCK_MIN\b',
@@ -138,6 +144,65 @@ for proj, p in LEGACY.items():
     assert re.search(r'10\.0 \* shadow_profit - 700\.0 \* soc_dev', m.group(0)), \
         (proj, '基线被改动')
     print('  {:<9s} 仍为 10·shadow_profit − 700·soc_deviation (对照旧 PER 设计)'.format(proj))
+
+print('=' * 84)
+print('D. r2 计**两段 clip**: 传命令值不改 pbrule、clip_amount = 两段合计、病态饱和有封顶')
+print('=' * 84)
+assert hst.lower_reward(1e6) == -hst.L_CLIP_CAP                 # 封顶生效
+assert hst.lower_reward(hst.L_CLIP_CAP + 0.5, cap=float('inf')) == -(hst.L_CLIP_CAP + 0.5)
+# 四个项目各自的 RuleBasedBESS: rbb 版 (td3per) 与 prrbb 家族版 (其余三个, 三份逐字节相同)
+RBB = {
+    'td3per': 'rbb.rbb_rule_bess',
+    'td3prrbb': 'td3prrbb.td3prrbb_rule_bess',
+    'prle': 'prrbb.prrbb_rule_bess',
+    'td3prle': 'td3prle.td3prle_rule_bess',
+}
+rng = np.random.RandomState(11)
+mx_inv = mx_two = mx_gain = mx_lin = 0.0
+n_inv = n_two = n_over = n_deg = n_cap = 0
+for proj, mod in RBB.items():
+    RB = importlib.import_module(mod).RuleBasedBESS()
+    for _ in range(1000):
+        E = float(rng.uniform(0.0, 6.0))
+        ptur = float(rng.uniform(0.0, 60.0))
+        pg = float(rng.uniform(0.0, 60.0))
+        cmd = float(rng.uniform(-60.0, 60.0))
+        s = float(np.clip(cmd, -10.0, 10.0))
+        u_cmd, i_cmd = RB.compute_pbrule(pb_original=cmd, ptur=ptur, pg_prev=pg, E=E)
+        u_s, i_s = RB.compute_pbrule(pb_original=s, ptur=ptur, pg_prev=pg, E=E)
+        mx_inv = max(mx_inv, abs(u_cmd - u_s))
+        n_inv += 1
+        if abs(u_cmd) > 10.0 + 1e-9:            # SOC 越带的退化窗口 (实测真实 run 中 |pbrule|≤10)
+            n_deg += 1
+            continue
+        over = max(abs(cmd) - 10.0, 0.0)
+        mx_two = max(mx_two, abs(i_cmd['clip_amount'] - (i_s['clip_amount'] + over)))
+        n_two += 1
+        if over > 1e-9:
+            n_over += 1
+            # 死区消失: 越界后 r2 必须仍随 |cmd| 变负; 未触顶时恰好多扣 over (斜率 1)
+            r2_cmd = hst.lower_reward(i_cmd['clip_amount'])
+            r2_s = hst.lower_reward(i_s['clip_amount'])
+            assert r2_cmd <= r2_s + 1e-12, (proj, cmd, r2_cmd, r2_s)
+            exp = -(min(i_cmd['clip_amount'], hst.L_CLIP_CAP)
+                    - min(i_s['clip_amount'], hst.L_CLIP_CAP))
+            mx_gain = max(mx_gain, abs((r2_cmd - r2_s) - exp))
+            if i_cmd['clip_amount'] <= hst.L_CLIP_CAP + 1e-12:
+                mx_lin = max(mx_lin, abs((r2_cmd - r2_s) + over))
+            else:
+                n_cap += 1
+    print('  {:<9s} 1000 组: 传命令值后 pbrule 不变 ✓  两段归因 ✓  越界样本 {} 组'
+          .format(proj, n_over))
+assert mx_inv < 1e-12, mx_inv
+assert mx_two < 1e-12, mx_two
+assert mx_gain < 1e-12, mx_gain
+assert mx_lin < 1e-12, mx_lin
+print('  {} 组: max|pbrule(cmd) − pbrule(clip(cmd,±10))| = {:.3e}（pbrule 与环境零变化）'
+      .format(n_inv, mx_inv))
+print('  {} 组 (|pbrule|≤10): max|clip_amount − (窗口段 + 越界段)| = {:.3e}；'
+      '越界 {} 组 r2 恰好多扣 |cmd|−10（斜率 1，无死区，偏差 {:.1e}），触顶 {} 组'
+      .format(n_two, mx_two, n_over, mx_lin, n_cap))
+print('  SOC 越带的退化窗口样本 {} 组已跳过 (|pbrule|>10, 真实 run 未见)'.format(n_deg))
 
 print('=' * 84)
 print('TEST OK')

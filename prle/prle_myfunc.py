@@ -26,7 +26,7 @@ Upper (H) c1（风险侧）:
     W_GAP = 50.0  (平抑可行性缺口 unfeasible_gap 的直接代价, 单位 MW)
 
 Lower (L):
-  r2 = −1 · clip_amount              (RBB 硬裁剪量; 影子套利项随信号语义删除)
+  r2 = −1 · min(clip_amount, 20)              (命令与实际之差 (两段 clip 合计); 影子套利项随信号语义删除)
   c2 = 1 · trackerr [MW]             (两区间分治, 见 hsrl_soctarget)
 
 Wind boundaries: dynamic (default LOW < 8.5 m/s, HIGH >= 12.0 m/s, 专家起点),
@@ -328,7 +328,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
                    penalty_NN_H=0.0, time=1.0 / 60, ptur=None, n_rem=None):
     """
     PRRBB reward: wind × price joint segmentation (upper);
-    lower r2 = −1·clip_amount [MW], c2 = +1·trackerr [MW] (两区间分治).
+    lower r2 = −1·min(clip_amount, 20) [MW], c2 = +1·trackerr [MW] (两区间分治).
 
     Parameters
     ----------
@@ -386,7 +386,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样)
 
     # ==== Lower Level (L) —— 两区间分治 (单一真源 hsrl_soctarget) ====
-    #   r2 = −1·clip_amount [MW]  越出平抑窗口的裁剪量
+    #   r2 = −1·min(clip_amount, 20) [MW]  命令与实际之差 (两段 clip 合计)
     #   c2 = +1·trackerr    [MW]  实际施加 pb 到"Soctrack范围 ∩ 平抑窗口"的距离
     #                             (空交集 ⇒ 无范围, 只有纯粹一个竭力值 r*: 顶到才不罚)
     n_rem = n_rem if n_rem is not None else rbb_info.get('n_rem')

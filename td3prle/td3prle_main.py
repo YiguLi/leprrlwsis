@@ -30,7 +30,7 @@ Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
              c1 = 1.0*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
                   + 块末结算项 c1_soc_track = 10*|soc_target − SOC_块末|
   Lower (L) —— 两区间分治, 单一真源 hsrl_soctarget (与 prle/td3per/td3prrbb 逐位同口径):
-             r2 = −1·clip_amount      [MW] 越出平抑窗口的裁剪量
+             r2 = −1·min(clip_amount, 20)      [MW] 命令与实际之差 (两段 clip 合计)
              c2 = +1·trackerr         [MW] 实际施加 pb 到"参考集合"的距离
                   参考集合 = Soctrack范围[δ/(g·n_rem), δ/g] ∩ 平抑窗口
                     F ≠ ∅ ⇒ **区间**（L 可在「摊还端…一步填平端」间任选努力水平）
@@ -181,7 +181,7 @@ def train(num_iterations_H,
     d_block_H_min = _h['d_block_min'] if _h else 3.0     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
     # 下层 SOC 目标口径 (单一真源 hsrl_soctarget, 与 prle/td3per/td3prrbb 同):
-    #     r2 = −1·clip_amount [MW]; c2 = +1·trackerr [MW] (实际施加 pb 到参考集合的距离)
+    #     r2 = −1·min(clip_amount, 20) [MW]; c2 = +1·trackerr [MW] (实际施加 pb 到参考集合的距离)
     d_block_L = hst.L_D_BLOCK        # 初值: 每块 sum_c2 预算 = 1.2 (⇔ 0.02 MWh/块)
     d_block_L_min = hst.L_D_BLOCK_MIN    # curriculum 收紧地板 = 0.15
     soc_tol_upper = float(getattr(args, "soc_tol", hc.SOC_TOL))   # 块末残差豁免
@@ -308,7 +308,11 @@ def train(num_iterations_H,
         # ================================================================
         # RBB: Rule-Based BESS Clipping (hard clipping before env.step)
         # ================================================================
-        pb_original = float(action[-1])
+        # 交给 RBB 的是**命令值**（CheckAction 之前）—— 这样 clip_amount = |cmd − pbrule|
+        # 自动含两段 clip: ① CheckAction 的 ±10 夹裁 + ② 平抑窗口夹裁。
+        # 因窗口 ⊆ ±10, 传命令值与传夹后值给出的 pbrule 逐位相同 (见 test_l_lower_unit);
+        # 若改回传夹后值, |cmd|>10 时该方向梯度恒 0 (死区)。见 hsrl_soctarget.lower_reward。
+        pb_original = float(np.ravel(np.asarray(original_action_L, dtype=float))[0])
 
         pbrule, rbb_info = rbb_system.compute_pbrule(
             pb_original=pb_original,

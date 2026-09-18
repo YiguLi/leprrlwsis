@@ -17,7 +17,7 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
       只把"信号 / 追踪目标"换成 SOC 目标:
       - 观测 (5 维蒸馏) = [pbrulemin/10, pbrulemax/10, **soc_target/10**, SOC/10, u/10]
         (第 3 维原为 shadow_price);
-      - r2 = −1·clip_amount            (原影子套利项随信号语义一起删除);
+      - r2 = −1·min(clip_amount, 20)            (原影子套利项随信号语义一起删除);
       - c2 = +1·trackerr [MW] (参考集合 = Soctrack范围 ∩ 平抑窗口),
         F ≠ ∅ ⇒ 该区间内任选努力水平; F = ∅ ⇒ **不存在范围, 只有纯粹一个竭力值 r***,
         顶到 r* 才不罚、两侧偏离都按 |pbrule − r*| 线性计费 (缺口由 r1 块末 gap 罚承接);
@@ -32,7 +32,7 @@ H: r1 = pr·P_G·dt − 490·max(−pbrule,0)·dt − penalty_NN_H          (P_G
     − [块末] W_GAP(10)·max(0, |soc_target − SOC_末| − SOC_TOL(0.1))   (uniform: 进 r1; legacy: 进 c1)
     c1: uniform(默认 --c1-mode) = P_F + 20·(P_F−3)⁺  [MW·step]       (hsrl_cost.fluct_cost)
         legacy = 1.0·[10·(P_F−3)⁺ + 0.1·P_F] + W_GAP(10)·unfeasible_gap
-L: r2 = −1·clip_amount   [MW] 越出平抑窗口的裁剪量
+L: r2 = −1·min(clip_amount, 20)   [MW] 命令与实际之差 (两段 clip 合计)
     c2 = +1·trackerr [MW] = 实际施加 pb（由 SOC 变化反解）到**参考集合**的距离
          参考集合 = Soctrack范围[δ/(g·n_rem), δ/g] ∩ 平抑窗口（两区间分治, hsrl_soctarget）
            F ≠ ∅ ⇒ 区间（L 可在「摊还端…一步填平端」间任选努力水平）
@@ -310,7 +310,11 @@ def train(num_iterations_H,
         # ================================================================
         # RBB: 规则可行窗口 + 硬裁剪 (安全性兜底, 不变)
         # ================================================================
-        pb_original = float(action[-1])
+        # 交给 RBB 的是**命令值**（CheckAction 之前）—— 这样 clip_amount = |cmd − pbrule|
+        # 自动含两段 clip: ① CheckAction 的 ±10 夹裁 + ② 平抑窗口夹裁。
+        # 因窗口 ⊆ ±10, 传命令值与传夹后值给出的 pbrule 逐位相同 (见 test_l_lower_unit);
+        # 若改回传夹后值, |cmd|>10 时该方向梯度恒 0 (死区)。见 hsrl_soctarget.lower_reward。
+        pb_original = float(np.ravel(np.asarray(original_action_L, dtype=float))[0])
 
         pbrule, rbb_info = rbb_system.compute_pbrule(
             pb_original=pb_original,
@@ -357,7 +361,7 @@ def train(num_iterations_H,
 
         # ================================================================
         # 下层 L 奖励/成本 (SOC 目标追踪口径)
-        #   r2 = −1·clip_amount                 (RBB 硬裁剪量)
+        #   r2 = −1·min(clip_amount, 20)                 (命令与实际之差 (两段 clip 合计))
         #   c2 = +1·trackerr [MW] = 实际施加 pb 到参考集合(=Soctrack范围∩平抑窗口)的距离
         #        SOC_best = SOC + g·clip(δ/g, 窗口) —— 规则 SocTracker 的动作;
         #        只罚"本步能做到却没做"的部分 (块首够不着的跳变不计费)
@@ -1057,7 +1061,7 @@ if __name__ == "__main__":
 
     # 下层 L: 保留 td3per 自己的 RL BESS 操作
     #   * 观测 5 维蒸馏 = [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
-    #   * r2 = −1·clip_amount
+    #   * r2 = −1·min(clip_amount, 20)
     #   * c2 = +1·trackerr [MW] (实际施加 pb 到参考集合的距离; 零成本动作 = 规则 SocTracker,
     #        F=∅ 时参考集合退化为单点竭力值 ⇒ 只有顶到它才不罚; 见 hsrl_soctarget)
     #   * lam2 ∈ [hst.L_LAM_MIN, hst.L_LAM_MAX] = [1, 20] 初值 1.0;
@@ -1080,7 +1084,7 @@ if __name__ == "__main__":
              '探索衰减: L 每 {} 次决策 / H 每 {} 次决策'.format(
                  args.l_policy_delay, args.l_policy_noise, args.policy_delay, args.policy_noise,
                  agent_L.discount, agent_H.discount, args.l_epsilon, args.epsilon))
-    prCyan('下层奖励/成本口径: r2 = -1·clip_amount; '
+    prCyan('下层奖励/成本口径: r2 = -1·min(clip_amount, 20) [两段 clip 合计]; '
            'c2 = +1·trackerr [MW] (dist(实际施加 pb, 参考集合=Soctrack范围∩平抑窗口)); '
            'F=∅ ⇒ 无范围, 只有纯粹一个竭力值 r* (顶到才不罚); '
            'L 观测第 3 维 = soc_target/10 (原 shadow_price)')

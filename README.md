@@ -101,7 +101,7 @@ PRRBB ──(加 LLM)──→ PRLE          TD3PRRBB ──(加 LLM)──→ T
   上层 6 维动作第 6 维语义由"影子电价"改为 **SOC 目标信号**（与 td3perrb 逐项一致：
   非分段奖励、块末 gap 罚、相位观测、逐维探索噪声、`lam1∈[0.967,4.833]`、每块 2 次更新）；
   下层仍是 TD3+PER 的 RL BESS，但信号与追踪目标同为 SOC 目标
-  （观测第 3 维 `soc_target/10`、`r2 = −1·clip_amount`、
+  （观测第 3 维 `soc_target/10`、`r2 = −1·min(clip_amount, 20)`、
   `c2 = +1·trackerr [MW]`（到**参考集合** = Soctrack范围 ∩ 平抑窗口 的距离）：
   `F ≠ ∅` 时零成本集合是该区间；`F = ∅` 时**不存在范围, 只有纯粹一个竭力值 `r*`**
   （窗口里离 Soctrack 范围最近的端点）, 顶到它才不罚；
@@ -596,7 +596,7 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 **下层口径**（集中在 `hsrl_soctarget.py`，四个 SOC 目标 + RL 下层的项目共用：`td3per` / `td3prrbb` / `prle` / `td3prle`）
 
 * `a6 → soc_target = clip(3 + 5·a6, 0.5, 5.5)`（块级 5 步固定）
-* `r2 = −1·clip_amount`（`clip_amount = |pb_cmd − pbrule|`；影子套利项随语义删除）
+* `r2 = −1·min(clip_amount, 20)`（`clip_amount = |pb_cmd − pbrule|` = **两段 clip 合计**：±10 执行器 + 平抑窗口；各 main 传命令值，r2 封顶 20 MW；影子套利项随语义删除）
 * 块末追踪偏好进 **r1**：`10·max(0, |soc_target − SOC_end| − 0.1)`（uniform；legacy 进 c1）
 * `c2 = +1·trackerr` [MW] —— **两区间分治**：Soctrack 范围 `[δ/(g·n_rem), δ/g]`（摊还端…一步填平端，
   `n_rem = 5 − step%5`）交平抑窗口 `[pbrulemin, pbrulemax]` 得参考集合；`trackerr` = 实际施加的
@@ -664,7 +664,7 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 
 **注（"事后填入"能做什么、不能做什么）**：BESS-RL 项目的 warmup 期 r2/c2 在这些奖励定义下
 **天然接近 0** —— SOC 目标支（`td3per`/`td3prrbb`/`prle`/`td3prle`）的零成本动作**就是**规则动作
-`clip(δ/g, 平抑窗口)`（参考集合由它定义 ⇒ `trackerr ≡ 0`），且 `r2 = −1·clip_amount ≡ 0`（规则动作不越窗）；
+`clip(δ/g, 平抑窗口)`（参考集合由它定义 ⇒ `trackerr ≡ 0`），且 `r2 = −1·min(clip_amount, 20) ≡ 0`（规则动作不越窗）；
 `per/prrbb`（影子电价支）的 `r2 = 0.1·shadow_profit − 1·clip_amount` 而影子价恒 0（`shadow_profit ≡ 0`）。
 所以本机制保证的是**环境侧行为正常 + H 层 warmup 基线可用 + L buffer 内是真实的 (s,a,r,c,s′) 行**，
 **不等价于对 L 的行为克隆**；若要 L 真正 warm start 到规则，需要另加监督项或塑形奖励（见 `hsrl_warmup.py` 文档）。

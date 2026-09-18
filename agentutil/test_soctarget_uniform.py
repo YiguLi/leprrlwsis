@@ -5,7 +5,7 @@
 四个"下层 RL + SOC 目标"项目（`td3per` / `td3prrbb` / `prle` / `td3prle`）的下层口径应完全一致：
 
     a6 → soc_target = clip(3 + 5·a6, 0.5, 5.5)     (块级固定)
-    r2 = −1 · clip_amount                 [MW]   越出平抑窗口的裁剪量
+    r2 = −1 · min(clip_amount, 20)        [MW]   命令与实际之差 = 两段 clip 合计 (±10 执行器 + 平抑窗口)
     c2 = +1 · trackerr                    [MW]   实际施加 pb 到参考集合的距离
          参考集合 = Soctrack范围 [δ/(g·n_rem), δ/g] ∩ 平抑窗口 [pbrulemin, pbrulemax]
                     空交集 ⇒ **不存在范围，只有纯粹的一个竭力值 r***（零宽单点，只有顶到它才不罚）
@@ -46,6 +46,8 @@ print('1. 单一真源口径 (r2/c2 同为 MW, 两区间分治)')
 print('=' * 84)
 assert hst.L_CLIP_COEF == 1.0 and hst.L_TRACK_COEF == 1.0
 assert hst.L_SOC_COEF == hst.L_TRACK_COEF          # 兼容别名
+assert hst.L_CLIP_CAP == 20.0                      # r2 封顶 (真实窗内容量 ≤20 ⇒ 只截断病态饱和)
+assert abs(hst.lower_reward(1e6) + hst.L_CLIP_CAP) < 1e-12
 assert hst.L_D_BLOCK == 1.2 and hst.L_D_BLOCK_MIN == 0.15
 assert hst.L_COST_LIMIT == 0.6 and hst.L_EMA_LAM_LR == 0.16
 assert hst.L_LAM_MIN == 1.0 and hst.L_LAM_MAX == 20.0 and hst.L_LAM_INIT == 1.0

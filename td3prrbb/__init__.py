@@ -15,7 +15,7 @@ with PRRBB's Wind × Price Segmented Reward structure.
   wB=wB_p(pr)×wB_soc(SOC,wind)), c1 用 r_u(u) 风险系数
   + W_GAP*unfeasible_gap 编码波动/平抑可行性风险;
   L 层 (SOC 目标追踪口径, 单一真源 hsrl_soctarget):
-      a6 → soc_target = clip(3+5a6, 0.5, 5.5); r2 = −1·clip_amount;
+      a6 → soc_target = clip(3+5a6, 0.5, 5.5); r2 = −1·min(clip_amount, 20);
       c2 = +1·trackerr [MW] (到参考集合=Soctrack范围∩平抑窗口的距离; 零成本动作 =
       规则 SocTracker; F=∅ ⇒ **无范围, 只有纯粹一个竭力值 r***, 顶到才不罚).
 

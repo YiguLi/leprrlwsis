@@ -37,8 +37,10 @@ HSRL 下层 SOC 目标语义 —— 单一真源
                         = 该状态下尽力所能达到的最好的一点
 
     ④ 两个通道（单位一致：MW）
-         clip_amount = |pb_cmd − pbrule|            （RBB 硬裁剪量）
-         r2 = −L_CLIP_COEF · clip_amount            ≤ 0   "越窗：做了不该做的"
+         clip_amount = |pb_cmd − pbrule|            （命令与实际之差；**含两段 clip**）
+             = |pb_cmd − clip(pb_cmd, ±10)|   ← ① CheckAction 执行器 ±10 的夹裁量
+             + |clip(pb_cmd, ±10) − pbrule|   ← ② RBB 平抑窗口/physics 的夹裁量
+         r2 = −L_CLIP_COEF · min(clip_amount, L_CLIP_CAP)     ≤ 0   "越窗：做了不该做的"
          trackerr = dist(pbrule, 参考集合)          ≥ 0   "迟到：该做的没做"
                     F = ∅ 时 = |pbrule − r*|：只有恰好顶到 r* 才为 0，两侧偏离都线性计费
          c2 = +L_TRACK_COEF · trackerr
@@ -58,6 +60,16 @@ HSRL 下层 SOC 目标语义 —— 单一真源
   梯度，把策略推回该端点。
 * **`trackerr(规则动作) ≡ 0`**：规则 `pb = clip(δ/g, W)` 在 `F ≠ ∅` 时落在 F 的上端、
   在 `F = ∅` 时正是那个竭力值 r* ⇒ "零成本动作 = 规则 SocTracker"这条既有原则不变。
+* **`r2` 计两段 clip（不是只计窗口那一段）**：`clip_amount = |命令 − pbrule|` 天然等于
+  "(±10 执行器夹裁量) + (平抑窗口夹裁量)"。RBB 系统**夹了两次**：`CheckAction` 把命令夹到
+  ±rated_power(=±10)，再由 `compute_pbrule` 夹到平抑窗口 —— 两次都要计费。
+  两个直接后果：
+    - 各 main 必须把**命令值**（CheckAction 之前）传给 `compute_pbrule`；否则 `clip_amount`
+      只含窗口那段，而 `|命令| > 10` 时 `pbrule` 与 r2 都不再随动作变化 ⇒ **该方向梯度恒 0
+      （死区）**，策略被推到饱和后无法被拉回（旧 run165: max|raw|≈3719 MW 而 clip≡10）。
+    - 传命令值**不改变 `pbrule`**（窗口 ⊆ ±10 ⇒ `clip(clip(cmd,±10),W) ≡ clip(cmd,W)`），
+      因此环境/施加功率/其它通道全部不变，只有 r2 与记录列变化。
+  封顶 `L_CLIP_CAP = 20 MW` 只截断病态饱和幅值（不改变最优动作：越界方向在 0~10 MW 仍有斜率 1）。
 * **`n_rem = 1` 时 B 退化为一点**（= 一步填平）⇒ 最后一步必须精确到位，与上层块末
   gap 罚同语义；此时 `c2 = L_TRACK_COEF·g·|pbrule − pb_est|`，即旧 `slack` 口径
   （旧口径是"一步填平留点"的特例）。
@@ -90,7 +102,12 @@ SOC_TARGET_SPAN = 5.0
 SOC_TARGET_MIN, SOC_TARGET_MAX = 0.5, 5.5
 
 # ---------------------------------------------------------------- L 层数值口径（r2/c2 同为 MW）
-L_CLIP_COEF = 1.0        # r2 = −L_CLIP_COEF · clip_amount         [MW]
+L_CLIP_COEF = 1.0        # r2 = −L_CLIP_COEF · min(clip_amount, L_CLIP_CAP)   [MW]
+L_CLIP_CAP = 20.0        # r2 封顶 [MW]：clip_amount = |命令 − pbrule| 的上限
+                         #   实测"平抑窗口"那一段最大 = 20 (= |+10 − (−10)|) ⇒ 20 不截断任何
+                         #   真实窗内容量；只在 ±10 之外被夹掉的量把总差异推得更大时截断
+                         #   （防旧 run165 式 "raw≈900 ⇒ r2≈−900/步" 的 critic 爆量）。
+                         #   注意: 封顶只压幅值不改变最优动作 —— 越界方向仍有梯度（0~10 MW 斜率 1）。
 L_TRACK_COEF = 1.0       # c2 = +L_TRACK_COEF · trackerr           [MW]
 L_SOC_COEF = L_TRACK_COEF   # 兼容旧名（旧口径里它是 MWh→代价的系数）
 L_D_BLOCK = 1.2          # 每块 sum_c2 预算（= 允许搁置 0.02 MWh 的可达量）
@@ -221,13 +238,27 @@ def soc_track_range(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n_rem,
     return trackerr, info
 
 
-def lower_reward(clip_amount, coef=None):
-    """下层 r2 = −coef · clip_amount（clip_amount = |pb_cmd − pbrule|，RBB 硬裁剪量, MW）。
+def lower_reward(clip_amount, coef=None, cap=None):
+    """下层 r2 = −coef · min(clip_amount, cap)  [MW]。
+
+    `clip_amount` = **命令值与实际施加值之差** `|pb_cmd − pbrule|`，它**天然包含两段 clip**：
+
+        |pb_cmd − pbrule| = |pb_cmd − clip(pb_cmd, ±10)|   ← ① 执行器/CheckAction 的 ±10 夹裁量
+                          + |clip(pb_cmd, ±10) − pbrule|   ← ② RBB 平抑窗口/physics 的夹裁量
+
+    前提：各 main 必须把**命令值**（CheckAction 之前）交给 `RuleBasedBESS.compute_pbrule`。
+    因为平抑窗口 ⊆ [−rated_power, +rated_power] = ±10，传命令值**不改变 `pbrule`**
+    （`clip(clip(cmd,±10), W) ≡ clip(cmd, W)`，`agentutil/test_l_lower_unit.py` 有断言）；
+    若改传 CheckAction 之后的值，则 |pb_cmd| > 10 时 `pbrule` 与 r2 都不再随动作变化
+    ⇒ 该方向失去梯度（"±10 死区"，run165 曾出现 |raw|≈900 MW 而 clip≡10）。
 
     `coef=None` ⇒ 取 `L_CLIP_COEF`（=1.0），即 r2 与 c2 同为 MW 口径、系数同为 1。
+    `cap=None`  ⇒ 取 `L_CLIP_CAP`（=20.0 MW，只截断病态饱和，不改真实窗内容量）；
+    传 `cap=float('inf')` 可关闭封顶。
     """
     c = L_CLIP_COEF if coef is None else float(coef)
-    return -c * float(clip_amount)
+    lim = L_CLIP_CAP if cap is None else float(cap)
+    return -c * min(float(clip_amount), lim)
 
 
 def lower_cost_soc_track(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n_rem,

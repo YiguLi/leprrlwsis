@@ -20,7 +20,7 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
   观测 (5 维蒸馏) = [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
       第 3 维由原 shadow_price(∈(−1,1)) 改为 **SOC 目标** (与 SOC 同刻度, 便于网络
       直接比较"目标 vs 自身"); 见 build_L_obs_distilled()。
-  r2 = −1 · clip_amount              (clip_amount = |pb − pbrule|, RBB 硬裁剪量)
+  r2 = −1 · min(clip_amount, 20)              (clip_amount = |命令 − pbrule| = 两段 clip 合计)
       —— 原影子套利项 (−pr·pbrule 形式) 随信号语义一起删除。
    c2 = +1 · trackerr                 [MW] 两区间分治 (单一真源 hsrl_soctarget)
        参考集合 = Soctrack范围[δ/(g·n_rem), δ/g] ∩ 平抑窗口 [pbrulemin, pbrulemax]
@@ -319,9 +319,9 @@ def soc_track_slack(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n_rem,
     return info['slack'], info
 
 
-def lower_reward(clip_amount, coef=None):
-    """下层 r2 = −coef·clip_amount [MW]（单一真源）。"""
-    return hst.lower_reward(clip_amount, coef)
+def lower_reward(clip_amount, coef=None, cap=None):
+    """下层 r2 = −coef·min(clip_amount, cap) [MW]（单一真源）。"""
+    return hst.lower_reward(clip_amount, coef, cap)
 
 
 def lower_cost_soc_track(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n_rem,
