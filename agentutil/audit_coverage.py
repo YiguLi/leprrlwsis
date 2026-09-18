@@ -187,9 +187,31 @@ print('    {} 个 agent 模块均从 model 导入 Critic(含 fc3)'.format(len(T.
 
 # =============================================================================
 print('=' * 92)
+print('Q3. SOC 目标支: soc_target 必须"先赋值后使用" (防 UnboundLocalError)')
+print('=' * 92)
+# 2026 年那次改造曾在 td3prrbb 踩过: 块末 gap 罚块被插在 soc_target 赋值之前 ⇒
+# 一训练就 UnboundLocalError。这里静态钉住顺序 (只查 train() 体内)。
+# 注: td3prle 没有块末 gap 罚 (它的追踪优化在下层 c2 的二次势里), 故不在检查范围。
+GAP_MAINS = ['td3per', 'td3prrbb', 'prle', 'td3perrb', 'td3prrlrb', 'td3leprrlrb']
+for proj in GAP_MAINS:
+    t = src(T.PROJECTS[proj]['ref'])
+    i = t.index('def train')
+    j = t.find('\nif __name__')
+    body = t[i:j if j > 0 else len(t)]
+    d = body.find('soc_target = ')
+    u = body.find('abs(soc_target')
+    need(d >= 0, '[顺序/{}]'.format(proj), '未找到 soc_target 赋值')
+    need(u >= 0, '[顺序/{}]'.format(proj), '未找到块末 gap 罚 (abs(soc_target ...))')
+    need(d < u, '[顺序/{}]'.format(proj),
+         'soc_target 在赋值之前被使用 (赋值@{}, 使用@{})'.format(d, u))
+    need('sum_gap_pen = 0.0' in body, '[顺序/{}]'.format(proj), '缺 sum_gap_pen 累加器初始化')
+    print('  {:<12s} 赋值@{} < 使用@{}  ✓  sum_gap_pen 已初始化'.format(proj, d, u))
+
+# =============================================================================
+print('=' * 92)
 if FAILS:
     print('审计未通过 ({} 项):'.format(len(FAILS)))
     for f in FAILS:
         print('  ✗', f)
     sys.exit(1)
-print('AUDIT OK —— η1 无需改动; 归一化 + bias 策略对 9 个方法均已生效')
+print('AUDIT OK —— η1 无需改动; 归一化 + bias 策略对 9 个方法均已生效; SOC 支取用顺序正确')

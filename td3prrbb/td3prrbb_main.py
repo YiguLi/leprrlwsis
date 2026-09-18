@@ -243,6 +243,11 @@ def train(num_iterations_H,
         sum_c1 += c1
         sum_c2 += c2  # 累计块成本 (每 5 步归零)
 
+        # SOC 目标/信号 (块内固定; 供 L 观测、块末罚与日志用) —— 必须在下面的
+        # 块末 gap 罚之前取出, 否则 UnboundLocalError
+        soc_target = reward_details['soc_target']
+        soc_signal = reward_details['soc_signal']
+
         # ---- 块末结算: SOC 目标可行性罚 (豁免 tol = --soc_tol, 默认 0.1) ----
         #   偏好用固定价 W_GAP=10 元/MWh 进 r1 (uniform); legacy 仍进 c1
         gap_raw = abs(soc_target - float(observation2[2]))
@@ -255,10 +260,6 @@ def train(num_iterations_H,
             else:
                 sum_c1 += gap_pen
             sum_gap_pen += gap_pen
-
-        # SOC 目标/信号 (块内固定; 供 L 观测、块末罚与日志用)
-        soc_target = reward_details['soc_target']
-        soc_signal = reward_details['soc_signal']
 
         pb_l.append(pb_original)  # track original intent
 
