@@ -3,7 +3,8 @@ TD3PER (TD3 + PER) Package — 上层 td3perrb 口径 + 下层 RL BESS 追 SOC �
 ==========================================================================
 TD3 (Twin Delayed Deep Deterministic Policy Gradient) 结合 PER 与拉格朗日
 成本约束, 由 PER 方法 (`PER_ddpg.SP_DDPG`) 改造而来; 分层结构沿用 td3per
-原设计 (上层 H 学风机桨距 + 1 个信号, 下层 L 学 BESS 功率 pb)。
+原设计 (上层 H 学风机桨距 + 1 个信号, 下层 L 学 BESS 功率)。
+【本轮】下层动作已改为**残余动作** `pb_cmd = 规则基线 + Δ` (见下)。
 
 本轮"td3perrb 化"改造 (2026, 原地修改 td3per):
   * 上层 H 与 td3perrb 完全一致 —— 非分段奖励 (收益权重/c1 风险系数恒 1.0,
