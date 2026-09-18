@@ -125,14 +125,14 @@ def _flush_csv(path, rows, written):
 #   初始策略的"基准工作点"≈ bias 本身, 实测初始 ΣCp 只有 ~0.4 (≈14% 效率),
 #   5 个种子里 2~4 台机被推到 a<0 (CheckAction 夹到 0) = 永久停机, 策略得先从
 #   "停机"这个病态起点自己爬出来。
-# 处方: 前 5 维 (风机桨距) bias 采在 U(0.25, 0.40) —— Cp 的高效区 (a=1/3 时
+# 处方: 前 5 维 (风机桨距) bias 固定为 0.33 —— Cp 的高效区 (a=1/3 时
 #   Cp=16/27≈0.5926 最优, 该区间正好夹住它); 第 6 维 (SOC 目标信号) 置 0
 #   ⇒ 初始目标 SOC = 3.0, 中性且不泄露策略。
 # 不动共享的 model.py; fc4.weight 仍是 ±0.003, 所以"策略强度"依然随机, 只是
 #   "基准工作点"落在高效区。
 
-WT_BIAS_LOW = 0.25
-WT_BIAS_HIGH = 0.40
+WT_BIAS_LOW = 0.33     # 起始点固定 0.33 (Cp 最优点 a=1/3)
+WT_BIAS_HIGH = 0.33    #   lo == hi ⇒ 5 维不再随机
 CP_MAX_PER_TURBINE = 16.0 / 27.0        # a=1/3 处的 Cp 上限 4a(1−a)²
 
 
@@ -162,7 +162,7 @@ def wt_cp_summary(bias, n_wt=5, a_lo=0.0, a_hi=0.5):
 
 def init_wt_action_bias(agent, low=WT_BIAS_LOW, high=WT_BIAS_HIGH, n_wt=5,
                         verbose=True):
-    """覆写 H 层 actor / actor_target 的 fc4.bias (前 n_wt 维 U(low,high), 末维 0).
+    """覆写 H 层 actor / actor_target 的 fc4.bias (前 n_wt 维 = low (= high = 0.33), 末维 0).
 
     Returns
     -------
@@ -1108,7 +1108,7 @@ if __name__ == "__main__":
     # ---- P0.1 / P0.3: 起始点与 24h 相位 ----
     parser.add_argument('--wt_bias_init', default=1, type=int, choices=[0, 1],
                         help='P0.1 起始点: 1(默认)=把 H 层 actor 输出层 bias 覆写为 '
-                             'WT∈U(0.25,0.40) + 信号维 0 (Cp 高效区, 消除"初始停机"病态); '
+                             'WT ≡ 0.33 + 信号维 0 (Cp 最优点, 消除"初始停机"病态); '
                              '0=保留 PyTorch 默认 bias U(±0.25) (复现旧 run)')
     parser.add_argument('--phase_feat', default=1, type=int, choices=[0, 1, 2],
                         help='P0.3 24h 相位特征: 0=无(4 维) / 1(默认)=sin,cos(6 维) / '
