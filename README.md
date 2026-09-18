@@ -535,15 +535,19 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 所以 L 层**不做 H 层的 `--value_scale` 归一化**，而是直接把**数值单位**降两个数量级
 （`agent_L.value_scale` 保持 1.0）：
 
-| 项 | per / td3per | prrbb / prle / td3prrbb | td3prle |
-|---|---|---|---|
-| `r2` 的 clip 系数 | 100 → **1** | 100 → **1** | `min(100·(clip+over), 1000)` → **`min(1·(clip+over), 10)`** |
-| `r2` 的 shadow 系数 | 10 → **0.1**（td3per 无此项） | 10 → **0.1**（td3prrbb/prle 改为 SOC 目标后亦无此项） | 无 |
-| `c2` 系数 | 1000 → **10** | 700 → **7** | `10·(SOC−target)²` → **`0.1·(SOC−target)²`** |
-| `d_block_L` / 地板 | 20 / 2.5 → **0.2 / 0.025** | 14 / 1.75 → **0.14 / 0.0175** | 40 / 40 → **0.4 / 0.4** |
-| `agent_L.cost_limit` | 10 → **0.1** | 10 → **0.1** | 10 → **0.1** |
-| L 加性对偶步长 η2 | 0.01 → **1.0** | 0.01 → **1.0** | 0.01 → **1.0** |
-| λ2 区间 / 初值 | **不变** | **不变** | **不变** |
+| 项 | per / td3per | prrbb / prle / td3prrbb |
+|---|---|---|
+| `r2` 的 clip 系数 | 100 → **1** | 100 → **1** |
+| `r2` 的 shadow 系数 | 10 → **0.1**（td3per 无此项） | 10 → **0.1**（td3prrbb/prle 改为 SOC 目标后亦无此项） |
+| `c2` 系数 | 1000 → **10** | 700 → **7** |
+| `d_block_L` / 地板 | 20 / 2.5 → **0.2 / 0.025** | 14 / 1.75 → **0.14 / 0.0175** |
+| `agent_L.cost_limit` | 10 → **0.1** | 10 → **0.1** |
+| L 加性对偶步长 η2 | 0.01 → **1.0** | 0.01 → **1.0** |
+| λ2 区间 / 初值 | **不变** | **不变** |
+
+> 注：`td3prrbb` / `prle` / `td3prle` 此后已并入 `hsrl_soctarget` 的**两区间口径**
+> （`r2`/`c2` 同为 MW、系数同为 1、`d_block_L = 1.2`、`λ2 ∈ [1, 20]`、`η2 = 0.16`，见下节）；
+> 上表的 ÷100 只对 `per` / `prrbb`（仍在影子电价口径）与历史对照有效。
 
 **为什么 η2 要 ×100（关键）**：`d_block_L` 必须与它约束的 c2 同口径 —— 这是
 "`d_block` 始终代表**同一物理容忍度**"的直接后果（与 H 层 `d_block_H = 15` 恒等于
@@ -570,26 +574,26 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 * **物理量守恒**：`d_block_L / c2系数` 与 `η2 × c2系数` 与 ÷100 之前逐位一致
   （0.02 MWh、4 MWh² 与 10 / 7 / 0.1）；
 * 动态实算：`r2(0)=0`、`r2(1 MW)=−1 元`；规则动作 `c2=0`、差 0.1 MWh 可达量 `c2=1.0`；
-  `td3prle` 的 `C2(±2 MWh)=0.4=d_block_L`、裁剪惩罚封顶 10 元 ⇔ 合计 10 MW（与 ÷100 前同）。
+  `td3prle` 与 `prle`/`td3prrbb`/`td3per` 的下层 `(r2, c2, target)` **逐位相同**
+  （`agentutil/test_soctarget_uniform.py` 四人等价断言）。
 
 ---
 
 ---
 
-## 附：下层信号语义统一为 SOC 目标（`td3prrbb` / `prle`，单一真源 `hsrl_soctarget.py`）
+## 附：下层信号语义统一为 SOC 目标（`td3prrbb` / `prle` / `td3prle`，单一真源 `hsrl_soctarget.py`）
 
 **背景**：9 个方法的下层信号有**两种**语义。本次把 `td3prrbb` 与 `prle` 从"影子电价"改成
 "**SOC 目标**"（与 `td3per` 对齐）；两者上层的 PRRBB 风价分段奖励（`wT`/`wB`）**保持不动**。
 
 | 项目 | 第 6 维语义 | 下层 | L 观测的目标 | `r2` | `c2` |
 |---|---|---|---|---|---|
-| td3per / td3prrbb | SOC 目标 | RL | 蒸馏 5 维第 3 维 = `soc_target/10` | `−1·clip_amount` | `+1·trackerr` |
+| td3per / td3prrbb / td3prle | SOC 目标 | RL | 蒸馏 5 维第 3 维 = `soc_target/10` | `−1·clip_amount` | `+1·trackerr` |
 | prle | SOC 目标 | RL（+ LLM relabel） | `Normalize(obs)` + 末维 = `soc_target/10` | `−1·clip_amount` | `+1·trackerr` |
 | td3perrb / td3prrlrb / td3leprrlrb | SOC 目标 | 规则 SocTracker | — | — | — |
-| td3prle | SOC 目标（二次势中心） | RL | 蒸馏 5 维 | `−min(1·(clip+over), 10)` | `0.1·(SOC−target)²` |
 | **per / prrbb** | **影子电价** | RL | `Normalize(obs)` + a6 原值 | `0.1·shadow_profit − 1·clip` | `10 / 7·soc_deviation` |
 
-**下层口径**（集中在 `hsrl_soctarget.py`，三个 SOC 目标 + RL 下层的项目共用）
+**下层口径**（集中在 `hsrl_soctarget.py`，四个 SOC 目标 + RL 下层的项目共用：`td3per` / `td3prrbb` / `prle` / `td3prle`）
 
 * `a6 → soc_target = clip(3 + 5·a6, 0.5, 5.5)`（块级 5 步固定）
 * `r2 = −1·clip_amount`（`clip_amount = |pb_cmd − pbrule|`；影子套利项随语义删除）
@@ -659,10 +663,9 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 逐位一致（20000 组随机含 3080 组不可行窗口，max|Δ|=0）、transition 填入计数。
 
 **注（"事后填入"能做什么、不能做什么）**：BESS-RL 项目的 warmup 期 r2/c2 在这些奖励定义下
-**天然接近 0** —— SOC 目标支（`td3per`/`td3prrbb`/`prle`）的零成本动作**就是**规则动作
+**天然接近 0** —— SOC 目标支（`td3per`/`td3prrbb`/`prle`/`td3prle`）的零成本动作**就是**规则动作
 `clip(δ/g, 平抑窗口)`（参考集合由它定义 ⇒ `trackerr ≡ 0`），且 `r2 = −1·clip_amount ≡ 0`（规则动作不越窗）；
-`per/prrbb`（影子电价支）的 `r2 = 0.1·shadow_profit − 1·clip_amount` 而影子价恒 0（`shadow_profit ≡ 0`）；
-`td3prle` 的二次势 c2 以目标为中心、warmup 期目标恒 3.0 ⇒ 仅在 SOC≠3 时非零。
+`per/prrbb`（影子电价支）的 `r2 = 0.1·shadow_profit − 1·clip_amount` 而影子价恒 0（`shadow_profit ≡ 0`）。
 所以本机制保证的是**环境侧行为正常 + H 层 warmup 基线可用 + L buffer 内是真实的 (s,a,r,c,s′) 行**，
 **不等价于对 L 的行为克隆**；若要 L 真正 warm start 到规则，需要另加监督项或塑形奖励（见 `hsrl_warmup.py` 文档）。
 

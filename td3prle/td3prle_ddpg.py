@@ -248,7 +248,7 @@ class SP_TD3_PRLE(object):
         min_p_next = self._pair_min(q_p1_next, q_p2_next)
         # cost aggregate: max (safe, avoid underestimation) or min (TD3 paper).
         # clamp(min=0): costs are non-negative by construction (c1 fluctuation
-        # penalty, c2 = C2_SOC_COEFF*soc_deviation), so a negative cost
+        # penalty, c2 = +1·trackerr [MW] 两区间追踪代价), so a negative cost
         # bootstrap target is
         # impossible and only corrupts the Lagrangian — clamp enforces it.
         min_c_next = self._aggregate_pair(q_c1_next, q_c2_next).clamp(min=0.0)

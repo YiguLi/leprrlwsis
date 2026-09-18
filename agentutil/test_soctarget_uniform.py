@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """下层 SOC 目标语义的**跨项目逐位等价**测试 —— 不需要 MATLAB。
 
-三个"下层 RL + SOC 目标"项目（`td3per` / `td3prrbb` / `prle`）的下层口径应完全一致：
+四个"下层 RL + SOC 目标"项目（`td3per` / `td3prrbb` / `prle` / `td3prle`）的下层口径应完全一致：
 
     a6 → soc_target = clip(3 + 5·a6, 0.5, 5.5)     (块级固定)
     r2 = −1 · clip_amount                 [MW]   越出平抑窗口的裁剪量
@@ -37,6 +37,7 @@ SOC_PROJECTS = {
     'td3per': ('td3per.td3per_myfunc', 'Cal_Rew_RB', 2),      # 蒸馏观测: 目标在第 3 维
     'td3prrbb': ('td3prrbb.td3prrbb_myfunc', 'Cal_Rew_PRRBB', 2),
     'prle': ('prle.prle_myfunc', 'Cal_Rew_PRRBB', 4),         # baseline 观测: 目标在末维
+    'td3prle': ('td3prle.td3prle_myfunc', 'Cal_Rew_PRRBB', 2),   # PRLE 的 TD3 姊妹 (蒸馏观测)
 }
 N_REM = 3          # 本测试固定用块内第 3 步 (n_rem = 3)
 
@@ -61,7 +62,7 @@ print('  物理等价: d_block_L·g = {:.4g} MWh/块 ; η2·(1/g) = {:.3g} (旧�
       .format(hst.L_D_BLOCK * _g, hst.L_EMA_LAM_LR / _g))
 
 print('=' * 84)
-print('2. 三项目下层 r2/c2 逐位相同 (同一批输入)')
+print('2. 四项目下层 r2/c2 逐位相同 (同一批输入)')
 print('=' * 84)
 mods = {p: importlib.import_module(m) for p, (m, _f, _i) in SOC_PROJECTS.items()}
 
@@ -116,8 +117,8 @@ for k in range(60):
     for p, v in vals.items():
         assert v == ref, (k, p, v, ref)
     n_same += 1
-print('  {} 组随机输入 (含不可行窗口): td3per / td3prrbb / prle 的 (r2, c2, target, trackerr) 逐位相同'
-      .format(n_same))
+print('  {} 组随机输入 (含不可行窗口): {} 的 (r2, c2, target, trackerr) 逐位相同'
+      .format(n_same, ' / '.join(SOC_PROJECTS)))
 
 print('=' * 84)
 print('3. 零成本集合: 规则动作 + F=∅ 时的 best-effort 端点')

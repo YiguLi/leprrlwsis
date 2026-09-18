@@ -33,12 +33,12 @@ SOC_FAMILY = {                      # 项目 -> (main, myfunc)
     'td3per': ('td3per/td3per_main.py', 'td3per/td3per_myfunc.py'),
     'td3prrbb': ('td3prrbb/td3prrbb_main.py', 'td3prrbb/td3prrbb_myfunc.py'),
     'prle': ('prle/prle_main.py', 'prle/prle_myfunc.py'),
+    'td3prle': ('td3prle/td3prle_main.py', 'td3prle/td3prle_myfunc.py'),
 }
 # 其它支: 项目 -> (main, c2系数, d_block_L, 地板, ÷100 前的 c2 系数, ÷100 前的 d_block_L)
 OTHER = {
     'per': ('PER_main0.py', 10.0, 0.2, 0.025, 1000.0, 20.0),
     'prrbb': ('prrbb/prrbb_main.py', 7.0, 0.14, 0.0175, 700.0, 14.0),
-    'td3prle': ('td3prle/td3prle_main.py', 0.1, 0.4, 0.4, 10.0, 40.0),
 }
 LEGACY = {'prrbb': 'prrbb/prrbb_myfunc.py', 'prle': 'prle/prle_myfunc.py',
           'td3prrbb': 'td3prrbb/td3prrbb_myfunc.py'}
@@ -64,7 +64,7 @@ def num_or_ref(txt, ref_pat, lit_pat, tag):
 
 
 print('=' * 84)
-print('A. SOC 目标支: 三个项目都接在单一真源 hsrl_soctarget 上')
+print('A. SOC 目标支: 四个项目都接在单一真源 hsrl_soctarget 上')
 print('=' * 84)
 import hsrl_soctarget as hst                                     # noqa: E402
 assert (hst.L_CLIP_COEF, hst.L_TRACK_COEF, hst.L_D_BLOCK,
@@ -85,8 +85,9 @@ for proj, (main_py, mf_py) in SOC_FAMILY.items():
                      'hst.lower_cost_soc_track(', 'hst.obs_target_dim('):
             assert call in ft, (proj, call)
     assert 'import hsrl_soctarget as hst' in mt or proj == 'td3per', (proj, 'main 未接真源')
-    assert re.search(r'(?:hst\.)?gap_penalty\(', mt) and 'sum_r1 -= gap_pen' in mt, \
-        (proj, '块末追踪罚缺失')
+    assert re.search(r'(?:hst\.)?gap_penalty\(', mt), (proj, '块末 gap 罚未接真源')
+    assert re.search(r'sum_r1 -= (?:gap_pen|c1_soc_track)\b', mt), \
+        (proj, 'uniform 下块末追踪罚未进 r1')
     d = num_or_ref(mt, r'(?m)^\s*d_block_L = hst\.L_D_BLOCK\b',
                    r'(?m)^\s*d_block_L = ([0-9.]+)', proj + ' d_block_L')
     f = num_or_ref(mt, r'(?m)^\s*d_block_L_min = hst\.L_D_BLOCK_MIN\b',
@@ -109,7 +110,7 @@ for proj, (main_py, mf_py) in SOC_FAMILY.items():
                   c if c else 'hst.L_COST_LIMIT'))
 
 print('=' * 84)
-print('B. 其它支 (影子电价 / 二次势): 系数与物理量守恒')
+print('B. 其它支 (影子电价口径, 未迁移): 系数与物理量守恒')
 print('=' * 84)
 for proj, (main_py, c2coef, dbl, floor, old_c2, old_dbl) in OTHER.items():
     mt = src(main_py)

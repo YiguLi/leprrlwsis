@@ -29,17 +29,18 @@ Reward structure (td3prle_myfunc.Cal_Rew_PRRBB, 严格对照 td3prrbb):
                    与 td3prrbb 的差异仅在于此)
              c1 = 1.0*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
                   + 块末结算项 c1_soc_track = 10*|soc_target − SOC_块末|
-  Lower (L): r2 = -min(1*(clip_amount + clip_over), 10)
-             (clip_amount = 送进 RBB 的动作被可行窗口夹掉的量;
-              clip_over = 原始意图被 CheckAction 夹到 ±10 MW 之外的部分,
-              两项同系数合成同一个裁剪惩罚, 并受【总上限】封顶 1000 RMB/step
-              ⇔ 合计裁剪量 ≤10 MW (原 1000 元/step 封顶 ÷100); 见 myfunc.L_CLIP_PEN_COEF / _TOTAL_CAP)
-             c2 = 0.1*(SOC_new − soc_target)²  (目标中心二次势, ×0.1 惩罚系数)
+  Lower (L) —— 两区间分治, 单一真源 hsrl_soctarget (与 prle/td3per/td3prrbb 逐位同口径):
+             r2 = −1·clip_amount      [MW] 越出平抑窗口的裁剪量
+             c2 = +1·trackerr         [MW] 实际施加 pb 到"参考集合"的距离
+                  参考集合 = Soctrack范围[δ/(g·n_rem), δ/g] ∩ 平抑窗口
+                    F ≠ ∅ ⇒ **区间**（L 可在「摊还端…一步填平端」间任选努力水平）
+                    F = ∅ ⇒ **不存在范围, 只有纯粹一个竭力值 r*** = 平抑窗口里离目标 B 最近的端点:
+                            只有顶到 r* 才不罚, 两侧偏离都按 |pbrule − r*| 线性计费
 
 【信号语义 (本轮变更)】H 第 6 维输出 signal 不再是影子价格, 而是 SOC 目标的归一化指令;
   H 输出范围不变 ((-0.5, 0.5)), 由下层线性映射 (myfunc.signal_to_soc_target):
       soc_target = 3.0 + 5.0·signal ∈ [0.5, 5.5] MWh
-  L 层把 soc_target 作为 c2 中心 (以 ×10 计费跟踪), 同时进 L 观测量 (soc_target/10);
+  L 层把 soc_target 作为 c2 的跟踪参照 (trackerr, MW 口径), 同时进 L 观测量 (soc_target/10);
   H 层在 5 步块末结算时对 |soc_target − SOC_块末| 计 10 倍惩罚, 计入 c1 约束口
   (与波动/不可行缺口共用 d_block_H, 由 lam1 对偶驱动 H 给出下层可达的目标)。
 
@@ -47,8 +48,8 @@ Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块, sum_c1 含块末 SOC 跟踪项)
      lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 50, 500), 初始 100.0
      d_block_H 初始 12.0 (c1 平滑系数已回调 0.1, 预算未随动), curriculum 连续 100 次满足则减半, 地板 3.0
-  L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 2, 200), 初始 100.0
-     d_block_L 初始 40.0 (= 10·2²: 目标中心二次势下单步贴 ±2 的成本值), curriculum 减半地板 = 40 (不收紧)
+  L: lam2  ← clip(lam2 + hst.L_EMA_LAM_LR*(EMA − d_block_L), hst.L_LAM_MIN, hst.L_LAM_MAX), 初值 hst.L_LAM_INIT = 1.0
+     d_block_L 初始 hst.L_D_BLOCK = 1.2 (⇔ 0.02 MWh/块), curriculum 减半地板 hst.L_D_BLOCK_MIN = 0.15
 
 折扣 (γ):
   H 层 γ = --discount (默认 0.98, 块级语义: 1/(1−γ)=50 块视野);
@@ -85,8 +86,7 @@ from td3prle.td3prle_myfunc import (
     get_price_level,
     get_wind_thresholds, set_wind_thresholds,
     relabel_r1_substep, relabel_c1_substep,
-    relabel_c2_substep,
-    signal_to_soc_target, soc_track_penalty,
+    signal_to_soc_target,
     WB_PRICE, WB_SOC_OUTSIDE, WT_PRICE, WT_WIND,
 )
 from td3prle.td3prle_llm import (
@@ -106,6 +106,7 @@ warnings.filterwarnings("ignore")
 import matlab
 import matlab.engine
 import hsrl_cost as hc   # H 层 c1/λ/d_block 统一口径
+import hsrl_soctarget as hst   # 下层 SOC 目标单一真源
 import hsrl_agent_init as hinit   # critic 输出层 bias(价值基线)
 import hsrl_warmup as hwarm       # warmup 调度 + 规则下层 + transition 填入
 engine = matlab.engine.start_matlab()
@@ -179,12 +180,11 @@ def train(num_iterations_H,
     d_block_H = _h['d_block'] if _h else 12.0        # 初值: 每块 sum_c1 预算 (平滑系数曾 0.1→1.0 ×10 重标; 现已回调 0.1, 预算未随动)
     d_block_H_min = _h['d_block_min'] if _h else 3.0     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    # c2 = C2_SOC_COEFF(0.1)*(SOC_new−soc_target)² 目标中心二次势;
-    # 预算 d_block_L = 0.4 = 0.1·2² (单步贴 ±2 MWh 处的成本值; ×0.1 系数下与旧
-    #     100·(SOC−3)² / 400 同刻度), 地板 = 初值 → 预算永不收紧。
-    d_block_L = 0.4        # 初值: 每块 sum_c2 预算 (目标中心二次势标定)
-    d_block_L_min = 0.4    # 收紧地板 = 初值 → max(d/2, 0.4)≡0.4, 预算永不收紧:
-                            # SOC 保持软裕度, 不随 curriculum 渐渐被钉向目标
+    # 下层 SOC 目标口径 (单一真源 hsrl_soctarget, 与 prle/td3per/td3prrbb 同):
+    #     r2 = −1·clip_amount [MW]; c2 = +1·trackerr [MW] (实际施加 pb 到参考集合的距离)
+    d_block_L = hst.L_D_BLOCK        # 初值: 每块 sum_c2 预算 = 1.2 (⇔ 0.02 MWh/块)
+    d_block_L_min = hst.L_D_BLOCK_MIN    # curriculum 收紧地板 = 0.15
+    soc_tol_upper = float(getattr(args, "soc_tol", hc.SOC_TOL))   # 块末残差豁免
 
     # ---- TD3PRLE: Window statistics for LLM analysis ----
     window_stats = WindowStats()
@@ -298,12 +298,8 @@ def train(num_iterations_H,
         else:
             original_action_L = agent_L.select_action(norm_observation_L)
             applied_action_L, penalty_NN_L = CheckAction(original_action_L)
-        # L 层原始意图被【执行器上限 ±charge(±10 MW)】夹掉的量 (MW, ≥0):
-        #   |original_action_L| − |applied_action_L|; 计入 r2 的裁剪惩罚
-        #   (与 clip_amount 同系数 1, 见 myfunc.L_CLIP_PEN_COEF)
-        l_clip_over = float(np.sum(np.maximum(
-            np.abs(np.asarray(original_action_L, dtype=float)) -
-            np.abs(np.asarray(applied_action_L, dtype=float)), 0.0)))
+        # L 层原始意图的 ±charge 越界量不再单独计费: r2 只含 RBB 窗口裁剪量
+        #   (越界量与封顶项已随旧口径删除, 见 myfunc / hsrl_soctarget)
         prGreen('--L-- ori a_t = {}'.format(round_list(original_action_L, 3)))
 
         action = np.concatenate((applied_action_H, applied_action_L))
@@ -344,7 +340,7 @@ def train(num_iterations_H,
         r1, c1, r2, c2, reward_details = Cal_Rew_PRRBB(
             observation, observation2, action_rbb, rbb_info,
             penalty_NN_H=penalty_NN_H, time=time,
-            ptur=ptur, l_clip_over=l_clip_over,
+            ptur=ptur, n_rem=5 - (episode_steps % 5),
         )
 
         # Total reward and cost (H uses r1/c1; L uses r2/c2)
@@ -367,13 +363,12 @@ def train(num_iterations_H,
             round(reward_details['degradation'], 3)))
         prGreen('c1 = {} (fluct={})'.format(
             round(c1, 3), round(reward_details['c1_fluct'], 3)))
-        prGreen('r2 = {} (clip={}, clip_over={}, capped={})'.format(
-            round(r2, 3), round(reward_details['clip_amount'], 3),
-            round(reward_details['clip_over'], 3),
-            int(reward_details['clip_pen_capped'])))
-        prGreen('c2 = {} (soc_dev={}, soc_track_err={})'.format(
-            round(c2, 3), round(reward_details['soc_deviation'], 3),
-            round(reward_details['soc_track_err'], 3)))
+        prGreen('r2 = {} (clip={})'.format(
+            round(r2, 3), round(reward_details['clip_amount'], 3)))
+        prGreen('c2 = {} (slack={:.4f}, soc_dev={} | target={:.2f}, SOC={:.2f})'.format(
+            round(c2, 3), reward_details['soc_slack'],
+            round(reward_details['soc_deviation'], 3),
+            soc_target_H, float(observation2[2])))
         prGreen('price={} p_level={} wind={:.1f} w_level={} (wT={}, wB={})'.format(
             reward_details['pr'], reward_details['price_level'],
             reward_details['u'], reward_details['wind_level'],
@@ -404,11 +399,12 @@ def train(num_iterations_H,
         if max_episode_length and episode_steps >= max_episode_length - 1:
             done = True
         if episode_steps % 5 == 4:
-            # 上层【块末结算】: 目标 SOC 与实际 SOC 的差值惩罚
-            #   c1_soc_track = C1_SOC_TRACK * |soc_target − SOC_块末|
-            # 计入 c1 约束口 (与波动/不可行缺口同一预算 d_block_H), 由 lam1 对偶驱动
+            # 上层【块末结算】: 目标 SOC 与实际 SOC 的差值惩罚 (豁免带 tol = --soc_tol, 默认 0.1)
+            #   c1_soc_track = W_GAP * max(0, |soc_target − SOC_块末| − soc_tol)
+            # 计入约束口 (与波动/不可行缺口同一预算 d_block_H), 由 lam1 对偶驱动
             # H 给出下层实际可达的目标; 块内逐步 c1 不入账本项 (一次性结算)。
-            c1_soc_track = soc_track_penalty(soc_target_H, float(observation2[2]))
+            c1_soc_track = hst.gap_penalty(soc_target_H, float(observation2[2]),
+                                           tol=soc_tol_upper)
             if hc.mode() == 'uniform':
                 sum_r1 -= c1_soc_track   # uniform: 追踪偏好进 r (固定价 W_GAP=10 元/MWh)
             else:
@@ -433,15 +429,12 @@ def train(num_iterations_H,
                 agent_L.update_ema_cost(sum_c2)
                 agent_L.update_lam_ema(d_block_L)
             done_L = True
-        # L 层每步过渡也存上下文 {u_t, SOC_new, soc_target}: c2 = 10·(SOC_new−target)²
-        # 目标由 H 信号给定 (与风速档无关), 故 relabel 时把存档目标原样传回即为恒等
+        # L 层每步过渡不再存 context: c2 无风速/阈值依赖 (无需 relabel), 与 prle 一致
         hwarm.fill_bess_transition(
             agent_L, norm_observation_L, original_action_L, r2, c2,
             norm_observation2_L, done_L,
             applied_pb=float(pbrule), warmup=bool(step <= args.warmup),
-            stats=bess_fill_stats, context=[{'u': float(observation[1]),
-                             'SOC_new': float(observation2[2]),
-                             'soc_target': float(soc_target_H)}])
+            stats=bess_fill_stats, context=None)
 
         if step > args.warmup:
             #--------------------Update----------------------
@@ -594,8 +587,6 @@ def train(num_iterations_H,
                 'pbrulemin': rbb_info['pbrulemin'],
                 'pbrulemax': rbb_info['pbrulemax'],
                 'clip_amount': rbb_info['clip_amount'],
-                'clip_over': reward_details['clip_over'],   # ±10 夹掉的原始意图量 (MW)
-                'clip_pen_capped': reward_details['clip_pen_capped'],  # 1=触到总上限
                 'unfeasible_gap': rbb_info['unfeasible_gap'],
                 'soc': rbb_info['soc'],
                 'is_infeasible': float(rbb_info['is_infeasible']),
@@ -614,6 +605,7 @@ def train(num_iterations_H,
                 'degradation': reward_details['degradation'],
                 'soc_deviation': reward_details['soc_deviation'],
                 'soc_target': reward_details['soc_target'],
+                'soc_slack': reward_details['soc_slack'],
                 'soc_track_err': reward_details['soc_track_err'],
                 'c1_soc_track': c1_soc_track,   # 仅块末步非零 (结算项)
                 'c1_fluct': reward_details['c1_fluct'],
@@ -686,10 +678,9 @@ def train(num_iterations_H,
 
             # PRRBB reward sub-components (lower)
             writer.add_scalar('reward_lower/soc_deviation', reward_details['soc_deviation'], step)
+            writer.add_scalar('reward_lower/soc_slack', reward_details['soc_slack'], step)
             writer.add_scalar('reward_lower/soc_track_err', reward_details['soc_track_err'], step)
             writer.add_scalar('reward_lower/clip_amount', reward_details['clip_amount'], step)
-            writer.add_scalar('reward_lower/clip_over', reward_details['clip_over'], step)
-            writer.add_scalar('reward_lower/clip_pen_capped', reward_details['clip_pen_capped'], step)
 
             # SOC 目标 (H 信号映射后的物理目标) 与块末结算跟踪惩罚
             writer.add_scalar('action/soc_target', soc_target_H, step)
@@ -789,11 +780,7 @@ def train(num_iterations_H,
                     n_relabeled = agent_H.memory.relabel_all(
                         relabel_r1_substep, relabel_c1_substep)
                     prGreen('TD3PRLE: Relabeled {} H-agent transitions'.format(n_relabeled))
-                    # L-agent buffer: r2 与阈值无关; c2 = 10·(SOC_new−soc_target)² 的目标中心
-                    # 二次势也只依赖存档的 soc_target (与风速无关) → relabel 为恒等,
-                    # 保留调用仅为与 relabel_c2_substep 接口一致。
-                    n_relabeled_L = agent_L.memory.relabel_c2_all(relabel_c2_substep)
-                    prGreen('TD3PRLE: Relabeled {} L-agent costs'.format(n_relabeled_L))
+                    # L 层 buffer 无需 relabel (c2 无风速/阈值依赖), 与 prle 一致
 
                     # Record this adjustment in history
                     threshold_history.append({
@@ -949,6 +936,8 @@ if __name__ == "__main__":
                         default=200000,
                         type=int,
                         help='train iters each timestep')
+    parser.add_argument('--soc_tol', default=hc.SOC_TOL, type=float,
+                        help='块末 SOC 目标残差豁免 (MWh); 只属于上层 gap 罚')
     parser.add_argument('--epsilon',
                         default=50000,
                         type=int,
@@ -1139,20 +1128,20 @@ if __name__ == "__main__":
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c), 与 td3prrbb 同配置;
-    #     lam2 ∈ [2, 200] 初始 100.0 (min=2: 带内拖拽 < 套利边际, 保留 ±2 软裕度;
-    #     max=200 顶配), ema_alpha=0.02, ema_lam_lr=1.0  (c2 口径 ÷100 后同步 ×100)
+    #     lam2 ∈ [hst.L_LAM_MIN, hst.L_LAM_MAX] = [1, 20] (MW 兑换率口径: "MW 追踪缺口 : MW 越窗"),
+    #     初值 hst.L_LAM_INIT = 1.0, ema_alpha=0.02, 加性步长 ema_lam_lr = hst.L_EMA_LAM_LR = 0.16
     #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
     # L 层(步骤A): policy_delay/--policy_noise 独立于 H —— 放松到 delay=1+noise≈0 时节奏接近 DDPG
     # (twin critic 与 EMA 对偶仍保留, 仅去掉延迟更新与 target smoothing 对窄可行窗的抹平)
     agent_L = SP_TD3_PRLE(nb_states = 5, nb_actions = 1, args = args,
-                          lam_max=200.0, lam_min=2.0,
-                          ema_lam=True, ema_alpha=0.02, ema_lam_lr=1.0,
+                          lam_max=hst.L_LAM_MAX, lam_min=hst.L_LAM_MIN,
+                          ema_lam=True, ema_alpha=0.02, ema_lam_lr=hst.L_EMA_LAM_LR,
                           policy_delay=args.l_policy_delay,
                           policy_noise=args.l_policy_noise,
                           noise_clip=args.noise_clip,
                           cost_critic_mode=args.cost_critic_mode)
-    agent_L.lam = 100.0
-    agent_L.cost_limit = 0.1  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
+    agent_L.lam = hst.L_LAM_INIT   # λ2 初值 (单一真源; 旧 100.0 属 [2,200] 旧口径, 已越界)
+    agent_L.cost_limit = hst.L_COST_LIMIT  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
 
     # L 层折扣与 H 解耦: 步级语义, L episode = 5 步块 → bootstrap 视野 ≤5 步

@@ -14,6 +14,7 @@ sys.path.insert(0, _SCRIPT_DIR)
 
 from env import WindBattery
 from util import *
+import hsrl_soctarget as hst
 from myfunc import Normalize, CheckAction, build_L_obs_distilled
 from PER_ddpg import SP_DDPG
 from prle.prle_ddpg import PRLE_DDPG
@@ -190,21 +191,30 @@ def main():
                 # TD3PRRBB: SOC 目标支 (r2 = −1·clip_amount, c2 = +1·trackerr [MW])
                 r1, c1, r2, c2, _ = Cal_Rew_TD3PRRBB(
                     obs, obs2, action_env, rbb_info,
-                    penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru))
+                    penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru),
+                    n_rem=5 - (episode_steps % 5))
             elif proj_type == 'PRLE':
                 r1, c1, r2, c2, _ = Cal_Rew_PRLE(
                     obs, obs2, action_env, rbb_info,
-                    penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru))
+                    penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru),
+                    n_rem=5 - (episode_steps % 5))
             elif proj_type == 'TD3PRLE':
                 # TD3PRLE: 动态阈值 + W_GAP*unfeasible_gap 版
                 r1, c1, r2, c2, _ = Cal_Rew_TD3PRLE(
                     obs, obs2, action_env, rbb_info,
-                    penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru))
+                    penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru),
+                    n_rem=5 - (episode_steps % 5))
             elif proj_type == 'TD3PER':
                 # TD3PER: SOC 目标支 —— 直接调用项目 myfunc (此前手写影子公式, 已 stale)
-                r1, c1, r2, c2, _ = Cal_Rew_TD3PER(
+                r1, c1, d = Cal_Rew_TD3PER(
                     obs, obs2, action_env, rbb_info,
                     penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru))
+                # td3per 的 r2/c2 在它自己的 main 里算 (Cal_Rew_RB 只返回 r1/c1/details)
+                r2 = hst.lower_reward(float(rbb_info['clip_amount']))
+                c2, _c2_info = hst.lower_cost_soc_track(
+                    d['soc_target'], float(obs[2]), float(obs2[2]),
+                    rbb_info['pbrulemin'], rbb_info['pbrulemax'],
+                    5 - (episode_steps % 5), return_info=True)
             else:  # PER (影子电价支)
                 _, c = Cal_Rew(obs, obs2, action_env)
                 r1 = obs2[-1] * obs[0] * TIME - penalty_NN_H - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0.0) * TIME

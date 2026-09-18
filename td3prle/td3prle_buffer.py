@@ -152,18 +152,17 @@ class PRLEBuffer(PrioritizedReplayBuffer):
         """
         Recompute the stored L-agent costs (c2); rewards (r2) are untouched.
 
-        c2 = C2_SOC_COEFF * (SOC_new − soc_target)^2 is a target-centred
-        quadratic potential with NO wind dependence (soc_target comes from the
-        H signal, not from the wind thresholds), so relabeling is the identity
-        as long as the archived soc_target is passed back to the function. The
-        call is kept for interface compatibility with relabel_c2_substep;
-        context entries {'u', 'SOC_new', 'soc_target'} are stored for it.
+        注意: 本方法当前**无人调用** —— 新口径 c2 = +1·trackerr [MW]
+        (参考集合 = Soctrack范围 ∩ 平抑窗口, 单一真源 hsrl_soctarget) 只依赖该
+        transition 自己存档的 (soc_target, SOC, 窗口, n_rem), 与风速分段阈值无关,
+        因此阈值变化只需 relabel H 层 (r1/c1), L 层保持原值即可 (与 prle 一致)。
+        保留本 API 以备将来使用: 若届时需要 relabel, 回调必须能拿到 (窗口, n_rem,
+        SOC_prev), 仅凭 {'u','SOC_new','soc_target'} 无法重算 trackerr。
 
         Parameters
         ----------
         relabel_c2_fn : callable
             Function with signature relabel_c2_fn(u, SOC_new, soc_target) → c2.
-            Typically td3prle_myfunc.relabel_c2_substep.
 
         Returns
         -------
