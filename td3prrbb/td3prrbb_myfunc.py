@@ -329,7 +329,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     # ==== Lower Level (L) —— 两区间分治 (单一真源 hsrl_soctarget) ====
     #   r2 = −1·clip_amount [MW]  越出平抑窗口的裁剪量
     #   c2 = +1·trackerr    [MW]  实际施加 pb 到"Soctrack范围 ∩ 平抑窗口"的距离
-    #                             (空交集 ⇒ 退化为最近可达端点, 竭力即不罚)
+    #                             (空交集 ⇒ 无范围, 只有纯粹一个竭力值 r*: 顶到才不罚)
     n_rem = n_rem if n_rem is not None else rbb_info.get('n_rem')
     if n_rem is None:
         raise ValueError('Cal_Rew_PRRBB: 需要 n_rem (块内剩余步数 = 5 − step%5)')

@@ -31,24 +31,33 @@ HSRL 下层 SOC 目标语义 —— 单一真源
          W = [pbrulemin, pbrulemax]                                 [MW]
     ③ 参考集合
          F = B ∩ W                                  （"rule 内 best 范围"）
-         若 F = ∅ ⇒ 取最近的可达端点 W_hi（B 在窗口上方）/ W_lo（B 在窗口下方）
-                     = 该状态下"竭力"所能达到的最好 ⇒ trackerr = 0
+         若 F ≠ ∅ ⇒ 参考集合就是**区间** F（L 可在其中任选努力水平）
+         若 F = ∅ ⇒ **不存在范围，只有纯粹的一个"竭力值"**（零宽单点）
+                     r* = W_hi（B 在窗口上方）/ W_lo（B 在窗口下方）
+                        = 该状态下尽力所能达到的最好的一点
 
     ④ 两个通道（单位一致：MW）
          clip_amount = |pb_cmd − pbrule|            （RBB 硬裁剪量）
          r2 = −L_CLIP_COEF · clip_amount            ≤ 0   "越窗：做了不该做的"
          trackerr = dist(pbrule, 参考集合)          ≥ 0   "迟到：该做的没做"
+                    F = ∅ 时 = |pbrule − r*|：只有恰好顶到 r* 才为 0，两侧偏离都线性计费
          c2 = +L_TRACK_COEF · trackerr
 
 性质（本设计的全部行为）
 ------------------------
-* **零成本集合 = F（一个区间，不是点）**：L 可在"摊还端 … 一步填平端"之间任选努力
-  水平 ⇒ 不再被逼走最激进端（更小 |pb| ⇒ 更少退化/波动/自致窗口吞吐）。
+* **零成本集合 = 参考集合**：`F ≠ ∅` 时是**区间**（L 可在"摊还端 … 一步填平端"之间
+  任选努力水平 ⇒ 不再被逼走最激进端；更小 |pb| ⇒ 更少退化/波动/自致窗口吞吐）；
+  `F = ∅` 时是**零宽单点**（见下条）。
+* **`F = ∅` ⇒ 只有那一个"竭力值"免费**：目标在平抑窗口内本来就做不到（结构性不可行）
+  时，参考集合**不是区间**，只有唯一一点
+      r* = clip(δ/g, W) = W 里离 Soctrack 范围 B 最近的端点
+  只有 `pbrule == r*`（真顶到该端点）才 `trackerr = 0`；**任何偏离都按 `|pbrule − r*|`
+  线性计费**。即：真正不可达的那段缺口不计费（由上层块末 gap 罚承接），但"没尽力"
+  照罚 ⇒ `sum_c2` 度量的是"下层有没有尽力"，而不是"H 的目标有多远"，λ2 不会被顶死。
+  注：单点比区间**更好学**——区间内部梯度恒 0（无信号），单点两侧都有斜率 ±1 的线性
+  梯度，把策略推回该端点。
 * **`trackerr(规则动作) ≡ 0`**：规则 `pb = clip(δ/g, W)` 在 `F ≠ ∅` 时落在 F 的上端、
-  在 `F = ∅` 时正是回退端点 ⇒ 与既有原则"零成本动作 = 规则 SocTracker"完全一致。
-* **`F = ∅` 时不可控部分不计费**：目标在平抑窗口内本来就做不到（结构性不可行）时
-  只由 r2 罚越窗，trackerr 归 0（"竭力即不罚"）——避免 `sum_c2` 变成"H 的目标有多远"
-  的代理、把 λ2 永久顶死。
+  在 `F = ∅` 时正是那个竭力值 r* ⇒ "零成本动作 = 规则 SocTracker"这条既有原则不变。
 * **`n_rem = 1` 时 B 退化为一点**（= 一步填平）⇒ 最后一步必须精确到位，与上层块末
   gap 罚同语义；此时 `c2 = L_TRACK_COEF·g·|pbrule − pb_est|`，即旧 `slack` 口径
   （旧口径是"一步填平留点"的特例）。
@@ -142,9 +151,14 @@ def soc_track_range(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n_rem,
     Returns
     -------
     trackerr : float  (MW, ≥ 0)  = dist(真正施加的 pb, 参考集合)
+        参考集合 = F = B ∩ W（一个区间）；**`F = ∅` 时退化为单点 r*（无范围）**，
+        此时只有 pb_applied 恰好等于 r* 才为 0，否则 = |pb_applied − r*|。
+        `infeasible_window`（被迫吞吐）时恒为 0 —— 不可归责于下层。
     info     : dict
-        delta, gain, pb_applied, band_lo/hi, F_lo/hi, ref_lo/hi, gap_empty,
-        n_rem, d_next, d_ref, infeasible_window, trackerr, trackerr_mwh
+        delta, gain, pb_applied, band_lo/hi, F_lo/hi, ref_lo/hi, ref_is_point,
+        gap_empty, n_rem, d_next, d_ref, infeasible_window, trackerr, trackerr_mwh
+        （`F = ∅` 时 `F_lo > F_hi` 只是"交集为空"的哨兵值，请用 ref_lo/ref_hi；
+          `ref_is_point=True` ⇔ 零成本集合是一个单点，即"只有竭力值免费"）
     """
     soc_target = float(soc_target)
     SOC_prev, SOC_next = float(SOC_prev), float(SOC_next)
@@ -158,10 +172,11 @@ def soc_track_range(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n_rem,
     d_next = abs(soc_target - SOC_next)
 
     # 平抑窗口不可行（平抑 ∩ 物理 = ∅）：本步残差不可归责于下层
+    # 参考集合此时无意义（整步免罚）⇒ ref_is_point=False，不冒充"竭力单点"
     if pbrulemin > pbrulemax:
         info = dict(delta=delta, gain=g, pb_applied=pb_app, n_rem=n_rem,
                     band_lo=0.0, band_hi=0.0, F_lo=0.0, F_hi=0.0,
-                    ref_lo=0.0, ref_hi=0.0, gap_empty=True,
+                    ref_lo=0.0, ref_hi=0.0, ref_is_point=False, gap_empty=True,
                     d_next=d_next, d_ref=abs(delta), d_best=abs(delta),
                     pb_best=0.0, soc_best=SOC_prev, slack=0.0,
                     infeasible_window=True, trackerr=0.0, trackerr_mwh=0.0)
@@ -172,18 +187,24 @@ def soc_track_range(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n_rem,
     pb_n = delta / (g * n_rem)
     band_lo, band_hi = min(pb_1, pb_n), max(pb_1, pb_n)
 
-    # ② ∩ 平抑范围 ⇒ 参考集合 F；空交集 ⇒ 最近的可达端点（竭力即不罚）
+    # ② ∩ 平抑范围 ⇒ 参考集合
+    #    F ≠ ∅ ⇒ 区间 [F_lo, F_hi]（区间内任一点都免费）
+    #    F = ∅ ⇒ **没有范围，只有唯一一个"竭力值"**：W 里离 B 最近的端点，
+    #            记 ref_lo == ref_hi（零宽点）。只有恰好顶到它才免罚，两侧偏离都按
+    #            |pb_app − r*| 线性计费；够不着的那段缺口不可达 ⇒ 由上层块末 gap 罚承接。
     F_lo, F_hi = max(band_lo, pbrulemin), min(band_hi, pbrulemax)
     gap_empty = F_lo > F_hi
     if gap_empty:
         ref_lo = ref_hi = pbrulemax if band_lo > pbrulemax else pbrulemin
     else:
         ref_lo, ref_hi = F_lo, F_hi
+    ref_is_point = bool(ref_lo == ref_hi)      # 零成本集合是单点（F=∅，或 F 收缩成一点）
 
     trackerr = max(0.0, ref_lo - pb_app, pb_app - ref_hi)
 
     # 诊断量保持旧含义 ⇒ 与历史 run 的 CSV/TB 列直接可比：
     #   pb_best = 规则 SocTracker 的动作 = clip(δ/g, 参考集合)（等价 clip(δ/g, 平抑窗口)）
+    #             F=∅ 时参考集合是零宽点 ⇒ pb_best 恒等于那个竭力值 r*
     #   d_best  = 该动作后的残差；slack = trackerr 的 MWh 等价 (= trackerr/g)
     pb_best = float(np.clip(delta / g, ref_lo, ref_hi))
     soc_best = SOC_prev + g * pb_best
@@ -191,7 +212,8 @@ def soc_track_range(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n_rem,
 
     info = dict(delta=delta, gain=g, pb_applied=pb_app, n_rem=n_rem,
                 band_lo=band_lo, band_hi=band_hi, F_lo=F_lo, F_hi=F_hi,
-                ref_lo=ref_lo, ref_hi=ref_hi, gap_empty=gap_empty,
+                ref_lo=ref_lo, ref_hi=ref_hi, ref_is_point=ref_is_point,
+                gap_empty=gap_empty,
                 d_next=d_next, d_ref=d_best, d_best=d_best,
                 pb_best=pb_best, soc_best=soc_best, slack=trackerr / g,
                 infeasible_window=False,

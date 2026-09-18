@@ -8,7 +8,7 @@
     r2 = −1 · clip_amount                 [MW]   越出平抑窗口的裁剪量
     c2 = +1 · trackerr                    [MW]   实际施加 pb 到参考集合的距离
          参考集合 = Soctrack范围 [δ/(g·n_rem), δ/g] ∩ 平抑窗口 [pbrulemin, pbrulemax]
-                    空交集 ⇒ 退化为最近的可达端点（竭力即不罚）
+                    空交集 ⇒ **不存在范围，只有纯粹的一个竭力值 r***（零宽单点，只有顶到它才不罚）
     块末追踪偏好 = 10·max(0, |target−SOC_end| − 0.1)  (进 r1)
 
 差异只允许出现在**上层**（td3per 非分段 / td3prrbb·prle 风价分段）与观测约定。
@@ -135,8 +135,9 @@ for tag, (target, prev, lo, hi) in {
     assert abs(trackerr) < 1e-9, (tag, trackerr, info)
     assert abs(info['pb_best'] - pb_rule) < 1e-12, (tag, info['pb_best'], pb_rule)
     tr_idle, _ = hst.soc_track_range(target, prev, prev, lo, hi, N_REM)
-    print('  {:<24s} 规则动作 trackerr={:.3g} | 完全不动 trackerr={:8.3f} MW  gap_empty={}'
-          .format(tag, trackerr, tr_idle, info['gap_empty']))
+    print('  {:<24s} 规则动作 trackerr={:.3g} | 完全不动 trackerr={:8.3f} MW  '
+          'gap_empty={} ref_is_point={}'
+          .format(tag, trackerr, tr_idle, info['gap_empty'], info['ref_is_point']))
 
 print('=' * 84)
 print('4. td3per 的本地包装 == 单一真源 (防漂移)')

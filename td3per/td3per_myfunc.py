@@ -327,7 +327,8 @@ def lower_cost_soc_track(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n
     """下层 c2 = +coef · trackerr [MW]（两区间分治；单一真源 = hsrl_soctarget）。
 
     口径（本轮替换旧"能力内 slack"）：参考集合 = Soctrack 范围
-    `[δ/(g·n_rem), δ/g]` ∩ 平抑窗口；空交集 ⇒ 退化为最近的可达端点（竭力即不罚）。
+    `[δ/(g·n_rem), δ/g]` ∩ 平抑窗口；空交集 ⇒ **不存在范围，只有纯粹的一个竭力值 r***
+    = 窗口里离 Soctrack 范围最近的端点（零宽单点：只有顶到 r* 才不罚，两侧偏离都线性计费）。
     `trackerr` = 真正施加的 pb（由 SOC 变化反解）到参考集合的距离 [MW]。
     r2/c2 同为 MW 口径、系数同为 1 ⇒ 两者可直接相加/比较。
     """

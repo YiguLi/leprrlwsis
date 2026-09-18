@@ -5,7 +5,7 @@
 被钉住的设计（`hsrl_soctarget`）：
     B  = [δ/(g·n_rem), δ/g]                      ← Soctrack 范围（摊还端 … 一步填平端）
     W  = [pbrulemin, pbrulemax]                  ← 平抑范围（rule 可行窗口）
-    F  = B ∩ W                                   ← 参考集合；F=∅ ⇒ 最近的可达端点
+    F  = B ∩ W                                   ← 参考集合；F≠∅ = 区间, F=∅ = 零宽单点 r*
     r2 = −1·|pb_cmd − pbrule|                    [MW]  越窗
     c2 = +1·dist(pb_applied, F) = +1·trackerr    [MW]  迟到/少做
 
@@ -16,6 +16,9 @@
   4. n_rem ↓ ⇒ 摊还端逐步收紧（deadline 时间表）
   5. r2 ≤ 0 ≤ c2，同系数 1、同单位 MW；`r2 + c2 = 0 ⇔ 不越窗 ∧ 落在 F 内`
   6. 平抑窗口不可行（逼吞吐）⇒ trackerr = 0（不可归责于下层）
+  7. **F = ∅ ⇒ 参考集合是零宽单点**（无范围）：`ref_is_point=True`、`ref_lo == ref_hi == r*`
+     且 r* 必是 W 的端点；只有 `pb == r*` 免费，两侧偏离都恰好 = |pb − r*|；
+     越窗 2 MW 再夹回 r* 的"白费力"只吃 r2 ⇒ 严格劣于顶在 r*（唯一最优点）
 """
 import os
 import sys
@@ -169,6 +172,71 @@ print('=' * 84)
 tr, info = hst.soc_track_range(5.0, 3.0, 3.4, 5.0, -5.0, 3)
 assert tr == 0.0 and info['infeasible_window']
 print('  lo>hi 时 trackerr=0（infeasible_window={}）'.format(info['infeasible_window']))
+
+print('=' * 84)
+print('7. F=∅ ⇒ 参考集合是零宽单点（"只存在纯粹的一个竭力值"）：只有顶到它才免费')
+print('=' * 84)
+n_pt = n_samp = n_zero_nonref = n_idle = 0
+mx_lin = 0.0
+sum_idle = 0.0
+for _ in range(6000):
+    target = float(rng.uniform(0.5, 5.5))
+    prev = float(rng.uniform(0.5, 5.5))
+    lo = float(rng.uniform(-5.0, 2.0))
+    hi = lo + float(rng.uniform(0.2, 8.0))
+    n_rem = int(rng.randint(1, 6))
+    _, info = hst.soc_track_range(target, prev, prev, lo, hi, n_rem)   # 只看几何
+    if not info['gap_empty']:
+        continue
+    n_pt += 1
+    r = info['ref_lo']
+    assert info['ref_is_point'] and info['ref_hi'] == r, info          # 零宽 ⇒ 无范围
+    assert abs(r - lo) < 1e-12 or abs(r - hi) < 1e-12, info            # r* 必是 W 的端点
+    assert abs(info['pb_best'] - r) < 1e-12, (info['pb_best'], r)      # 规则动作 ≡ 竭力值
+    # W 内扫点（含 r* 两侧）: trackerr 必须恰好 = |pb − r*|, 只有 pb == r* 才是 0
+    for frac in (-1.0, -0.6, -0.3, -1e-9, 0.0, 1e-9, 0.3, 0.6, 1.0):
+        pb = float(np.clip(r + frac * (hi - lo) * 0.3, lo, hi))
+        tr, _ = hst.soc_track_range(target, prev, soc_after(prev, pb), lo, hi, n_rem)
+        mx_lin = max(mx_lin, abs(tr - abs(pb - r)))
+        n_samp += 1
+        if abs(tr) < 1e-12 and abs(pb - r) > 1e-12:
+            n_zero_nonref += 1                                          # 非 r* 却免费 ⇒ 有范围
+    # "完全不动"（惰速）也要罚：这是 F=∅ 时单点语义的必然结果
+    tr_idle, _ = hst.soc_track_range(target, prev, prev, lo, hi, n_rem)
+    n_idle += 1
+    sum_idle += tr_idle
+assert n_zero_nonref == 0, n_zero_nonref
+print('  {} 组 F=∅: ref_is_point 全 True, ref=[r*, r*] 且 r* 恒为 W 端点; '
+      '{} 个扫描点 max|trackerr − |pb−r*|| = {:.3e}, 非 r* 却免费的点 = {}'
+      .format(n_pt, n_samp, mx_lin, n_zero_nonref))
+print('  同批状态"完全不动"平均 trackerr = {:.2f} MW（{} 组）—— 没尽力照罚'
+      .format(sum_idle / max(1, n_idle), n_idle))
+
+# 越窗白罚 (r2) + 单点免费 (c2) 合成的"帐篷": 唯一最优点就是竭力值 r*
+n_tent = 0
+for _ in range(6000):
+    target = float(rng.uniform(0.5, 5.5))
+    prev = float(rng.uniform(0.5, 5.5))
+    lo = float(rng.uniform(-5.0, 2.0))
+    hi = lo + float(rng.uniform(0.2, 8.0))
+    n_rem = int(rng.randint(1, 6))
+    _, info = hst.soc_track_range(target, prev, prev, lo, hi, n_rem)
+    if not info['gap_empty']:
+        continue
+    r = info['ref_lo']
+    # 顶在 r*: 指令不越窗 ⇒ clip_amount = 0, trackerr = 0 ⇒ 总代价 0
+    assert abs(r - lo) < 1e-12 or abs(r - hi) < 1e-12
+    assert abs(float(np.clip(r, lo, hi)) - r) < 1e-12
+    # 朝窗外再推 2 MW: 施加值仍被夹回 r*(⇒ trackerr=0), 但指令越窗吃 r2 = −2
+    over = lo - 2.0 if abs(r - lo) < 1e-12 else hi + 2.0
+    pb_over = float(np.clip(over, lo, hi))
+    assert abs(pb_over - r) < 1e-12
+    tr_over, _ = hst.soc_track_range(target, prev, soc_after(prev, pb_over), lo, hi, n_rem)
+    total_over = hst.lower_reward(abs(over - pb_over)) + hst.L_TRACK_COEF * tr_over
+    assert abs(tr_over) < 1e-12 and total_over < -1.0, (tr_over, total_over)
+    n_tent += 1
+print('  {} 组: 顶在 r* ⇒ r2+c2 = 0；越窗 2 MW 再夹回 r* ⇒ r2+c2 ≤ −2（白费力，严格劣）'
+      .format(n_tent))
 
 print('=' * 84)
 print('TEST OK')
