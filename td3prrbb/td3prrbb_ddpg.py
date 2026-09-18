@@ -106,6 +106,9 @@ class SP_TD3(object):
 
         #
         self.epsilon = 1.0
+        # 探索噪声**半宽** (动作单位): 旧式 ±0.05·ε 的 0.05 提成属性,
+        # 使 L 层（残余动作 Δ，量级 ±MW）可单独重标 (main: --l_noise_amp)，H 层不变。
+        self.noise_halfwidth = 0.05
         self.s_t = None  # Most recent state
         self.a_t = None  # Most recent action
         self.is_training = True
@@ -432,7 +435,10 @@ class SP_TD3(object):
 
     def select_action(self, s_t, decay_epsilon=True):
         action = to_numpy(self.actor(to_tensor(np.array([s_t])))).squeeze(0)
-        action += self.is_training * max(self.epsilon,0) * ((np.random.random(self.nb_actions)-0.5)/10)[0] # noise [0.0, 1.0)
+        if self.is_training:
+            eps = max(self.epsilon, 0.0)
+            hw = float(getattr(self, 'noise_halfwidth', 0.05))
+            action = action + (np.random.random(self.nb_actions) - 0.5) * 2.0 * hw * eps
 
         if decay_epsilon:
             self.epsilon -= self.depsilon

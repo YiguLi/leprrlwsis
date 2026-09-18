@@ -60,6 +60,10 @@ HSRL 下层 SOC 目标语义 —— 单一真源
   梯度，把策略推回该端点。
 * **`trackerr(规则动作) ≡ 0`**：规则 `pb = clip(δ/g, W)` 在 `F ≠ ∅` 时落在 F 的上端、
   在 `F = ∅` 时正是那个竭力值 r* ⇒ "零成本动作 = 规则 SocTracker"这条既有原则不变。
+* **残余动作 (L 层 RL)**：`pb_cmd = rule_action(δ, W, n_rem) + Δ`，Δ 由 actor 输出、
+  初值 0（末层零初始化）⇒ `Δ≡0` 时 **逐位等于规则下层**（`r2 ≡ 0`、`c2 ≡ 0`）。
+  基线负责 `clip`/物理限幅/被迫吞吐这些非线性，网络只学"相对规则偏多少"。
+  `r2`/`c2`/`λ2` 的口径不变（它们看的是 `pb_cmd` 与 `pbrule`）。
 * **`r2` 计两段 clip（不是只计窗口那一段）**：`clip_amount = |命令 − pbrule|` 天然等于
   "(±10 执行器夹裁量) + (平抑窗口夹裁量)"。RBB 系统**夹了两次**：`CheckAction` 把命令夹到
   ±rated_power(=±10)，再由 `compute_pbrule` 夹到平抑窗口 —— 两次都要计费。
@@ -331,6 +335,43 @@ def lower_cost_soc_track(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n
 
 
 # ---------------------------------------------------------------- L 层对偶（单一真源）
+def rule_action(soc_target, SOC_prev, pbrulemin, pbrulemax, n_rem=None,
+                eta_c=0.98, eta_d=0.98, time=1.0 / 60, rated_power=10.0,
+                soc_tol=0.0, amortized=False):
+    """规则下层 (`SocTracker.act`) 的动作 —— **残余动作的基线**（单一真源）。
+
+        δ = soc_target − SOC_prev
+        |δ| ≤ soc_tol : 不主动吞吐 ⇒ clip(0, W)（窗口不含 0 时做最小幅度**被迫**吞吐）
+        否则          : clip( δ/g , W )      g = η_c·dt (δ>0) / dt/η_d (δ<0)
+        窗口不可行 (pbrulemin > pbrulemax): 返回额定限幅后的值 (交 RBB 兜底)
+
+    `amortized=True` 时用摊还端 `δ/(g·n_rem)`（同样落在参考集合内，更省退化；
+    但那时基线不再与 `SocTracker` 逐位相同 ⇒ A/B 对照用默认的一步填平端）。
+
+    与 `td3prrlrb/td3prperb/...rule_bess.SocTracker.act` **逐位一致**
+    （`agentutil/test_l_residual.py` 有 4000 组随机输入的断言，含不可行窗口与死区）。
+
+    【为什么基线取"一步填平"而不是"顶格到窗口边界"】见 `SocTracker.act` 的注释：
+    窗口中心 = ptur − pg_prev ± limit，而本步 pb 会成为下一步 pg_prev 的一部分
+    ⇒ 顶格会让下一步窗口整体偏离 0、被逼继续同向吞吐 ⇒ 自致过冲。取 δ/g 是
+    "在窗口内对着目标最大化"的**最小充分形式**，也因此正是零成本动作。
+    """
+    delta = float(soc_target) - float(SOC_prev)
+    pbrulemin, pbrulemax = float(pbrulemin), float(pbrulemax)
+    if abs(delta) <= float(soc_tol):
+        if pbrulemin > pbrulemax:
+            return 0.0
+        return float(np.clip(0.0, pbrulemin, pbrulemax))
+    g = float(eta_c) * float(time) if delta > 0 else float(time) / float(eta_d)
+    if amortized:
+        nr = float(n_rem) if n_rem else 1.0
+        g = g * nr
+    pb = float(np.clip(delta / g, -float(rated_power), float(rated_power)))
+    if pbrulemin > pbrulemax:
+        return pb
+    return float(np.clip(pb, pbrulemin, pbrulemax))
+
+
 def dual_update_L(agent, d_block):
     """L 层对偶上升：λ2 ← clip(λ2 · exp(η2·(EMA_c2/d_block − 1)), L_LAM_MIN, L_LAM_MAX)。
 

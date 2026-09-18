@@ -174,16 +174,17 @@ class BessFillStats:
     def __init__(self):
         self.n_total = 0
         self.n_warmup = 0
-        self.n_mismatch = 0
-        self.max_abs_gap = 0.0
+        self.n_mismatch = 0        # 记录的动作**无法重建命令**的条数（应为 0 = 接线正确）
+        self.n_clipped = 0         # 命令被窗口/额定夹掉的条数（**正常工况**, 即 r2 通道）
+        self.max_abs_gap = 0.0     # max|命令 − 实际施加| = 两段 clip 量 (r2 通道)
         self.sum_reward = 0.0
         self.sum_cost = 0.0
         self.printed = False
 
     def summary(self):
-        return ('[bess-fill] 入池 {} 条 (其中 warmup 规则动作 {} 条, 与施加值不一致 {} 条, '
-                'max|a−applied|={:.3g}) | warmup 期 r2 合计={:.1f} c2 合计={:.1f}'
-                .format(self.n_total, self.n_warmup, self.n_mismatch,
+        return ('[bess-fill] 入池 {} 条 (warmup 规则动作 {} 条 | 记录动作无法重建命令 {} 条 | '
+                '命令被夹 {} 条, max|cmd−applied|={:.3g}) | warmup 期 r2 合计={:.1f} c2 合计={:.1f}'
+                .format(self.n_total, self.n_warmup, self.n_mismatch, self.n_clipped,
                         self.max_abs_gap, self.sum_reward, self.sum_cost))
 
     def maybe_report_on_policy_step(self):
@@ -200,7 +201,8 @@ class BessFillStats:
 
 
 def fill_bess_transition(agent_L, s_L, a_L, r2, c2, s_L_next, done_L,
-                         applied_pb=None, warmup=False, stats=None, **kwargs):
+                         applied_pb=None, warmup=False, stats=None,
+                         cmd_pb=None, rule_pb=None, **kwargs):
     """BESS-RL 项目**下层 transition 入池的唯一入口**。
 
     warmup 期下层由规则行为体驱动，"事后填入"= 用**规则的命令动作**与它产生的
@@ -210,10 +212,17 @@ def fill_bess_transition(agent_L, s_L, a_L, r2, c2, s_L_next, done_L,
     Parameters
     ----------
     agent_L : 下层 agent（须有 observe_jump）
-    a_L     : 记入 buffer 的动作 —— 命令值（与 r2 的 min(|cmd − pbrule|, 20) 口径一致）
+    a_L     : 记入 buffer 的动作
+        残余动作的项目（td3per/td3prrbb/td3prle/td3prrlrb 等）里 a_L = **Δ**；
+        影子电价的项目（per/prrbb）里 a_L = 命令值本身。
     applied_pb : float or None
-        该步**实际施加**的 BESS 功率（RBB 夹窗口后的 pbrule）；给出时核对
-        |a_L − applied_pb| 是否为 0（非 0 仅应在"窗口不可行"的罕见步出现）并计数。
+        该步**实际施加**的 BESS 功率（RBB 夹窗口后的 pbrule）。
+    cmd_pb : float or None
+        下发给 RBB 的**有效命令**（残余动作下 = 规则基线 + Δ）。给了它才可能核对
+        "记录的动作能否重建命令"；不给则退回拿 a_L 当命令（旧语义）。
+    rule_pb : float or None
+        残余动作下的**规则基线**（MW）。核对式 = `|rule_pb + a_L − cmd_pb| == 0`：
+        少了它就会去比 |cmd − Δ| —— 那在残余语义下**永远**不等，计数会变成噪声。
     warmup  : bool  是否处于 warmup 期（用于统计）
     stats   : BessFillStats or None
     **kwargs : 透传给 observe_jump（如 prle/td3prle 的 context）
@@ -231,11 +240,24 @@ def fill_bess_transition(agent_L, s_L, a_L, r2, c2, s_L_next, done_L,
             stats.n_warmup += 1
             stats.sum_reward += float(r2)
             stats.sum_cost += float(c2)
+            a_rec = float(np.asarray(a_L).reshape(-1)[0])
+            # ① 记录的动作能否**重建**下发给 RBB 的命令（抓接线 bug: 记错动作/漏加基线）
+            if cmd_pb is not None:
+                _ref = float(cmd_pb)
+                _rec = (0.0 if rule_pb is None else float(rule_pb)) + a_rec
+            else:
+                _ref = None if applied_pb is None else float(applied_pb)
+                _rec = a_rec
+            if _ref is not None and abs(_rec - _ref) > 1e-9:
+                stats.n_mismatch += 1
+            # ② 命令 vs 实际施加 = **两段 clip 量**（就是 r2 的那一段）。
+            #    残余动作让规则基线端贴墙, 因此 >0 是**正常工况**而非错误 ⇒ 单独计数。
             if applied_pb is not None:
-                gap = abs(float(np.asarray(a_L).reshape(-1)[0]) - float(applied_pb))
-                stats.max_abs_gap = max(stats.max_abs_gap, gap)
-                if gap > 1e-9:
-                    stats.n_mismatch += 1
+                _gap = abs((float(cmd_pb) if cmd_pb is not None else a_rec)
+                           - float(applied_pb))
+                stats.max_abs_gap = max(stats.max_abs_gap, _gap)
+                if cmd_pb is not None and _gap > 1e-9:
+                    stats.n_clipped += 1
     return agent_L.observe_jump(s_L, a_L, r2, c2, s_L_next, done_L, **kwargs)
 
 

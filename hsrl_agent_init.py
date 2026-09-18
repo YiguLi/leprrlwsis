@@ -139,6 +139,39 @@ def q_probe(agent, states, actions, critic='critic_p'):
 # =============================================================================
 # 触发点（修正 step == warmup 的不可达 bug）
 # =============================================================================
+def zero_actor_output(agent, verbose=False):
+    """把 actor（与 actor_target）的**输出层权重与 bias 全部置 0**。
+
+    用途：**残余动作**参数化（`pb = 规则 + Δ`，Δ 由 actor 输出）时，保证 t=0 时
+    `Δ ≡ 0` ⇒ RL 下层的起点**逐位等于规则下层**（"先稳定到规则"是结构保证）。
+    只把 bias 置 0 不够：输出层权重仍会把隐层激活映射成非零输出。
+    梯度不受影响（∂L/∂W_out ∝ 隐层激活 ≠ 0）——标准的 "zero-init residual head"。
+
+    `model.Actor` 的输出层是 **fc4**（fc3 是隐层）；缺 fc4 时退回 fc3（`Actor_L` 那种结构）。
+    Returns: 被处理的网络名列表（便于断言/日志）。
+    """
+    done = []
+    for name in ('actor', 'actor_target'):
+        net = getattr(agent, name, None)
+        if net is None:
+            continue
+        last = getattr(net, 'fc4', None) or getattr(net, 'fc3', None)
+        if last is None or not hasattr(last, 'weight'):
+            continue
+        with torch.no_grad():
+            last.weight.data.zero_()
+            if getattr(last, 'bias', None) is not None:
+                last.bias.data.zero_()
+        done.append(name)
+    if verbose:
+        try:
+            from util import prCyan
+        except Exception:
+            prCyan = print
+        prCyan('zero_actor_output: {} 的输出层 (权重+bias) 置 0 ⇒ 残余动作 Δ≡0 起点'.format(done))
+    return done
+
+
 def first_trigger_step(warmup):
     """warmup 之后第一个块末步 = min{s ≡ 4 (mod 5) : s >= warmup}。
 
