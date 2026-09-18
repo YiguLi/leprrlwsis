@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
-"""探针 2: 找出 run8 里 trackerr 最大的步, 判断"实际施加 ≠ 参考点"的成因。
+"""探针 2: 找出 run 里 trackerr 最大的步, 判断"实际施加 ≠ 参考点"的成因。
 
-只读。用法: python agentutil/_probe_trackerr_worst.py [csv 相对路径] [topN]
+只读。用法: python agentutil/probe_l_trackerr_worst.py [csv 相对路径] [topN]
+
+典型结论 (TD3PRRBB-run8): 最大 trackerr = 整条窗口宽度, 全部来自
+"band 落在窗口下方 + 下层停在窗口上沿(≈不动)" 的步 —— 即下层惰速的指纹。
 """
 import os
 import sys
