@@ -377,7 +377,7 @@ def train(num_iterations_H,
             rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
             5 - (episode_steps % 5),
             return_info=True)
-        c2_slack = c2_info['slack']   # 新口径: trackerr 的 MWh 等价 (= trackerr/g)
+        c2_slack = c2_info['slack']   # 新口径: trackerr 的 MWh 等价 (= trackerr·g, 因 ΔSOC = g·pb)
         sum_c2 += c2
 
         # 下一状态 L 观测: 用下一状态重算可行域 (pb 无关; soc_target 块内固定)

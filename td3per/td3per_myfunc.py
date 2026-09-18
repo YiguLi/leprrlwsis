@@ -309,7 +309,7 @@ def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
 
 def soc_track_slack(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n_rem,
                     eta_c=0.98, eta_d=0.98, time=1.0 / 60):
-    """兼容旧名：返回"能力内搁置量" (MWh) = trackerr/g 与诊断量。
+    """兼容旧名：返回"能力内搁置量" (MWh) = trackerr·g 与诊断量。
 
     单一真源 = `hsrl_soctarget.soc_track_range`（两区间分治：Soctrack 范围 ∩ 平抑窗口）。
     """
@@ -637,7 +637,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
                 'u': details['u'], 'pr': details['pr'],
                 'r1': r1, 'c1_step': c1_step, 'gap_pen': gap_pen, 'c1': c1,
                 'r2': r2, 'c2': c2,
-                'c2_slack': c2_info['d_next'] - c2_info['d_best'],
+                'c2_slack': c2_info['slack'],          # 与训练路径同口径 (trackerr·g [MWh])
                 'pb_best': c2_info['pb_best'],
                 'd_best': c2_info['d_best'], 'd_next': c2_info['d_next'],
                 'profit': profit_step,

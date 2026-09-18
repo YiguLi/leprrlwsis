@@ -114,7 +114,7 @@ print('  {} 组: 规则动作 trackerr≡0（其中 F=∅ 的 {} 组走 best-eff
 print('=' * 84)
 print('3. n_rem = 1 ⇒ 退化为"一步填平"点（与旧 slack 口径同向时逐位一致）')
 print('=' * 84)
-mx_def = mx_old = 0.0
+mx_def = mx_old = mx_slack = mx_mwh = 0.0
 n_old = 0
 for _ in range(2000):
     target = float(rng.uniform(0.5, 5.5))
@@ -133,10 +133,16 @@ for _ in range(2000):
     mx_def = max(mx_def, abs(tr - abs(info['pb_applied'] - pb_ref)))
     if lo <= hi and lo <= delta / g <= hi:          # 未夹窗口 ⇒ 两口径定义重合
         mx_old = max(mx_old, abs(tr - old_slack(target, prev, sn, lo, hi) / g))
+        # 诊断量 slack 必须等于旧口径的 MWh 量 (ΔSOC = g·pb ⇒ MWh = MW·g)
+        mx_slack = max(mx_slack, abs(info['slack'] - old_slack(target, prev, sn, lo, hi)))
         n_old += 1
+    mx_mwh = max(mx_mwh, abs(info['trackerr_mwh'] - tr * g))
 print('  max|trackerr(n=1) − |pb_app − clip(δ/g,W)|| = {:.3e}'.format(mx_def))
 print('  max|trackerr(n=1) − 旧 slack/g| = {:.3e}  (n={} 未夹窗口样本)'.format(mx_old, n_old))
+print('  max|info[slack] − 旧 slack(MWh)| = {:.3e}  (同一批样本, 逐位)'.format(mx_slack))
+print('  max|info[trackerr_mwh] − trackerr·g| = {:.3e}  (全样本; 换算方向已修)'.format(mx_mwh))
 assert mx_def < 1e-9 and (n_old == 0 or mx_old < 1e-9)
+assert mx_slack < 1e-9 and mx_mwh < 1e-12
 
 print('=' * 84)
 print('4. deadline 时间表: n_rem ↓ ⇒ 摊还端收紧（每步要求推进更多）')

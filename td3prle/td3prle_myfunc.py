@@ -498,7 +498,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
         'degradation': BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time,
         'soc_target': soc_target,
         'soc_track_err': abs(soc_target - SOC_new),   # 无符号残差 |target − SOC| (与 prle 同义)
-        'soc_slack': slack,                           # trackerr/g [MWh] (hst 诊断量)
+        'soc_slack': slack,                           # trackerr·g [MWh] (hst 诊断量)
         'soc_deviation': soc_dev,                     # 仅诊断: 原安全带偏离 (不再用于 c2)
         # Power
         'ptur': ptur,

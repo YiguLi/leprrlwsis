@@ -71,7 +71,7 @@ HSRL 下层 SOC 目标语义 —— 单一真源
       因此环境/施加功率/其它通道全部不变，只有 r2 与记录列变化。
   封顶 `L_CLIP_CAP = 20 MW` 只截断病态饱和幅值（不改变最优动作：越界方向在 0~10 MW 仍有斜率 1）。
 * **`n_rem = 1` 时 B 退化为一点**（= 一步填平）⇒ 最后一步必须精确到位，与上层块末
-  gap 罚同语义；此时 `c2 = L_TRACK_COEF·g·|pbrule − pb_est|`，即旧 `slack` 口径
+  gap 罚同语义；此时 `c2 = L_TRACK_COEF·|pbrule − pb_est|` [MW]（= 旧 `slack`/g；诊断量 `slack = trackerr·g` [MWh]）
   （旧口径是"一步填平留点"的特例）。
 * **窗口不可行**（`pbrulemin > pbrulemax`，被迫吞吐不可归责于下层）⇒ trackerr = 0。
 
@@ -231,7 +231,7 @@ def soc_track_range(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n_rem,
     # 诊断量保持旧含义 ⇒ 与历史 run 的 CSV/TB 列直接可比：
     #   pb_best = 规则 SocTracker 的动作 = clip(δ/g, 参考集合)（等价 clip(δ/g, 平抑窗口)）
     #             F=∅ 时参考集合是零宽点 ⇒ pb_best 恒等于那个竭力值 r*
-    #   d_best  = 该动作后的残差；slack = trackerr 的 MWh 等价 (= trackerr/g)
+    #   d_best  = 该动作后的残差；slack = trackerr 的 MWh 等价 (= trackerr·g, 因 ΔSOC = g·pb)
     pb_best = float(np.clip(delta / g, ref_lo, ref_hi))
     soc_best = SOC_prev + g * pb_best
     d_best = abs(soc_target - soc_best)
@@ -241,9 +241,9 @@ def soc_track_range(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n_rem,
                 ref_lo=ref_lo, ref_hi=ref_hi, ref_is_point=ref_is_point,
                 gap_empty=gap_empty,
                 d_next=d_next, d_ref=d_best, d_best=d_best,
-                pb_best=pb_best, soc_best=soc_best, slack=trackerr / g,
+                pb_best=pb_best, soc_best=soc_best, slack=trackerr * g,
                 infeasible_window=False,
-                trackerr=trackerr, trackerr_mwh=trackerr / g)
+                trackerr=trackerr, trackerr_mwh=trackerr * g)
     return trackerr, info
 
 
