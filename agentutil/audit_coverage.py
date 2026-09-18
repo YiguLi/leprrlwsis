@@ -209,46 +209,6 @@ for proj in GAP_MAINS:
 
 # =============================================================================
 print('=' * 92)
-print('Q4. 六个 TD3 项目的风机起始点 = 0.33 (= hsrl_agent_init.WT_START = warmup 起步)')
-print('=' * 92)
-import torch                                            # noqa: E402
-import hsrl_agent_init as hinit                         # noqa: E402
-import hsrl_warmup as hwarm                             # noqa: E402
-from model import Actor                                 # noqa: E402
-
-TD3_MAINS = [T.PROJECTS[p]['ref'] for p in T.PROJECTS if p.startswith('td3')]
-need(len(TD3_MAINS) == 6, '[Q4]', 'TD3 项目数应为 6, 实得 {}'.format(len(TD3_MAINS)))
-need(abs(hinit.WT_START - 0.33) < 1e-12, '[Q4]', 'WT_START 应为 0.33')
-need(abs(hwarm.WT_START - hinit.WT_START) < 1e-12, '[Q4]',
-     'warmup 起点与策略起点必须同一点 ({} vs {})'.format(hwarm.WT_START, hinit.WT_START))
-for ref in TD3_MAINS:
-    t = src(ref)
-    nt = len(re.findall(r'(?:hinit\.)?init_wt_action_bias\(agent_H', t))
-    need(nt >= 1, '[Q4/{}]'.format(ref), '未设置风机起始点')
-    need('hinit.WT_START' in t, '[Q4/{}]'.format(ref), '未引用 hinit.WT_START')
-    need('lo=0.25' not in t and 'hi=0.40' not in t,
-         '[Q4/{}]'.format(ref), '仍残留 0.25/0.40 随机区间')
-    if 'WT_BIAS_LOW' in t:
-        need('WT_BIAS_LOW = 0.33' in t and 'WT_BIAS_HIGH = 0.33' in t,
-             '[Q4/{}]'.format(ref), 'WT_BIAS_LOW/HIGH 未改成 0.33')
-    need(('--wt_bias_init' in t) or ('wt_bias_init' not in t), '[Q4/{}]'.format(ref), '开关异常')
-    print('  {:<34s} init_wt_action_bias(agent_H, ... hinit.WT_START ...) ✓'.format(ref))
-
-# 动态: 共享实现真的把前 5 维写成 0.33、末维写成 0
-_ag = type('_A', (), {})()
-_ag.actor = Actor(4, 6)
-_ag.actor_target = Actor(4, 6)
-_b = hinit.init_wt_action_bias(_ag, verbose=False)
-need(_b is not None and abs(float(_b[:5].mean()) - 0.33) < 1e-6, '[Q4/动态]', '前 5 维未置 0.33')
-need(abs(float(_b[5])) < 1e-12, '[Q4/动态]', '信号维未置 0')
-need(torch.allclose(_ag.actor_target.fc4.bias, _ag.actor.fc4.bias), '[Q4/动态]',
-     'actor_target 未同步')
-_b2 = hinit.init_wt_action_bias(_ag, value=0.25, sig_value=0.0, verbose=False)
-need(abs(float(_b2[:5].mean()) - 0.25) < 1e-6, '[Q4/动态]', 'value 参数未生效')
-print('  动态: Actor(4,6).fc4.bias <- [0.33]×5 + [0.0], actor_target 同步, value 参数生效 ✓')
-
-# =============================================================================
-print('=' * 92)
 if FAILS:
     print('审计未通过 ({} 项):'.format(len(FAILS)))
     for f in FAILS:

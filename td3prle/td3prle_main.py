@@ -984,8 +984,6 @@ if __name__ == "__main__":
                         help='风速分段起点方法: percentile | kmeans | expert (默认 expert); '
                              '启动后由 LLM 元控制器在此基础上在线调整')
 
-    parser.add_argument('--wt_bias_init', default=1, type=int, choices=[0, 1],
-                        help='风机输出层 bias 初始化到 0.33 (Cp 最优点): 1=开(默认) 0=关')
     parser.add_argument('--value_scale', default=hc.VALUE_SCALE, type=float,
                         help='H 层 r1/c1 进入值函数回归空间的统一缩放 s '
                              '(默认 1000: 把回归目标从 O(1e4) 压到 O(10); '
@@ -1098,9 +1096,6 @@ if __name__ == "__main__":
     # 值函数回归空间归一化 (s = hc.value_scale()): 只作用于 H 层 r1/c1 进入
     # critic 之前; buffer/对偶/日志/CSV 仍是原始口径 (见 hsrl_cost 末尾小节)。
     agent_H.value_scale = hc.value_scale()
-    # ---- 风机起始点: WT 输出层 bias = 0.33 (Cp 最优点; 与 warmup 起步同一点) ----
-    if args.wt_bias_init:
-        hinit.init_wt_action_bias(agent_H, value=hinit.WT_START, sig_value=0.0)
 
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长

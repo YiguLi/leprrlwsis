@@ -16,7 +16,7 @@
    **重算回放池里历史转移的 (r1, c1)**。
 2. **`wB` 的 SOC 贴边折减取消**（`WB_SOC_OUTSIDE`: 0.7 → 1.0，与 `td3prle` 对齐）：
    上层 BESS 盈利不再随 SOC 位置打折，改由 SOC 目标机制承担该约束。
-3. **P0.1 训练起始点**：把 H 层 actor 输出层 bias 覆写为**固定 0.33**（Cp 最优点 a=1/3；`--wt_bias_init`，默认 1）。
+3. **P0.1 训练起始点**：把 H 层 actor 输出层 bias 覆写到 Cp 高效区（`--wt_bias_init`，默认 1）。
 4. **P0.2 罚项不封顶**：`CheckAction` 里 `penalty = min(penalty, 50.0)` 已删除。
 5. **P0.3 24h 相位特征**：H 观测从 4 维扩到 4/6/9 维（`--phase_feat`，默认 1）。
 6. **SOC 死区归属 + 下层追随规则**：下层 `SocTracker` 不再有跟踪死区
@@ -164,7 +164,7 @@ python td3leprrlrb/td3leprrlrb_main.py --llm_provider deepseek   # 覆盖配置�
 | `--llm_config` | `td3leprrlrb/llm_config.json` | 配置 JSON 路径 |
 | `--llm_window` | 7200 | LLM 调整窗口长度（步）。7200 = 5 天；调小可用于快速验证 LLM 层 |
 | `--llm_min_episodes` | 3 | 冷启动保护：episode 数达到该值后才允许 LLM 调整阈值 |
-| `--wt_bias_init` | **1** | **P0.1** 起始点：1 = 把 H 层 actor/actor_target 输出层 bias 覆写为 `WT ≡ 0.33`（= `hinit.WT_START`，Cp 最优点；2026 前为 `U(0.25,0.40)`）+ 信号维 0；0 = 保留 PyTorch 默认 `U(±0.25)`（复现旧 run） |
+| `--wt_bias_init` | **1** | **P0.1** 起始点：1 = 把 H 层 actor/actor_target 输出层 bias 覆写为 `WT∈U(0.25,0.40)` + 信号维 0（Cp 高效区）；0 = 保留 PyTorch 默认 `U(±0.25)`（复现旧 run） |
 | `--phase_feat` | **1** | **P0.3** 24h 相位：0 = 无相位（H 观测 4 维）/ 1 = `[sin, cos]`（6 维）/ 2 = 再 +`[段内剩余比例, 剩余小时/8, 下一段电价/1000]`（9 维） |
 | `--soc_tol` | 0.1 | **上层** gap 罚的豁免带（MWh）：H 只对超过它的目标残差付费（与下层跟踪死区**已解耦**） |
 | `--tracker_dead_zone` | **0.0** | **下层** `SocTracker` 的跟踪死区（MWh）。0 = 尽力追随（残差 0.01 也追，δ=0 时只做窗口允许的最小被迫吞吐）；>0 复现旧的"最小吞吐"行为，但必须 ≤ `--soc_tol` |
@@ -327,11 +327,6 @@ TensorBoard 新增标量：`seg/wind_low_max`、`seg/wind_high_min`（逐步阈�
 `td3prrbb/`、`td3prrlrb/` 零改动。
 
 ### 8.1 P0.1 训练起始点（`--wt_bias_init`，默认 1）
-> **2026 口径更新**：6 个 TD3 项目（td3per / td3prrbb / td3prle / td3prrlrb / td3perrb / td3leprrlrb）的风机起始点已统一为**固定 0.33**
-> （`hsrl_agent_init.WT_START`，即 `lo == hi == 0.33`，= 单机 Cp 最优点 a=1/3），
-> 并与 warmup 期 `WarmupSchedule` 的起点取**同一个值**（策略起步与 warmup 起步同一点）。
-> 本节以下出现的 `U(0.25, 0.40)` 是**该次实验的历史口径**，其测量结论仍然有效。
-
 
 **病因**：`model.Actor.init_weights()` 只初始化 `fc1/fc2/fc3` 的 weight 与 `fc4.weight`
 （±`init_w`=0.003），`fc4.bias` 仍是 PyTorch 默认 `U(±1/√fan_in)`，`fan_in = hidden1 = 16`

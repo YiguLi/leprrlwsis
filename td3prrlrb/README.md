@@ -108,7 +108,7 @@ python td3prrlrb/td3prrlrb_main.py          # 默认 train, 1000 episode (1440 �
 依赖与其它 main 相同（`env.py`/WFSim 的 MATLAB engine、torch、tensorboard、pandas）。
 参数：`--warmup 200`、`--discount 0.99`、`--policy_delay 2`、`--soc_tol 0.1`、
 `--phase_feat 1`（H 观测 4→6 维，24h 相位）、
-`--wt_bias_init 1`（WT 输出层 bias 初始化到**固定 0.33**，= `hinit.WT_START`，Cp 最优点；早期为 [0.25,0.40] 随机）、
+`--wt_bias_init 1`（WT 输出层 bias 初始化到 Cp 高效区 [0.25,0.40]）、
 `--epsilon 4000`（探索 ε 衰减 1→0 的**决策次数**；H 每 5 步决策一次 ⇒ 20k 环境步）、
 `--wt_noise 0.05`、`--sig_noise_max 0.2`、`--sig_noise_min 0.05`（逐维探索幅度，
 信号维 = `max(0.2·ε, 0.05)`）、
