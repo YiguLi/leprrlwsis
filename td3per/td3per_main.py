@@ -16,7 +16,7 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
   * 下层 L: **td3per 自己的 RL BESS 操作保留** (TD3 + PER + EMA 对偶 + RBB 硬裁剪),
       只把"信号 / 追踪目标"换成 SOC 目标:
       - 观测 (5 维蒸馏) = [pbrulemin/10, pbrulemax/10, **soc_target/10**, SOC/10, u/10]
-        (第 3 维原为 shadow_price);
+        (第 3/4 维 = SOC/目标, 第 5 维 = n_rem/5; 旧观测无 n_rem 且目标在第 3 维);
       - r2 = −1·min(clip_amount, 20)            (原影子套利项随信号语义一起删除);
       - c2 = +1·trackerr [MW] (参考集合 = Soctrack范围 ∩ 平抑窗口),
         F ≠ ∅ ⇒ 该区间内任选努力水平; F = ∅ ⇒ **不存在范围, 只有纯粹一个竭力值 r***,
@@ -277,10 +277,11 @@ def train(num_iterations_H,
             pb_original=0.0, ptur=ptur, pg_prev=pg_prev, E=E_current)
 
         # ================================================================
-        # 下层 L 观测 (5 维蒸馏): 第 3 维 = soc_target/10 (原 shadow_price)
+        # 下层 L 观测 (5 维, 规则原配料): [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
         # ================================================================
         norm_observation_L = build_L_obs_distilled(
-            observation, pw_tru, applied_action_H, rbb_info_obs)
+            observation, pw_tru, applied_action_H, rbb_info_obs,
+            5 - (episode_steps % 5))
         prPurple('--L-- obs = {}.'.format(round_list(norm_observation_L, 3)))
         # 下层每一个 5-step 块都是一个 episode
         if episode_steps % 5 == 0:
@@ -385,7 +386,8 @@ def train(num_iterations_H,
             pb_original=0.0, ptur=float(pw_tru2),
             pg_prev=float(observation2[-1]), E=float(observation2[2]))
         norm_observation2_L = build_L_obs_distilled(
-            observation2, pw_tru2, applied_action_H, rbb_info_obs2)
+            observation2, pw_tru2, applied_action_H, rbb_info_obs2,
+            5 - ((episode_steps + 1) % 5))
 
         prGreen('r1 = {} (turb={}, bess={}, deg={})'.format(
             round(r1, 3), round(reward_details['turbine_profit'], 3),
@@ -1063,7 +1065,7 @@ if __name__ == "__main__":
         init_wt_action_bias(agent_H, lo=0.25, hi=0.40, sig_value=0.0)
 
     # 下层 L: 保留 td3per 自己的 RL BESS 操作
-    #   * 观测 5 维蒸馏 = [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
+    #   * 观测 5 维蒸馏 = [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
     #   * r2 = −1·min(clip_amount, 20)
     #   * c2 = +1·trackerr [MW] (实际施加 pb 到参考集合的距离; 零成本动作 = 规则 SocTracker,
     #        F=∅ 时参考集合退化为单点竭力值 ⇒ 只有顶到它才不罚; 见 hsrl_soctarget)
@@ -1093,7 +1095,7 @@ if __name__ == "__main__":
     prCyan('下层奖励/成本口径: r2 = -1·min(clip_amount, 20) [两段 clip 合计]; '
            'c2 = +1·trackerr [MW] (dist(实际施加 pb, 参考集合=Soctrack范围∩平抑窗口)); '
            'F=∅ ⇒ 无范围, 只有纯粹一个竭力值 r* (顶到才不罚); '
-           'L 观测第 3 维 = soc_target/10 (原 shadow_price)')
+           'L 观测 = [pg(t-1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]')
     #TODO 是否预训练
     # agent_H.load_weights('output/1_2310S-run18')
     # agent_L.load_weights('output/1_2310S-run18')

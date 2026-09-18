@@ -12,8 +12,8 @@ current threshold values.
 
 TD3PRLE addition over prle_myfunc.py:
   - build_L_obs_distilled() — 5-dim distilled L observation
-    [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10] (from
-    td3prrbb_myfunc.py); prrbb_S_test() and nine_case_test() use it.
+    [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5] (单一真源
+     hsrl_soctarget.build_L_obs); prrbb_S_test() and nine_case_test() use it.
 
 【信号语义 (本轮变更)】上层 H 第 6 维输出 signal 不再是影子价格, 而是 SOC 目标的
   归一化指令; H 的输出范围不变 ((-0.5, 0.5)), 由【下层】线性映射为物理目标:
@@ -597,23 +597,26 @@ def Original(obs, max_E=6.):
     return np.array([obs[0] * 1000, obs[1] * 10, obs[2] * 10, obs[3] * 10])
 
 
-def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
-    """TD3PRLE 蒸馏 L 观测 (5维): [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10].
+def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info, n_rem=None):
+    """下层观测 (5 维) —— **规则的原配料** (单一真源 hsrl_soctarget.build_L_obs):
 
-    与 TD3PER/TD3PRRBB 同步的五维蒸馏观测: 当前可行域 (RBB, 与 pb 无关) +
-    H 的 SOC 目标 (第 3 维, 下游映射后与 SOC 同刻度, 便于网络直接比较"目标 vs 自身")
-    + 自身 SOC + 风速。c2 = +1·trackerr [MW] 为上层给定目标下的两区间追踪代价
-    (参考集合 = Soctrack范围 ∩ 平抑窗口, 见 hsrl_soctarget);
-    u 仍保留在观测中, 供可行域/其它风速相关逻辑使用。
+        [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
+
+    * `pg(t−1) = observation[-1]` 与 `ptur` 给出平抑窗口的中心;
+    * SOC 与目标同刻度 ⇒ δ = 10·(obs[3] − obs[2]); 加 `n_rem/5` ⇒ 摊还需求 `need` 可算;
+    * 因此规则动作所需的状态量都在观测里 (窗口的平抑部分 = pg(t−1)/ptur; 物理限幅部分
+      由 SOC + 已知常量决定), 不必再从两个近似相等的
+      /10 数里做差 (旧观测里 δ 分辨率只有 ~0.015)。
+    丢掉 u (风速) 与窗口边界 (可由 ptur/pg_prev + 已知限幅推出)。
+
+    `n_rem` = 含当前步的块内剩余步数 (5 - step %% 5) —— **必填**。
+    `rbb_info` 仅为与其它项目同名函数保持签名一致 (本函数不再使用)。
     """
+    if n_rem is None:
+        raise ValueError('build_L_obs_distilled: 需要 n_rem (块内剩余步数 = 5 - step mod 5)')
     soc_target = hst.soc_target_from_signal(applied_action_H[-1])
-    return np.array([
-        rbb_info['pbrulemin'] / 10.0,
-        rbb_info['pbrulemax'] / 10.0,
-        hst.obs_target_dim(soc_target),
-        float(observation[2]) / 10.0,
-        float(observation[1]) / 10.0,  # u: 风速 (0~25 → 0~2.5)
-    ])
+    return hst.build_L_obs(float(observation[-1]), float(pw_tru),
+                           float(observation[2]), soc_target, n_rem)
 
 
 # =============================================================================
@@ -647,11 +650,11 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
             sum_r1 = 0.0
             sum_c1 = 0.0
 
-        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
+        # L 层观测蒸馏 (5维): [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
         _, rbb_info_obs = rbb_system.compute_pbrule(
             pb_original=0.0, ptur=float(pw_tru),
             pg_prev=float(obs[-1]), E=float(obs[2]))
-        norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs)
+        norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs, 5 - (step % 5))
         raw_action_L = agent_L.select_action(norm_obs_L)
         action_L, penalty_NN_L = CheckAction(raw_action_L)
 
@@ -821,11 +824,11 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             action_H, penalty_NN_H = CheckAction(action_H)
             pw_tru = env_test.PowerOutput(obs[1], action_H)
 
-        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
+        # L 层观测蒸馏 (5维): [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
         _, rbb_info_obs = rbb_system.compute_pbrule(
             pb_original=0.0, ptur=float(pw_tru),
             pg_prev=float(obs[-1]), E=float(obs[2]))
-        norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs)
+        norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs, 5 - (step % 5))
         raw_action_L = agent_L.select_action(norm_obs_L)
         action_L, penalty_NN_L = CheckAction(raw_action_L)
         # L 层原始意图被 ±charge 夹掉的量 (与训练同口径, 计入 r2 裁剪惩罚)

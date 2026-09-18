@@ -194,7 +194,10 @@ def train_prle(num_iterations_H,
         # Lower Level (L): BESS agent
         # ================================================================
         soc_target = hst.soc_target_from_signal(float(applied_action_H[-1]))
-        norm_observation_L = np.append(norm_observation, hst.obs_target_dim(soc_target))
+        # L 观测 (5 维, 单一真源): [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
+        norm_observation_L = hst.build_L_obs(
+            float(observation[-1]), float(pw_tru), float(observation[2]),
+            soc_target, 5 - (episode_steps % 5))
         prPurple('--L-- obs = {}.'.format(round_list(norm_observation_L, 3)))
 
         if episode_steps % 5 == 0:
@@ -252,7 +255,9 @@ def train_prle(num_iterations_H,
         prGreen('Applied action = {}.'.format(round_list(action_rbb, 3)))
 
         norm_observation2 = Normalize(observation2)
-        norm_observation2_L = np.append(norm_observation2, hst.obs_target_dim(soc_target))
+        norm_observation2_L = hst.build_L_obs(
+            float(observation2[-1]), float(pw_tru2), float(observation2[2]),
+            soc_target, 5 - ((episode_steps + 1) % 5))
 
         # ================================================================
         # PRRBB Segmented Reward Computation (forward, with current thresholds)

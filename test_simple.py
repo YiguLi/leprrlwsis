@@ -18,15 +18,19 @@ import hsrl_soctarget as hst
 from myfunc import Normalize, CheckAction, build_L_obs_distilled
 from PER_ddpg import SP_DDPG
 from prle.prle_ddpg import PRLE_DDPG
-from prle.prle_myfunc import Cal_Rew_PRRBB as Cal_Rew_PRLE
+from prle.prle_myfunc import (Cal_Rew_PRRBB as Cal_Rew_PRLE,
+                              build_L_obs_distilled as build_L_obs_PRLE)
 from td3per.td3per_ddpg import SP_TD3 as SP_TD3_PER
 from td3prrbb.td3prrbb_ddpg import SP_TD3 as SP_TD3_PRRBB
 from td3prle.td3prle_ddpg import SP_TD3_PRLE
-from td3prle.td3prle_myfunc import Cal_Rew_PRRBB as Cal_Rew_TD3PRLE
+from td3prle.td3prle_myfunc import (Cal_Rew_PRRBB as Cal_Rew_TD3PRLE,
+                                    build_L_obs_distilled as build_L_obs_TD3PRLE)
 from prrbb.prrbb_rule_bess import RuleBasedBESS
 from prrbb.prrbb_myfunc import Cal_Rew_PRRBB
-from td3prrbb.td3prrbb_myfunc import Cal_Rew_PRRBB as Cal_Rew_TD3PRRBB
-from td3per.td3per_myfunc import Cal_Rew_RB as Cal_Rew_TD3PER
+from td3prrbb.td3prrbb_myfunc import (Cal_Rew_PRRBB as Cal_Rew_TD3PRRBB,
+                                      build_L_obs_distilled as build_L_obs_TD3PRRBB)
+from td3per.td3per_myfunc import (Cal_Rew_RB as Cal_Rew_TD3PER,
+                                  build_L_obs_distilled as build_L_obs_TD3PER)
 from torch.utils.tensorboard import SummaryWriter
 import matlab, matlab.engine
 import warnings
@@ -147,6 +151,9 @@ def main():
         cvm = 0      # 违约次数: count of steps where P_F > 3 MW
         cpf = 0.0    # 违约功率绝对值之和: Σ max(P_F − 3, 0) [MW]
         episode_steps, pw_tru = 0, None
+        # SOC 目标支: L 观测统一走各项目自己的 5 维构造器 (单一真源 hst.build_L_obs)
+        soc_obs_builders = {'TD3PER': build_L_obs_TD3PER, 'TD3PRRBB': build_L_obs_TD3PRRBB,
+                            'TD3PRLE': build_L_obs_TD3PRLE, 'PRLE': build_L_obs_PRLE}
 
         while episode_steps < EPISODE_LENGTH:
             if episode_steps % 10 == 0:
@@ -156,12 +163,13 @@ def main():
                 action_H, penalty_NN_H = CheckAction(action_H)
                 pw_tru = env.PowerOutput(obs[1], action_H)
 
-            if proj_type.startswith('TD3'):
-                # TD3 系列: 蒸馏 L 观测 — 先预计算与 pb 无关的可行域
+            if proj_type in soc_obs_builders:
+                # SOC 目标支 (TD3PER/TD3PRRBB/TD3PRLE/PRLE): [pg(t−1), ptur, SOC, target, n_rem]/刻度
                 _, rbb_info_obs = rbb.compute_pbrule(
                     pb_original=0.0, ptur=float(pw_tru),
                     pg_prev=float(obs[-1]), E=float(obs[2]))
-                norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs)
+                norm_obs_L = soc_obs_builders[proj_type](
+                    obs, pw_tru, action_H, rbb_info_obs, 5 - (episode_steps % 5))
             else:
                 norm_obs_L = np.append(norm_obs, action_H[-1])
             action_L = agent_L.select_action(norm_obs_L)

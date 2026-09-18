@@ -52,7 +52,7 @@ class SP_TD3(object):
 
         self.nb_states = nb_states
         self.nb_actions = nb_actions
-        # L 层蒸馏观测标记: myfunc 测试函数用它区分 TD3 5 维蒸馏观测
+        # L 层观测标记: myfunc 测试函数用它区分 5 维规则原配料观测
         # 与 PER 基线 5 维观测 (两者 nb_states 同为 5, 无法按维度区分).
         self.distilled_obs = True
 

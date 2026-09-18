@@ -17,9 +17,9 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
 
 下层 L (RL, 1 维动作 pb)
 ------------------------
-  观测 (5 维蒸馏) = [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
-      第 3 维由原 shadow_price(∈(−1,1)) 改为 **SOC 目标** (与 SOC 同刻度, 便于网络
-      直接比较"目标 vs 自身"); 见 build_L_obs_distilled()。
+  观测 (5 维蒸馏) = [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
+            规则的原配料: pg(t−1)/ptur 给窗口中心, SOC 与 soc_target 同刻度(第 2/4 维),
+      n_rem/5 给"还剩几步" ⇒ δ 与摊还需量都能直接导出; 见 build_L_obs_distilled()。
   r2 = −1 · min(clip_amount, 20)              (clip_amount = |命令 − pbrule| = 两段 clip 合计)
       —— 原影子套利项 (−pr·pbrule 形式) 随信号语义一起删除。
    c2 = +1 · trackerr                 [MW] 两区间分治 (单一真源 hsrl_soctarget)
@@ -287,24 +287,26 @@ L_CLIP_COEF = hst.L_CLIP_COEF      # 单一真源 hsrl_soctarget
 L_SOC_COEF = hst.L_TRACK_COEF      # 单一真源 (新口径: MW)
 
 
-def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
-    """下层蒸馏观测 (5 维): [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10].
+def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info, n_rem=None):
+    """下层观测 (5 维) —— **规则的原配料** (单一真源 hsrl_soctarget.build_L_obs):
 
-    与改造前的唯一差异: 第 3 维由 `shadow_price = 2·a6 ∈ (−1,1)` 换成
-    **SOC 目标** `soc_target/10` (∈[0.05, 0.55], 与 SOC/10 同刻度) —— 下层的
-    "信号" 与 "追踪目标" 因此是同一个量, 网络可直接比较 "目标 vs 自身"。
+        [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
 
-    其余 4 维不变: 当前可行窗口 (RBB, 与 pb 无关) + 自身 SOC + 风速 u
-    (u 保留在观测中, 供可行域/其它风速相关逻辑使用)。
+    * `pg(t−1) = observation[-1]` 与 `ptur` 给出平抑窗口的中心;
+    * SOC 与目标同刻度 ⇒ δ = 10·(obs[3] − obs[2]); 加 `n_rem/5` ⇒ 摊还需求 `need` 可算;
+    * 因此规则动作所需的状态量都在观测里 (窗口的平抑部分 = pg(t−1)/ptur; 物理限幅部分
+      由 SOC + 已知常量决定), 不必再从两个近似相等的
+      /10 数里做差 (旧观测里 δ 分辨率只有 ~0.015)。
+    丢掉 u (风速) 与窗口边界 (可由 ptur/pg_prev + 已知限幅推出)。
+
+    `n_rem` = 含当前步的块内剩余步数 (5 - step %% 5) —— **必填**。
+    `rbb_info` 仅为与其它项目同名函数保持签名一致 (本函数不再使用)。
     """
+    if n_rem is None:
+        raise ValueError('build_L_obs_distilled: 需要 n_rem (块内剩余步数 = 5 - step mod 5)')
     soc_target = soc_target_from_signal(applied_action_H[-1])
-    return np.array([
-        rbb_info['pbrulemin'] / 10.0,
-        rbb_info['pbrulemax'] / 10.0,
-        soc_target / 10.0,
-        float(observation[2]) / 10.0,
-        float(observation[1]) / 10.0,  # u: 风速 (0~25 → 0~2.5)
-    ])
+    return hst.build_L_obs(float(observation[-1]), float(pw_tru),
+                           float(observation[2]), soc_target, n_rem)
 
 
 def soc_track_slack(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n_rem,
@@ -562,10 +564,10 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         pg_prev = float(obs[-1])
         E_current = float(obs[2])
 
-        # ---- 下层 obs: 蒸馏 5 维 (第 3 维 = soc_target/10) ----
+        # ---- 下层 obs: 5 维规则原配料 (单一真源 hst.build_L_obs) ----
         _, rbb_info_obs = rbb_system.compute_pbrule(
             pb_original=0.0, ptur=ptur, pg_prev=pg_prev, E=E_current)
-        norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs)
+        norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs, 5 - (step % 5))
         if step % 5 == 0:
             agent_L.reset(norm_obs_L)
         original_action_L = agent_L.select_action(norm_obs_L)

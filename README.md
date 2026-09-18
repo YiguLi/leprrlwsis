@@ -49,9 +49,9 @@
 | **PER** | 根目录 + `PER/` | DDPG（`SP_DDPG`） | 原始 | RL（基线 5 维观测） | `PER_main0.py` |
 | **PRRBB** | `prrbb/` | DDPG | **分段奖励** | RL（基线 5 维） | `prrbb/prrbb_main.py` |
 | **PRLE** | `prle/` | DDPG（`PRLE_DDPG`） | 分段 + **LLM 增强** | RL（基线 5 维） | `prle/prle_main.py` |
-| **TD3PER** | `td3per/` | **TD3**（`SP_TD3`） | **非分段**（移植 td3perrb 上层） | RL（蒸馏 5 维，追踪 **SOC 目标**） | `td3per/td3per_main.py` |
-| **TD3PRRBB** | `td3prrbb/` | TD3 | 分段 | RL（蒸馏 5 维） | `td3prrbb/td3prrbb_main.py` |
-| **TD3PRLE** | `td3prle/` | TD3（`SP_TD3_PRLE`） | 分段 + LLM | RL（蒸馏 5 维） | `td3prle/td3prle_main.py` |
+| **TD3PER** | `td3per/` | **TD3**（`SP_TD3`） | **非分段**（移植 td3perrb 上层） | RL（5 维规则原配料，追踪 **SOC 目标**） | `td3per/td3per_main.py` |
+| **TD3PRRBB** | `td3prrbb/` | TD3 | 分段 | RL（5 维规则原配料） | `td3prrbb/td3prrbb_main.py` |
+| **TD3PRLE** | `td3prle/` | TD3（`SP_TD3_PRLE`） | 分段 + LLM | RL（5 维规则原配料） | `td3prle/td3prle_main.py` |
 | **TD3PRRLRB** | `td3prrlrb/` | TD3 | 分段 | **规则 `SocTracker`** | `td3prrlrb/td3prrlrb_main.py` |
 | **TD3PERRB** | `td3perrb/` | TD3 | **非分段** | 规则 `SocTracker` | `td3perrb/td3perrb_main.py` |
 | **TD3LEPRRLRB** | `td3leprrlrb/` | TD3（`SP_TD3_LEPRRLRB`） | 分段 + **LLM 在线阈值微调** | 规则 `SocTracker` | `td3leprrlrb/td3leprrlrb_main.py` |
@@ -101,7 +101,7 @@ PRRBB ──(加 LLM)──→ PRLE          TD3PRRBB ──(加 LLM)──→ T
   上层 6 维动作第 6 维语义由"影子电价"改为 **SOC 目标信号**（与 td3perrb 逐项一致：
   非分段奖励、块末 gap 罚、相位观测、逐维探索噪声、`lam1∈[0.967,4.833]`、每块 2 次更新）；
   下层仍是 TD3+PER 的 RL BESS，但信号与追踪目标同为 SOC 目标
-  （观测第 3 维 `soc_target/10`、`r2 = −1·min(clip_amount, 20)`、
+  （5 维观测 `[pg(t−1), ptur, SOC, soc_target, n_rem]`、`r2 = −1·min(clip_amount, 20)`、
   `c2 = +1·trackerr [MW]`（到**参考集合** = Soctrack范围 ∩ 平抑窗口 的距离）：
   `F ≠ ∅` 时零成本集合是该区间；`F = ∅` 时**不存在范围, 只有纯粹一个竭力值 `r*`**
   （窗口里离 Soctrack 范围最近的端点）, 顶到它才不罚；
@@ -586,10 +586,10 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 **背景**：9 个方法的下层信号有**两种**语义。本次把 `td3prrbb` 与 `prle` 从"影子电价"改成
 "**SOC 目标**"（与 `td3per` 对齐）；两者上层的 PRRBB 风价分段奖励（`wT`/`wB`）**保持不动**。
 
-| 项目 | 第 6 维语义 | 下层 | L 观测的目标 | `r2` | `c2` |
+| 项目 | 第 6 维语义 | 下层 | L 观测 (5 维) | `r2` | `c2` |
 |---|---|---|---|---|---|
-| td3per / td3prrbb / td3prle | SOC 目标 | RL | 蒸馏 5 维第 3 维 = `soc_target/10` | `−1·clip_amount` | `+1·trackerr` |
-| prle | SOC 目标 | RL（+ LLM relabel） | `Normalize(obs)` + 末维 = `soc_target/10` | `−1·clip_amount` | `+1·trackerr` |
+| td3per / td3prrbb / td3prle | SOC 目标 | RL | 统一 5 维 **规则原配料**：`[pg(t−1), ptur, SOC, soc_target, n_rem]`（各 ÷10，`n_rem`÷5） | `−1·clip_amount` | `+1·trackerr` |
+| prle | SOC 目标 | RL（+ LLM relabel） | 同左（统一 5 维，不再用 `Normalize(obs)` 基线） | `−1·clip_amount` | `+1·trackerr` |
 | td3perrb / td3prrlrb / td3leprrlrb | SOC 目标 | 规则 SocTracker | — | — | — |
 | **per / prrbb** | **影子电价** | RL | `Normalize(obs)` + a6 原值 | `0.1·shadow_profit − 1·clip` | `10 / 7·soc_deviation` |
 
@@ -605,6 +605,13 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
   `r* = clip(δ/g, W)`（W 里离 B 最近的端点，`ref_is_point=True`）——只有恰好顶到 `r*` 才不罚，
   两侧偏离都按 `|pbrule − r*|` 线性计费（缺口本身不可达 ⇒ 由上层块末 gap 罚承接）；
   `n_rem = 1` 时退化为"一步填平"点（= 旧 `slack` 口径）；窗口不可行时 `trackerr = 0`
+* **L 观测 = 规则的原配料**（单一真源 `hsrl_soctarget.build_L_obs`，四项目逐位相同）：
+  `[pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]`
+  —— `pg(t−1)` 与 `ptur` 给出平抑窗口中心（± 已知限幅）；SOC 与目标同刻度 ⇒
+  `δ = 10·(obs[3] − obs[2])`、`need = clip(δ/(g·n_rem), W)` 都能直接导出，
+  规则动作 `clip(δ/g, W)` 的全部输入都在观测里；`n_rem/5` 让"还剩几步"可知。
+  （旧观测是 `[pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]`：
+  δ 只能从两个近似相等的 /10 数里做差，分辨率 ~0.015，且没有 n_rem。）
 * `r2`/`c2` **同为 MW 口径、系数同为 1** ⇒ 可直接相加/比较；L 层数值口径随之重标：
   `d_block_L = 1.2`（⇔ 允许搁置 0.02 MWh/块）、地板 `0.15`、`cost_limit = 0.6`
 * `λ2` 是**无量纲兑换率**（"1 MW c2 值多少 MW r2"）：**上限 = r2 的 2 倍、下限 = r2 的 1/2**

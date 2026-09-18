@@ -50,10 +50,10 @@
   per            SP_DDPG        + rbb/rbb_rule_bess.RuleBasedBESS      L 基线 5 维
   prrbb          SP_DDPG        + prrbb_rule_bess.RuleBasedBESS        L 基线 5 维
   prle           PRLE_DDPG      + prrbb_rule_bess.RuleBasedBESS        L 基线 5 维
-  td3per         SP_TD3         + rbb/rbb_rule_bess.RuleBasedBESS      L 蒸馏 5 维
+  td3per         SP_TD3         + rbb/rbb_rule_bess.RuleBasedBESS      L 5 维(规则原配料)
                  (上层 = td3perrb 口径: 非分段奖励 + SOC 目标信号 + 相位观测)
-  td3prrbb       SP_TD3         + td3prrbb_rule_bess.RuleBasedBESS     L 蒸馏 5 维
-  td3prle        SP_TD3_PRLE    + td3prle_rule_bess.RuleBasedBESS      L 蒸馏 5 维
+  td3prrbb       SP_TD3         + td3prrbb_rule_bess.RuleBasedBESS     L 5 维(规则原配料)
+  td3prle        SP_TD3_PRLE    + td3prle_rule_bess.RuleBasedBESS      L 5 维(规则原配料)
   td3prrlrb      SP_TD3         + td3prrlrb_rule_bess  (L=规则 SocTracker, H 带相位)
   td3perrb       SP_TD3         + td3perrb_rule_bess   (同 td3prrlrb, 但奖励**非分段**)
   td3leprrlrb    SP_TD3_LEPRRLRB+ td3leprrlrb_rule_bess(L=规则 SocTracker, H 带相位)
@@ -63,7 +63,7 @@
   * L 层观测：
       - per / prrbb (影子电价支) : np.append(Normalize(obs), applied_action_H[-1])
       - td3per / td3prle / td3prrbb (SOC 目标支) : build_L_obs_distilled(
-              [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10])
+              [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5])
       - prle (SOC 目标支) : build_L_obs_distilled(
               Normalize(obs) + soc_target/10)
       - td3prrlrb / td3perrb / td3leprrlrb : 无 RL 下层，L 由 SocTracker 规则给出
@@ -71,7 +71,7 @@
   * td3per / td3prrlrb / td3perrb / td3leprrlrb 的 H 观测 = Normalize(obs) + 24h 相位特征，
     维数（4 + 0/2/5）从 actor_6.pkl 的 fc1.weight 自动探测，无需手填。
     相位时刻 = episode 内的分钟序号（与训练一致：episode 恰好 1440 步）。
-  * td3per 改造后其 L 层仍走 RL（不是规则），只是第 3 维信号由影子电价换成 SOC 目标；
+  * td3per 改造后其 L 层仍走 RL（不是规则），只是 L 观测换成 5 维规则原配料 [pg(t−1), ptur, SOC, target, n_rem]；
     因此 H 权重（actor_6）与 L 权重（actor_1）都必须来自改造后的 td3per 训练 run，
     改造前的 TD3PER-run* 权重语义不同（影子电价 + 4 维 H 观测），不可混用。
 
@@ -250,7 +250,7 @@ PROJECTS = {
     ),
     'td3per': dict(
         # 上层 = td3perrb 口径 (非分段奖励 + SOC 目标信号 + 相位观测);
-        # 下层 = td3per 自己的 RL BESS, 蒸馏 5 维第 3 维 = soc_target/10,
+        # 下层 = td3per 自己的 RL BESS, 5 维观测 = [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5],
         #        r2 = -1·min(clip_amount,20), c2 = +1·trackerr [MW] (到参考集合的距离; 口径见 hsrl_soctarget)
         label='TD3PER',
         agent=('td3per.td3per_ddpg', 'SP_TD3'),
@@ -642,8 +642,8 @@ class ProjectRunner:
 
             # ---- 下层 L ----
             if self.spec['lower'] == 'rl':
-                if self.l_obs_fn is not None:      # TD3 蒸馏 5 维
-                    norm_obs_L = self.l_obs_fn(obs, pw_tru, action_H, rbb_info_obs)
+                if self.l_obs_fn is not None:      # 5 维规则原配料 (SOC 目标支)
+                    norm_obs_L = self.l_obs_fn(obs, pw_tru, action_H, rbb_info_obs, 5 - (t % 5))
                 else:                              # 基线 5 维
                     norm_obs_L = np.append(norm_obs, action_H[-1])
                 if t % 5 == 0:

@@ -91,7 +91,7 @@ for proj, (main_py, mf_py) in SOC_FAMILY.items():
     else:
         assert 'import hsrl_soctarget as hst' in ft, (proj, 'myfunc 未接真源')
         for call in ('hst.soc_target_from_signal(', 'hst.lower_reward(',
-                     'hst.lower_cost_soc_track(', 'hst.obs_target_dim('):
+                     'hst.lower_cost_soc_track(', 'hst.build_L_obs('):
             assert call in ft, (proj, call)
     assert 'import hsrl_soctarget as hst' in mt or proj == 'td3per', (proj, 'main 未接真源')
     assert re.search(r'(?:hst\.)?gap_penalty\(', mt), (proj, '块末 gap 罚未接真源')
@@ -101,6 +101,8 @@ for proj, (main_py, mf_py) in SOC_FAMILY.items():
         (proj, '未把**命令值**交给 compute_pbrule ⇒ clip_amount 只含窗口那段 (|cmd|>10 死区)')
     # L 层对偶走单一真源 + λ2 初值/curriculum 计量显式 + 计数每块 1 次
     assert 'hst.dual_update_L(' in mt, (proj, 'L 对偶未走 hsrl_soctarget.dual_update_L')
+    assert re.search(r'def build_L_obs_distilled\([^)]*n_rem=None', ft), \
+    (proj, '观测构造器缺少 n_rem (块内剩余步数)')
     assert re.search(r'agent_L\.lam = hst\.L_LAM_INIT', mt), (proj, 'λ2 初值未显式设为真源')
     assert re.search(r'consecutive_satisfied_L >= hst\.L_CURRICULUM_BLOCKS', mt), \
         (proj, 'L curriculum 未按"块数"计量')

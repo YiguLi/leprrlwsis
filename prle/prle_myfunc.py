@@ -499,16 +499,26 @@ def Original(obs, max_E=6.):
     return np.array([obs[0] * 1000, obs[1] * 10, obs[2] * 10, obs[3] * 10])
 
 
-def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
-    """prle 下层观测 (5 维) = Normalize(obs) + soc_target/10.
+def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info, n_rem=None):
+    """下层观测 (5 维) —— **规则的原配料** (单一真源 hsrl_soctarget.build_L_obs):
 
-    SOC 目标语义 (= td3per/td3prrbb 同口径, 单一真源 hsrl_soctarget):
-    第 5 维由改造前的 **a6 原值** 换成 `soc_target/10` —— 与 obs 里的 SOC/10 同刻度,
-    网络可直接比较"目标 vs 自身"。签名与其它项目的同名函数保持一致
-    (pw_tru / rbb_info 本函数用不到, 仅为 harness 统一调用)。
+        [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
+
+    * `pg(t−1) = observation[-1]` 与 `ptur` 给出平抑窗口的中心;
+    * SOC 与目标同刻度 ⇒ δ = 10·(obs[3] − obs[2]); 加 `n_rem/5` ⇒ 摊还需求 `need` 可算;
+    * 因此规则动作所需的状态量都在观测里 (窗口的平抑部分 = pg(t−1)/ptur; 物理限幅部分
+      由 SOC + 已知常量决定), 不必再从两个近似相等的
+      /10 数里做差 (旧观测里 δ 分辨率只有 ~0.015)。
+    丢掉 u (风速) 与窗口边界 (可由 ptur/pg_prev + 已知限幅推出)。
+
+    `n_rem` = 含当前步的块内剩余步数 (5 - step %% 5) —— **必填**。
+    `rbb_info` 仅为与其它项目同名函数保持签名一致 (本函数不再使用)。
     """
-    soc_target = hst.soc_target_from_signal(float(applied_action_H[-1]))
-    return np.append(Normalize(observation), hst.obs_target_dim(soc_target))
+    if n_rem is None:
+        raise ValueError('build_L_obs_distilled: 需要 n_rem (块内剩余步数 = 5 - step mod 5)')
+    soc_target = hst.soc_target_from_signal(applied_action_H[-1])
+    return hst.build_L_obs(float(observation[-1]), float(pw_tru),
+                           float(observation[2]), soc_target, n_rem)
 
 
 # =============================================================================
@@ -541,8 +551,9 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
             pw_tru = env_test.PowerOutput(obs[1], action_H)
             sum_r1 = 0.0
             sum_c1 = 0.0
-
-        norm_obs_L = np.append(norm_obs, action_H[-1])
+        _, rbb_info_obs = rbb_system.compute_pbrule(
+            pb_original=0.0, ptur=float(pw_tru), pg_prev=float(obs[-1]), E=float(obs[2]))
+        norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs, 5 - (step % 5))
         action_L = agent_L.select_action(norm_obs_L)
         action_L, penalty_NN_L = CheckAction(action_L)
 
@@ -702,7 +713,9 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             action_H, penalty_NN_H = CheckAction(action_H)
             pw_tru = env_test.PowerOutput(obs[1], action_H)
 
-        norm_obs_L = np.append(norm_obs, action_H[-1])
+        _, rbb_info_obs = rbb_system.compute_pbrule(
+            pb_original=0.0, ptur=float(pw_tru), pg_prev=float(obs[-1]), E=float(obs[2]))
+        norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs, 5 - (step % 5))
         action_L = agent_L.select_action(norm_obs_L)
         action_L, penalty_NN_L = CheckAction(action_L)
 

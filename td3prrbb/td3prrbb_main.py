@@ -204,7 +204,7 @@ def train(num_iterations_H,
             pw_tru = env.PowerOutput(observation[1], applied_action_H)
         prGreen('--H-- ori a_t = {}'.format(round_list(original_action_H, 3)))
 
-        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
+        # L 层观测蒸馏 (5维): [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
         # 可行域 (RBB, 与 pb 无关, 预计算) + H 影子价格信号 + 自身 SOC + 风速;
         # 不再直接看 pr/P_G/ptur —— 分层: H 给信号, L 在约束内执行.
         ptur = float(pw_tru)
@@ -213,7 +213,8 @@ def train(num_iterations_H,
         _, rbb_info_obs = rbb_system.compute_pbrule(
             pb_original=0.0, ptur=ptur, pg_prev=pg_prev, E=E_current)
         norm_observation_L = build_L_obs_distilled(
-            observation, pw_tru, applied_action_H, rbb_info_obs)
+            observation, pw_tru, applied_action_H, rbb_info_obs,
+            5 - (episode_steps % 5))
         prPurple('--L-- obs = {}.'.format(round_list(norm_observation_L,3)))
         # 下层每一个5-step都是一个episode
         if episode_steps % 5 == 0:
@@ -271,7 +272,8 @@ def train(num_iterations_H,
             pb_original=0.0, ptur=float(pw_tru2),
             pg_prev=float(observation2[-1]), E=float(observation2[2]))
         norm_observation2_L = build_L_obs_distilled(
-            observation2, pw_tru2, applied_action_H, rbb_info_obs2)
+            observation2, pw_tru2, applied_action_H, rbb_info_obs2,
+            5 - ((episode_steps + 1) % 5))
 
         # ================================================================
         # PRRBB Segmented Reward Computation (机会/风险分离版)
@@ -911,7 +913,7 @@ if __name__ == "__main__":
     #       ("每 MW c2 至多值 2 MW r2 / 至少值 0.5 MW r2"), 关于 1.0 对数对称; 初值 1.0
     #     ema_alpha = 0.02 (时间常数 ~50 块), **乘性**对偶 λ2 ← λ2·exp(0.02·(EMA/d_block_L − 1))
     #     d_block_L = 1.2 ⇔ 0.02 MWh/块; curriculum 连续 50 块满足 ⇒ 减半 (地板 0.15)
-    #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
+    #     蒸馏观测 5 维 = [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
     # L 层(步骤A): policy_delay/--policy_noise 独立于 H —— 放松到 delay=1+noise≈0 时节奏接近 DDPG
     # (twin critic 与 EMA 对偶仍保留, 仅去掉延迟更新与 target smoothing 对窄可行窗的抹平)
     agent_L = SP_TD3(nb_states = 5, nb_actions = 1, args = args,

@@ -34,10 +34,13 @@ for _s in (sys.stdout, sys.stderr):
 import hsrl_soctarget as hst                            # noqa: E402
 
 SOC_PROJECTS = {
-    'td3per': ('td3per.td3per_myfunc', 'Cal_Rew_RB', 2),      # 蒸馏观测: 目标在第 3 维
-    'td3prrbb': ('td3prrbb.td3prrbb_myfunc', 'Cal_Rew_PRRBB', 2),
-    'prle': ('prle.prle_myfunc', 'Cal_Rew_PRRBB', 4),         # baseline 观测: 目标在末维
-    'td3prle': ('td3prle.td3prle_myfunc', 'Cal_Rew_PRRBB', 2),   # PRLE 的 TD3 姊妹 (蒸馏观测)
+    # 项目 -> (myfunc 模块, 奖励函数, 观测里 SOC 目标的维号)
+    # 四项目现在共用同一份 5 维观测 (单一真源 build_L_obs): [pg, ptur, SOC, target, n_rem]
+    # ⇒ 目标维一律是 #3
+    'td3per': ('td3per.td3per_myfunc', 'Cal_Rew_RB', 3),
+    'td3prrbb': ('td3prrbb.td3prrbb_myfunc', 'Cal_Rew_PRRBB', 3),
+    'prle': ('prle.prle_myfunc', 'Cal_Rew_PRRBB', 3),
+    'td3prle': ('td3prle.td3prle_myfunc', 'Cal_Rew_PRRBB', 3),
 }
 N_REM = 3          # 本测试固定用块内第 3 步 (n_rem = 3)
 
@@ -166,15 +169,35 @@ print('  {} 组网格: soc_track_range / lower_reward / lower_cost / target 映�
       .format(len(grid)))
 
 print('=' * 84)
-print('5. 下层观测里的目标维')
+print('5. 下层观测 = 规则的原配料 (5 维, 四项目逐位相同)')
 print('=' * 84)
+_obs_ref = None
 for p, (mod, _f, idx) in SOC_PROJECTS.items():
     m = importlib.import_module(mod)
     fn = getattr(m, 'build_L_obs_distilled')
-    obsL = fn(np.array([580., 10., 3.0, 0.]), 10.0, np.array([0.3] * 5 + [0.2]),
-              dict(pbrulemin=0.0, pbrulemax=3.0))
-    assert abs(float(obsL[idx]) - 0.4) < 1e-12, (p, obsL, idx)
-    print('  {:<9s} 目标维在 #{} = {:.3f}  (= soc_target/10 = 0.4)'.format(p, idx, obsL[idx]))
+    obs = np.array([580., 10., 3.0, 7.0])          # [pr, u, SOC, P_G_last]
+    act = np.array([0.3] * 5 + [0.2])              # a6 = 0.2 ⇒ soc_target = 4.0
+    o = fn(obs, 20.0, act, dict(pbrulemin=0.0, pbrulemax=3.0), N_REM)
+    #  期望: [pg(t−1)=7, ptur=20, SOC=3, target=4, n_rem=3] / 刻度 (/10, /10, /10, /10, /5)
+    assert abs(float(o[0]) - 0.7) < 1e-12, (p, o)
+    assert abs(float(o[1]) - 2.0) < 1e-12, (p, o)
+    assert abs(float(o[2]) - 0.3) < 1e-12, (p, o)
+    assert abs(float(o[3]) - 0.4) < 1e-12, (p, o)
+    assert abs(float(o[4]) - N_REM / 5.0) < 1e-12, (p, o)
+    assert idx == 3, (p, idx)
+    # δ = target − SOC 可直接由观测相减得到 (旧观测里 δ 分辨率只有 ~0.015)
+    assert abs(10.0 * (float(o[3]) - float(o[2])) - 1.0) < 1e-12, (p, o)
+    if _obs_ref is None:
+        _obs_ref = o
+    else:
+        assert np.array_equal(o, _obs_ref), (p, o, _obs_ref)      # 四项目逐位相同
+    try:                                           # n_rem 必填
+        fn(obs, 20.0, act, dict(pbrulemin=0.0, pbrulemax=3.0))
+        raise AssertionError((p, 'n_rem 缺失未报错'))
+    except ValueError:
+        pass
+    print('  {:<9s} {}  (pg/10={:.2f}, ptur/10={:.2f}, SOC/10={:.2f}, target/10={:.2f}, n_rem/5={:.2f})'
+          .format(p, np.round(o, 3).tolist(), o[0], o[1], o[2], o[3], o[4]))
 
 print('=' * 84)
 print('TEST OK')

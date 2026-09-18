@@ -129,6 +129,8 @@ L_EMA_LAM_LR = 0.02      # 乘性对偶的**对数**步长 η2（与 hc.ETA_LAM 
 
 # ---------------------------------------------------------------- 观测刻度
 OBS_SOC_SCALE = 10.0     # SOC 与目标都以 /10 进入下层观测
+OBS_POWER_SCALE = 10.0   # 功率维 (pg(t−1), ptur) 以 /10 进入下层观测
+OBS_REMAIN_SCALE = 5.0   # 块内剩余步数 n_rem ∈ [1, 5] → [0.2, 1]
 
 
 def soc_target_from_signal(a6):
@@ -140,6 +142,47 @@ def soc_target_from_signal(a6):
 def obs_target_dim(soc_target, scale=OBS_SOC_SCALE):
     """下层观测里的目标维 = soc_target / 10（与 SOC/10 同刻度，网络可直接比较）。"""
     return float(soc_target) / float(scale)
+
+
+def obs_power_dim(x, scale=OBS_POWER_SCALE):
+    """L 观测里的功率维 = x / 10 (MW)。"""
+    return float(x) / float(scale)
+
+
+def obs_remain_dim(n_rem, scale=OBS_REMAIN_SCALE):
+    """L 观测里的剩余步数维 = n_rem / 5（n_rem = 含当前步的块内剩余步数）。"""
+    return float(n_rem) / float(scale)
+
+
+def build_L_obs(pg_prev, ptur, soc, soc_target, n_rem):
+    """L 层观测 (5 维) —— 单一真源：**平抑规则的原配料**。
+
+        [ pg(t−1)/10 , ptur/10 , SOC/10 , soc_target/10 , n_rem/5 ]
+
+    为什么是这 5 维
+    --------------
+    * `pg(t−1)` 与 `ptur` 一起给出 RBB 平抑窗口的**中心**
+      `pbfluct = [ptur − pg(t−1) − limit, ptur − pg(t−1) + limit]`（limit 为常量）；
+      窗口的另一半（SOC/物理限幅）留给网络从 SOC 学。
+    * `SOC/10` 与 `soc_target/10` **同刻度** ⇒ 残差与摊还需求可直接导出：
+      `δ = soc_target − SOC = 10·(obs[3] − obs[2])`，`need = clip(δ/(g·n_rem), W)`
+      （g = η_c·dt 为常量）；参考集合 = `[min(δ/g, δ/(g·n_rem)), max(…)] ∩ W`，
+      规则动作 = `clip(δ/g, W)`。
+    * `n_rem/5` ⇒ 摊还端可算（旧观测没有它，网络无从知道"块内还剩几步"）。
+    ⇒ 规则动作所需的**状态量**都在观测里（窗口的"平抑"部分可由 pg(t−1)/ptur 直接给出，
+      物理限幅部分由 SOC 与已知常量决定）；不必再从两个近似相等的 /10 数里做差
+      （旧观测里 δ 的分辨率只有 ~0.015）。
+    丢掉的是 u（风速，与 L 的动作无关）与窗口边界（可由上两维 + 已知限幅推出）。
+
+    `n_rem` = 含当前步的块内剩余步数 (5 − step % 5) —— **必填**（与
+    `soc_track_range` / `lower_cost_soc_track` 的 n_rem 约定一致）。
+    """
+    nr = int(n_rem)
+    if nr < 1 or nr > 5:
+        raise ValueError('build_L_obs: n_rem 必须落在 [1, 5] (含当前步的块内剩余步数), 得到 %r' % (n_rem,))
+    return np.array([obs_power_dim(pg_prev), obs_power_dim(ptur),
+                     float(soc) / OBS_SOC_SCALE, obs_target_dim(soc_target),
+                     obs_remain_dim(nr)])
 
 
 def gap_penalty(soc_target, SOC_end, tol=None):
