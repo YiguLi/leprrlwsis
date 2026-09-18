@@ -389,27 +389,24 @@ def train(num_iterations_H,
         if step > args.warmup:
             #--------------------Update----------------------
             if episode_steps % 5 == 4:
-                # Curriculum convergence: halve d_block when EMA cost
-                # <= d_block for 100 consecutive policy updates
-                # UTD 2:1 -> 1:1: one policy update per new transition
-                # (5 env steps per block -> 5 updates), TD3 paper default.
-                update_num = 0
-                while update_num < 5:
+                # H 层更新频率: 每块 2 次 (与其余 5 个 TD3 main 的 td3per 口径一致)。
+                # 【本轮变更】原为 `while update_num < 5` = 每块 5 次 (比 td3per/td3perrb/
+                # td3prrlrb/td3leprrlrb 高 2.5 倍), 会把"更新比"混进方法对比。
+                for _ in range(2):
                     agent_H.update_policy()
                     agent_L.update_policy()
-                    update_num += 1
 
-                # L 层智能体更简单 (1 维动作), 提高其更新频率至每块 10 次 (UTD 2:1),
-                # H 层维持每块 5 次 (UTD 1:1)。额外更新不重复累计 curriculum 计数
-                # (EMA 成本每块只更新一次, 与块末判据一致)。
-                for _ in range(5):
-                    agent_L.update_policy()
-
-                    # Track consecutive satisfaction for H (EMA 实际成本判据)
+                    # Track consecutive satisfaction for H (EMA 实际成本判据);
+                    # 计数随 H 的更新次数推进 (= 2/块 ⇒ 阈值 100 ≈ 50 块), 与 td3per 同构。
                     if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
                         consecutive_satisfied_H += 1
                     else:
                         consecutive_satisfied_H = 0
+
+                # L 层更新频率: 每块 10 次 (L 只有 1 维动作; 上面 2 次 + 此处 8 次 = UTD 2:1)。
+                # 额外更新不重复累计 curriculum 计数 (EMA 成本每块只更新一次, 与块末判据一致)。
+                for _ in range(8):
+                    agent_L.update_policy()
                     # (L 的 curriculum 计数已移到块末: 每块 1 次, 阈值 hst.L_CURRICULUM_BLOCKS)
 
                 if consecutive_satisfied_H >= 100:
@@ -418,7 +415,7 @@ def train(num_iterations_H,
                     prGreen('H: d_block_H halved to {}'.format(d_block_H))
                 # (L 的减半已移到块末: 每块 1 次)
 
-                # ---- H 层更新数据记录（本块 10 批均值 → TB/csv） ----
+                # ---- H 层更新数据记录（本块 H 2 批均值 → TB/csv） ----
                 # 记录"神经网络更新时实际采用的数据"：TD/Q/target/batch 奖励成本/ISW。
                 if agent_H.record_update_stats and len(agent_H.update_stats) > 0:
                     _stats = agent_H.update_stats
