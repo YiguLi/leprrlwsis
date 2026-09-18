@@ -42,6 +42,8 @@ def call_c1(fn, pf, u=9.0, pr=580.0, E=3.0, pb=0.0, gap=0.5):
         kw['pb_cmd'] = pb
     if 'l_clip_over' in sig:
         kw['l_clip_over'] = 0.0
+    if 'n_rem' in sig:                      # 下层 c2 = trackerr [MW] 需要块内剩余步数
+        kw['n_rem'] = 3
     out = fn(obs, obs2, act, info, **kw)
     # 返回约定: PRRBB 族 = (r1, c1, r2, c2, details); RLRB 族 = (r1, c1, details)
     return float(out[1])

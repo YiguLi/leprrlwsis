@@ -5,12 +5,14 @@
 三个"下层 RL + SOC 目标"项目（`td3per` / `td3prrbb` / `prle`）的下层口径应完全一致：
 
     a6 → soc_target = clip(3 + 5·a6, 0.5, 5.5)     (块级固定)
-    r2 = −1 · clip_amount
-    c2 = 10 · slack,  slack = max(0, |target−SOC'| − d_best)   (能力内追踪失败量)
+    r2 = −1 · clip_amount                 [MW]   越出平抑窗口的裁剪量
+    c2 = +1 · trackerr                    [MW]   实际施加 pb 到参考集合的距离
+         参考集合 = Soctrack范围 [δ/(g·n_rem), δ/g] ∩ 平抑窗口 [pbrulemin, pbrulemax]
+                    空交集 ⇒ 退化为最近的可达端点（竭力即不罚）
     块末追踪偏好 = 10·max(0, |target−SOC_end| − 0.1)  (进 r1)
 
 差异只允许出现在**上层**（td3per 非分段 / td3prrbb·prle 风价分段）与观测约定。
-另断言 `td3per` 里的**本地实现**与单一真源 `hsrl_soctarget` 逐位一致（防漂移）。
+另断言 `td3per` 里的**本地包装**与单一真源 `hsrl_soctarget` 逐位一致（防漂移）。
 """
 import importlib
 import os
@@ -36,21 +38,27 @@ SOC_PROJECTS = {
     'td3prrbb': ('td3prrbb.td3prrbb_myfunc', 'Cal_Rew_PRRBB', 2),
     'prle': ('prle.prle_myfunc', 'Cal_Rew_PRRBB', 4),         # baseline 观测: 目标在末维
 }
+N_REM = 3          # 本测试固定用块内第 3 步 (n_rem = 3)
 
 print('=' * 84)
-print('1. 单一真源口径')
+print('1. 单一真源口径 (r2/c2 同为 MW, 两区间分治)')
 print('=' * 84)
-assert hst.L_CLIP_COEF == 1.0 and hst.L_SOC_COEF == 10.0
-assert hst.L_D_BLOCK == 0.2 and hst.L_D_BLOCK_MIN == 0.025
-assert hst.L_COST_LIMIT == 0.1 and hst.L_EMA_LAM_LR == 1.0
-# 与 ÷100 之前等价: 物理容忍度 0.02 MWh、对偶速度 10
-assert abs(hst.L_D_BLOCK / hst.L_SOC_COEF - 20.0 / 1000.0) < 1e-12
-assert abs(hst.L_EMA_LAM_LR * hst.L_SOC_COEF - 0.01 * 1000.0) < 1e-12
+assert hst.L_CLIP_COEF == 1.0 and hst.L_TRACK_COEF == 1.0
+assert hst.L_SOC_COEF == hst.L_TRACK_COEF          # 兼容别名
+assert hst.L_D_BLOCK == 1.2 and hst.L_D_BLOCK_MIN == 0.15
+assert hst.L_COST_LIMIT == 0.6 and hst.L_EMA_LAM_LR == 0.16
+assert hst.L_LAM_MIN == 1.0 and hst.L_LAM_MAX == 20.0 and hst.L_LAM_INIT == 1.0
+# 物理等价: 预算仍 = 允许搁置 0.02 MWh/块 (旧 0.2 @10×MWh 口径)
+_g = 0.98 * (1.0 / 60.0)
+assert abs(hst.L_D_BLOCK * _g - 0.02) < 2e-3, hst.L_D_BLOCK * _g
+# 对偶物理步长: 旧 1.0 × (10/MWh) 口径 == 新 lr × (1/g /MWh)
+assert abs(hst.L_EMA_LAM_LR / _g * hst.L_TRACK_COEF - 10.0) < 0.3, hst.L_EMA_LAM_LR / _g
 for a6, exp in ((-0.5, 0.5), (0.0, 3.0), (0.2, 4.0), (0.5, 5.5), (2.0, 5.5)):
     assert abs(hst.soc_target_from_signal(a6) - exp) < 1e-12, (a6, exp)
-print('  a6→target 映射、L_CLIP_COEF=1 / L_SOC_COEF=10 / d_block_L=0.2 / η2=1.0 全部正确')
-print('  d/c2 = {:.4g} MWh (与 ÷100 前一致) ; η2·c2 = {:g} (与 ÷100 前一致)'
-      .format(hst.L_D_BLOCK / hst.L_SOC_COEF, hst.L_EMA_LAM_LR * hst.L_SOC_COEF))
+print('  a6→target 映射、L_CLIP/L_TRACK=1、d_block_L=1.2 (⇔0.02 MWh)、η2=0.16 (⇔旧 10/MWh)、'
+      'λ2∈[1,20] 全部正确')
+print('  物理等价: d_block_L·g = {:.4g} MWh/块 ; η2·(1/g) = {:.3g} (旧口径 10/MWh)'
+      .format(hst.L_D_BLOCK * _g, hst.L_EMA_LAM_LR / _g))
 
 print('=' * 84)
 print('2. 三项目下层 r2/c2 逐位相同 (同一批输入)')
@@ -58,10 +66,10 @@ print('=' * 84)
 mods = {p: importlib.import_module(m) for p, (m, _f, _i) in SOC_PROJECTS.items()}
 
 
-def project_r2_c2(p, obs, obs2, act, rbb, ptur=20.0):
-    """按**该项目自己的训练循环**算出 (r2, c2, soc_target, slack)。
+def project_r2_c2(p, obs, obs2, act, rbb, ptur=20.0, n_rem=N_REM):
+    """按**该项目自己的训练循环**算出 (r2, c2, soc_target, trackerr)。
 
-    td3per 的 r2/c2 在 main 里算 (Cal_Rew_RB 只返回 r1/c1/details),
+    td3per 的 r2/c2 在 main 里算 (Cal_Rew_RB 只返回 r1/c1/details)，
     td3prrbb / prle 的 r2/c2 在 myfunc 里算 —— 两种结构都必须给出同一个数。
     """
     mod, fn_name, _ = SOC_PROJECTS[p]
@@ -71,14 +79,14 @@ def project_r2_c2(p, obs, obs2, act, rbb, ptur=20.0):
         r2 = hst.lower_reward(rbb['clip_amount'])
         c2, info = hst.lower_cost_soc_track(
             d['soc_target'], float(obs[2]), float(obs2[2]),
-            rbb['pbrulemin'], rbb['pbrulemax'], return_info=True)
-        slack = 0.0 if info['infeasible_window'] else \
-            max(0.0, info['d_next'] - info['d_best'])
-        return r2, c2, d['soc_target'], slack
+            rbb['pbrulemin'], rbb['pbrulemax'], n_rem, return_info=True)
+        return r2, c2, d['soc_target'], info['trackerr']
     _r1, _c1, r2, c2, d = fn(obs, obs2, act, rbb, penalty_NN_H=0.0,
-                             time=1.0 / 60, ptur=ptur)
-    assert abs(d['soc_slack'] - c2 / hst.L_SOC_COEF) < 1e-12, (p, d['soc_slack'], c2)
-    return r2, c2, d['soc_target'], d['soc_slack']
+                             time=1.0 / 60, ptur=ptur, n_rem=n_rem)
+    trackerr, info = hst.soc_track_range(d['soc_target'], float(obs[2]), float(obs2[2]),
+                                         rbb['pbrulemin'], rbb['pbrulemax'], n_rem)
+    assert abs(c2 - hst.L_TRACK_COEF * trackerr) < 1e-12, (p, c2, trackerr)
+    return r2, c2, d['soc_target'], trackerr
 
 
 rng = np.random.RandomState(0)
@@ -99,50 +107,54 @@ for k in range(60):
     act = np.array([0.3] * 5 + [a6, 1.0])
     vals = {}
     for p in SOC_PROJECTS:
-        r2, c2, tgt, slack = project_r2_c2(p, obs, obs2, act, rbb)
-        vals[p] = (r2, c2, tgt, slack)
+        r2, c2, tgt, trackerr = project_r2_c2(p, obs, obs2, act, rbb)
+        vals[p] = (r2, c2, tgt, trackerr)
         assert abs(r2 - hst.lower_reward(clip)) < 1e-12, (p, r2, clip)
-        assert abs(c2 - hst.L_SOC_COEF * slack) < 1e-12, (p, c2)
+        assert abs(c2 - hst.L_TRACK_COEF * trackerr) < 1e-12, (p, c2, trackerr)
+        assert c2 >= -1e-12 and r2 <= 1e-12                     # 符号约定: c2 ≥ 0, r2 ≤ 0
     ref = vals['td3per']
     for p, v in vals.items():
         assert v == ref, (k, p, v, ref)
     n_same += 1
-print('  {} 组随机输入 (含不可行窗口): td3per / td3prrbb / prle 的 (r2, c2, target, slack) 逐位相同'
+print('  {} 组随机输入 (含不可行窗口): td3per / td3prrbb / prle 的 (r2, c2, target, trackerr) 逐位相同'
       .format(n_same))
 
 print('=' * 84)
-print('3. 零成本动作 = 规则 SocTracker 的动作')
+print('3. 零成本集合: 规则动作 + F=∅ 时的 best-effort 端点')
 print('=' * 84)
 for tag, (target, prev, lo, hi) in {
         'δ>0 可一步到位': (3.1, 3.0, 0.0, 10.0),
         'δ<0 放电': (2.9, 3.0, -10.0, 0.0),
         '窗口紧 (只能走 0.05 MWh)': (3.5, 3.0, 0.0, 3.0),
+        'F=∅ (目标够不着)': (5.0, 3.0, 0.0, 3.0),
         '不可行窗口': (3.5, 3.0, 5.0, -5.0)}.items():
     gain = 0.98 * (1.0 / 60.0) if target > prev else (1.0 / 60.0) / 0.98
-    pb_best = 0.0 if lo > hi else float(np.clip((target - prev) / gain, lo, hi))
-    soc_rule = prev + gain * pb_best
-    slack, info = hst.soc_track_slack(target, prev, soc_rule, lo, hi)
-    assert abs(slack) < 1e-12, (tag, slack, info)
-    slack2, info2 = hst.soc_track_slack(target, prev, prev, lo, hi)
-    print('  {:<24s} 规则动作 slack={:.3g} | 完全不动 slack={:.4f}'
-          .format(tag, slack, slack2))
+    pb_rule = 0.0 if lo > hi else float(np.clip((target - prev) / gain, lo, hi))
+    soc_rule = prev + gain * pb_rule
+    trackerr, info = hst.soc_track_range(target, prev, soc_rule, lo, hi, N_REM)
+    assert abs(trackerr) < 1e-9, (tag, trackerr, info)
+    assert abs(info['pb_best'] - pb_rule) < 1e-12, (tag, info['pb_best'], pb_rule)
+    tr_idle, _ = hst.soc_track_range(target, prev, prev, lo, hi, N_REM)
+    print('  {:<24s} 规则动作 trackerr={:.3g} | 完全不动 trackerr={:8.3f} MW  gap_empty={}'
+          .format(tag, trackerr, tr_idle, info['gap_empty']))
 
 print('=' * 84)
-print('4. td3per 的本地实现 == 单一真源 (防漂移)')
+print('4. td3per 的本地包装 == 单一真源 (防漂移)')
 print('=' * 84)
 tf = mods['td3per']
 grid = [(float(a), float(p), float(nn), 0.0, 5.0)
         for a in np.linspace(0.5, 5.5, 7) for p in np.linspace(0.5, 5.5, 7)
         for nn in np.linspace(0.5, 5.5, 7)]
 for t, p, nn, lo, hi in grid:
-    s1, i1 = tf.soc_track_slack(t, p, nn, lo, hi)
-    s2, i2 = hst.soc_track_slack(t, p, nn, lo, hi)
-    assert s1 == s2 and i1 == i2
+    s1, i1 = tf.soc_track_slack(t, p, nn, lo, hi, N_REM)
+    s2, i2 = hst.soc_track_range(t, p, nn, lo, hi, N_REM)
+    assert s1 == i2['slack'] and i1 == i2
     assert tf.lower_reward(0.37) == hst.lower_reward(0.37)
-    assert tf.lower_cost_soc_track(t, p, nn, lo, hi) == hst.lower_cost_soc_track(t, p, nn, lo, hi)
+    assert tf.lower_cost_soc_track(t, p, nn, lo, hi, N_REM) == \
+        hst.lower_cost_soc_track(t, p, nn, lo, hi, N_REM)
     assert tf.soc_target_from_signal(0.13) == hst.soc_target_from_signal(0.13)
     assert tf.gap_penalty(t, nn) == hst.gap_penalty(t, nn)
-print('  {} 组网格: soc_track_slack / lower_reward / lower_cost / target 映射 / gap_penalty 逐位一致'
+print('  {} 组网格: soc_track_range / lower_reward / lower_cost / target 映射 / gap_penalty 逐位一致'
       .format(len(grid)))
 
 print('=' * 84)

@@ -22,7 +22,7 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
         SOC_best = SOC + g·clip(δ/g, RBB 窗口)  ← 规则 SocTracker 的动作;
         只罚"本步能做到却没做"的部分 —— 块首够不着的目标跳变不计费, 零成本动作
         恰好是规则下层 (见 td3per_myfunc.soc_track_slack);
-      - lam2 ∈ [10, 500], d_block_L = 20 → 地板 2.5, 每块 10 次更新;
+      - lam2 ∈ [1, 20] (兑换率口径), d_block_L = 1.2 → 地板 0.15, 每块 10 次更新;
       - L 层折扣/探索按 td3per 原口径: --l_discount 0.98 (步级), --l_epsilon 50000。
 
 奖励 / 成本口径
@@ -77,6 +77,7 @@ import matlab
 import matlab.engine
 import hsrl_cost as hc   # H 层 c1/λ/d_block 统一口径
 import hsrl_agent_init as hinit   # critic 输出层 bias(价值基线)
+import hsrl_soctarget as hst      # 下层 r2/c2 两区间口径 (单一真源)
 import hsrl_warmup as hwarm       # warmup 调度 + 规则下层 + transition 填入
 engine = matlab.engine.start_matlab()
 
@@ -177,8 +178,8 @@ def train(num_iterations_H,
     #     最坏 (反向满功率): 每步 ≤ 340。
     #   * 于是 d_block_L = 20 现读作"允许每块浪费 ≈0.02 MWh 的可达量 (≈0.4 步能力)",
     #     地板 2.5 为"≈0.05 步能力" —— 是一个**可满足**的约束, lam2 不再必然贴顶。
-    d_block_L = 0.2        # 初值: 每块 sum_c2 预算
-    d_block_L_min = 0.025     # curriculum 收紧地板
+    d_block_L = hst.L_D_BLOCK        # 初值: 每块 sum_c2 预算 (单一真源)
+    d_block_L_min = hst.L_D_BLOCK_MIN     # curriculum 收紧地板
     if use_csv:
         # 增量落盘: 只把新增行追加进 CSV
         df_rows = []
@@ -360,9 +361,9 @@ def train(num_iterations_H,
         c2, c2_info = lower_cost_soc_track(
             soc_target, E_current, float(observation2[2]),
             rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
+            5 - (episode_steps % 5),
             return_info=True)
-        c2_slack = 0.0 if c2_info['infeasible_window'] else \
-            max(0.0, c2_info['d_next'] - c2_info['d_best'])
+        c2_slack = c2_info['slack']   # 新口径: trackerr 的 MWh 等价 (= trackerr/g)
         sum_c2 += c2
 
         # 下一状态 L 观测: 用下一状态重算可行域 (pb 无关; soc_target 块内固定)
@@ -1052,14 +1053,14 @@ if __name__ == "__main__":
     #        零成本动作 = 规则 SocTracker 的 clip(δ/g, 窗口); 见 myfunc.soc_track_slack)
     #   * lam2 ∈ [10, 500] 初始 10.0; 每块 10 次更新; 步级折扣 --l_discount
     agent_L = SP_TD3(nb_states=5, nb_actions=1, args=args,
-                     lam_max=500.0, lam_min=10.0,
+                     lam_max=hst.L_LAM_MAX, lam_min=hst.L_LAM_MIN,
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=1.0,
                      policy_delay=args.l_policy_delay,
                      policy_noise=args.l_policy_noise,
                      noise_clip=args.noise_clip,
                      cost_critic_mode=args.cost_critic_mode)
-    agent_L.lam = 10.0
-    agent_L.cost_limit = 0.1  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
+    agent_L.lam = hst.L_LAM_INIT
+    agent_L.cost_limit = hst.L_COST_LIMIT  # L层c2专用初始值（单一真源）
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
 
     agent_L.discount = args.l_discount          # L 步级折扣 (与 H 的块级折扣解耦)

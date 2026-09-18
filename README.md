@@ -582,8 +582,8 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 
 | 项目 | 第 6 维语义 | 下层 | L 观测的目标 | `r2` | `c2` |
 |---|---|---|---|---|---|
-| td3per / td3prrbb | SOC 目标 | RL | 蒸馏 5 维第 3 维 = `soc_target/10` | `−1·clip_amount` | `10·slack` |
-| prle | SOC 目标 | RL（+ LLM relabel） | `Normalize(obs)` + 末维 = `soc_target/10` | `−1·clip_amount` | `10·slack` |
+| td3per / td3prrbb | SOC 目标 | RL | 蒸馏 5 维第 3 维 = `soc_target/10` | `−1·clip_amount` | `+1·trackerr` |
+| prle | SOC 目标 | RL（+ LLM relabel） | `Normalize(obs)` + 末维 = `soc_target/10` | `−1·clip_amount` | `+1·trackerr` |
 | td3perrb / td3prrlrb / td3leprrlrb | SOC 目标 | 规则 SocTracker | — | — | — |
 | td3prle | SOC 目标（二次势中心） | RL | 蒸馏 5 维 | `−min(1·(clip+over), 10)` | `0.1·(SOC−target)²` |
 | **per / prrbb** | **影子电价** | RL | `Normalize(obs)` + a6 原值 | `0.1·shadow_profit − 1·clip` | `10 / 7·soc_deviation` |
@@ -593,10 +593,14 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 * `a6 → soc_target = clip(3 + 5·a6, 0.5, 5.5)`（块级 5 步固定）
 * `r2 = −1·clip_amount`（`clip_amount = |pb_cmd − pbrule|`；影子套利项随语义删除）
 * 块末追踪偏好进 **r1**：`10·max(0, |soc_target − SOC_end| − 0.1)`（uniform；legacy 进 c1）
-* `c2 = 10·slack`，`slack = max(0, |target − SOC'| − d_best)` —— **能力内追踪失败量**：
-  零成本动作恰好是规则 SocTracker 的 `pb = clip(δ/g, 窗口)`；块首够不着的跳变（结构性不可行）
-  不计费，由上层 gap 罚负责；窗口不可行时 `slack = 0`
-* L 层数值口径同上一节：`d_block_L = 0.2`、地板 `0.025`、`cost_limit = 0.1`、`η2 = 1.0`
+* `c2 = +1·trackerr` [MW] —— **两区间分治**：Soctrack 范围 `[δ/(g·n_rem), δ/g]`（摊还端…一步填平端，
+  `n_rem = 5 − step%5`）交平抑窗口 `[pbrulemin, pbrulemax]` 得参考集合；`trackerr` = 实际施加的
+  `pb`（由 SOC 变化反解）到该集合的距离。**零成本集合 = 该区间**（L 可任选努力水平）；
+  空交集（目标在窗口内够不着）⇒ 退化为最近的可达端点 ⇒ **竭力即不罚**；`n_rem = 1` 时退化为
+  "一步填平"点（= 旧 `slack` 口径）；窗口不可行时 `trackerr = 0`
+* `r2`/`c2` **同为 MW 口径、系数同为 1** ⇒ 可直接相加/比较；L 层数值口径随之重标：
+  `d_block_L = 1.2`（⇔ 允许搁置 0.02 MWh/块）、地板 `0.15`、`cost_limit = 0.6`、`η2 = 0.16`、
+  `λ2 ∈ [1, 20]`（现在读作"MW 追踪缺口 : MW 越窗"的兑换率）
 
 **记录列**（与 td3per 对齐）
 

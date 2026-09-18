@@ -39,6 +39,7 @@ WIND  分档: <7.0 LOW, ≥11.0 HIGH, 其余 MEDIUM ← 仅诊断标签, 不进�
 
 import numpy as np
 import hsrl_cost as hc
+import hsrl_soctarget as hst
 import pandas as pd
 
 from util import *
@@ -279,9 +280,9 @@ def Cal_Rew_RB(observation, observation2, action_rbb, rbb_info,
 # =============================================================================
 
 # 下层 r2 的 RBB 硬裁剪惩罚系数 (td3per 原值 100, 全库统一 ÷100 后为 1)
-L_CLIP_COEF = 1.0
+L_CLIP_COEF = hst.L_CLIP_COEF      # 单一真源 hsrl_soctarget
 # 下层 c2 的 SOC 目标追踪误差系数 (td3per 原 c2 系数 1000/MWh, ÷100 后为 10)
-L_SOC_COEF = 10.0
+L_SOC_COEF = hst.L_TRACK_COEF      # 单一真源 (新口径: MW)
 
 
 def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
@@ -304,108 +305,35 @@ def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
     ])
 
 
-def lower_reward(clip_amount, coef=L_CLIP_COEF):
-    """下层 r2 = −coef · clip_amount (只保留 RBB 硬裁剪惩罚).
-
-    改造前 r2 = 10·影子套利利润 − 100·clip_amount; 信号语义改为 SOC 目标后
-    影子电价套利项失去依据 (且收益已由上层 r1 = pr·P_G·dt 全额记账),
-    故只保留下层自己"别被窗口裁剪"的惩罚项。
-    """
-    return -float(coef) * float(clip_amount)
-
-
-def soc_track_slack(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax,
+def soc_track_slack(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n_rem,
                     eta_c=0.98, eta_d=0.98, time=1.0 / 60):
-    """下层"能力内追踪失败量"(slack, MWh) 及其诊断量。
+    """兼容旧名：返回"能力内搁置量" (MWh) = trackerr/g 与诊断量。
 
-    动机 (线性式 |target − SOC'| 的结构性缺陷)
-    ------------------------------------------
-    SOC 是纯积分器、目标块内固定, 且下层单步能力只有
-        A = g·|pb|,  g_c = η_c·dt ≈ 0.0163 / g_d = dt/η_d ≈ 0.0170 MWh/MW,
-    窗口 (平抑 ∩ 物理) 通常只放 ~3 MW → A ≈ 0.05 MWh/步 (额定 10 MW 也只有 0.17)。
-    而目标每块(5 步)才变一次, 相邻块最多差 5 MWh ⇒ **块首的 |δ| 无论如何都消不掉**。
-    直接以 |δ| 计费 ⇒ 每块固定吃一笔 1000~2000/步 的"不可控"惩罚:
-      * sum_c2 变成"H 给的目标有多远"的代理, 而不是"L 追得多差";
-      * d_block_L(20)/curriculum 恒被违反, lam2 迅速顶到 500 → 对偶退化为常数。
-
-    本函数把 "不可控" 减掉, 只留 L 能控的部分 —— 即"本步能做到的最好"与
-    "实际做到"之差:
-        delta   = soc_target − SOC_prev
-        g       = η_c·dt (delta>0 充电) / dt/η_d (delta<0 放电)
-        pb_best = clip(delta/g, pbrulemin, pbrulemax)   # ← 规则 SocTracker 的动作
-        d_best  = |delta − g·pb_best|                   # 该动作后的残差 (最优可达)
-        d_next  = |soc_target − SOC_next|                # 实际执行后残差
-        slack   = max(0, d_next − d_best)                # ∈ [0, 2A]
-
-    性质
-    ----
-    * **块首 slack = 0**: 够不着的部分是结构性的 (由上层 gap 罚计费), 不罚下层;
-    * **零成本动作恰好是规则下层 SocTracker 的 pb = clip(δ/g, 窗口)** ——
-      规则版与 RL 版下层的**最优策略完全同一**, 两者对比变成纯粹的可学性对比;
-    * 目标近时顶格充电/放电会被计费 → 天然学出"到位即停", 不产生自致过冲;
-    * 反向动作全额计费 (d_next 增大), 梯度方向明确;
-    * 取值紧界: |d_next − |δ|| ≤ A、|d_best − |δ|| ≤ A ⇒ slack ≤ 2A ≈ 0.34 MWh;
-    * 窗口不可行 (pbrulemin > pbrulemax) 时 slack = 0 —— 被迫吞吐不可归责于 L。
-
-    Returns
-    -------
-    slack : float  (MWh, ≥0)
-    info  : dict   {delta, gain, pb_best, soc_best, d_best, d_next,
-                    infeasible_window}
+    单一真源 = `hsrl_soctarget.soc_track_range`（两区间分治：Soctrack 范围 ∩ 平抑窗口）。
     """
-    soc_target = float(soc_target)
-    SOC_prev = float(SOC_prev)
-    SOC_next = float(SOC_next)
-    pbrulemin = float(pbrulemin)
-    pbrulemax = float(pbrulemax)
-
-    delta = soc_target - SOC_prev
-    g = eta_c * time if delta > 0 else time / eta_d
-    d_next = abs(soc_target - SOC_next)
-
-    # 平坦窗口不可行 (平抑 ∩ 物理 = ∅): 本步的残差不可归责于 L
-    if pbrulemin > pbrulemax:
-        return 0.0, {
-            'delta': delta, 'gain': g, 'pb_best': 0.0,
-            'soc_best': SOC_prev, 'd_best': abs(delta), 'd_next': d_next,
-            'infeasible_window': True,
-        }
-
-    pb_best = float(np.clip(delta / g, pbrulemin, pbrulemax))
-    soc_best = SOC_prev + g * pb_best
-    d_best = abs(soc_target - soc_best)
-    slack = max(0.0, d_next - d_best)
-
-    return slack, {
-        'delta': delta, 'gain': g, 'pb_best': pb_best,
-        'soc_best': soc_best, 'd_best': d_best, 'd_next': d_next,
-        'infeasible_window': False,
-    }
+    trackerr, info = hst.soc_track_range(soc_target, SOC_prev, SOC_next,
+                                         pbrulemin, pbrulemax, n_rem,
+                                         eta_c=eta_c, eta_d=eta_d, time=time)
+    return info['slack'], info
 
 
-def lower_cost_soc_track(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax,
-                         coef=L_SOC_COEF, return_info=False, **kw):
-    """下层 c2 = coef · slack (能力内追踪失败量, 进拉格朗日约束口).
+def lower_reward(clip_amount, coef=None):
+    """下层 r2 = −coef·clip_amount [MW]（单一真源）。"""
+    return hst.lower_reward(clip_amount, coef)
 
-    改造前 c2 = 1000·(相对固定安全带 [1.5,4.5] 的越界量) —— 那是一个**稀疏的
-    安全约束** (SOC 在带内时恒为 0); 上一轮改成 1000·|soc_target − SOC'| 后变成
-    **稠密的水平惩罚**, 其量级被块首不可控的目标跳变主导 (见 soc_track_slack)。
-    本轮改为"能力内 slack"口径 —— 下层 lam2 对偶因此学的是
-    "本可消掉却没消掉的残差" 的边际价格 (一个真正可满足的约束), 而不是目标距离。
 
-    标定 (d_block_L)
-    -----------------
-    尽力追的 L: sum_c2 ≡ 0; 完全不动而 |δ|≥A: 每步 ~10·A ≈ 0.5, 每块 ~2.5;
-    最坏 (反向满功率): 每步 ≤ 10·2A ≈ 3.4。
-    因此 d_block_L = 0.2 现读作"允许每块浪费 ≈0.02 MWh 的可达量 (≈0.4 步能力)",
-    地板 0.025 相应为"允许 ≈0.05 步能力"。想更松可取 0.2~0.5。
+def lower_cost_soc_track(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n_rem,
+                         coef=None, return_info=False, **kw):
+    """下层 c2 = +coef · trackerr [MW]（两区间分治；单一真源 = hsrl_soctarget）。
+
+    口径（本轮替换旧"能力内 slack"）：参考集合 = Soctrack 范围
+    `[δ/(g·n_rem), δ/g]` ∩ 平抑窗口；空交集 ⇒ 退化为最近的可达端点（竭力即不罚）。
+    `trackerr` = 真正施加的 pb（由 SOC 变化反解）到参考集合的距离 [MW]。
+    r2/c2 同为 MW 口径、系数同为 1 ⇒ 两者可直接相加/比较。
     """
-    slack, info = soc_track_slack(soc_target, SOC_prev, SOC_next,
-                                  pbrulemin, pbrulemax, **kw)
-    cost = float(coef) * slack
-    if return_info:
-        return cost, info
-    return cost
+    return hst.lower_cost_soc_track(soc_target, SOC_prev, SOC_next,
+                                    pbrulemin, pbrulemax, n_rem,
+                                    coef=coef, return_info=return_info, **kw)
 
 
 # =============================================================================
@@ -675,6 +603,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         c2, c2_info = lower_cost_soc_track(
             soc_target, E_current, float(obs2[2]),
             rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
+            5 - (step % 5),
             return_info=True)
 
         bi = step // 5

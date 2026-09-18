@@ -27,7 +27,7 @@ Upper (H) c1（风险侧）:
 
 Lower (L):
   r2 = −1 · clip_amount              (RBB 硬裁剪量; 影子套利项随信号语义删除)
-  c2 = 10 · slack                    (能力内追踪失败量, 见 hsrl_soctarget)
+  c2 = 1 · trackerr [MW]             (两区间分治, 见 hsrl_soctarget)
 
 Wind boundaries: dynamic (default LOW < 8.5 m/s, HIGH >= 12.0 m/s, 专家起点),
 由 LLM 元控制器在 1440 步窗口边界处调整；启动时可用 --seg 选择 percentile /
@@ -325,10 +325,10 @@ def Cal_r2_PER_baseline(pbrule, shadow_price, SOC, wind_level='MEDIUM'):
 # =============================================================================
 
 def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
-                   penalty_NN_H=0.0, time=1.0 / 60, ptur=None):
+                   penalty_NN_H=0.0, time=1.0 / 60, ptur=None, n_rem=None):
     """
     PRRBB reward: wind × price joint segmentation (upper);
-    lower r2 = −1·clip_amount (SOC 目标语义), c2 = 10·slack.
+    lower r2 = −1·clip_amount [MW], c2 = +1·trackerr [MW] (两区间分治).
 
     Parameters
     ----------
@@ -385,16 +385,19 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     c1 = c1 + W_GAP * unfeasible_gap
     c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样)
 
-    # ==== Lower Level (L) —— SOC 目标追踪口径 (单一真源 hsrl_soctarget) ====
-    # r2 = −1·clip_amount  (RBB 硬裁剪量; 影子套利项随信号语义一起删除)
-    # c2 = 10·slack        (能力内追踪失败量; 零成本动作 = 规则 SocTracker)
+    # ==== Lower Level (L) —— 两区间分治 (单一真源 hsrl_soctarget) ====
+    #   r2 = −1·clip_amount [MW]  越出平抑窗口的裁剪量
+    #   c2 = +1·trackerr    [MW]  实际施加 pb 到"Soctrack范围 ∩ 平抑窗口"的距离
+    #                             (空交集 ⇒ 退化为最近可达端点, 竭力即不罚)
+    n_rem = n_rem if n_rem is not None else rbb_info.get('n_rem')
+    if n_rem is None:
+        raise ValueError('Cal_Rew_PRRBB: 需要 n_rem (块内剩余步数 = 5 − step%5)')
     soc_dev = Cal_soc_deviation(SOC_new, wind_level)   # 仅诊断: 原安全带偏离
     r2 = hst.lower_reward(clip_amount)
     c2, c2_info = hst.lower_cost_soc_track(
         soc_target, float(observation[2]), SOC_new,
-        rbb_info['pbrulemin'], rbb_info['pbrulemax'], return_info=True)
-    slack = 0.0 if c2_info['infeasible_window'] else \
-        max(0.0, c2_info['d_next'] - c2_info['d_best'])
+        rbb_info['pbrulemin'], rbb_info['pbrulemax'], n_rem, return_info=True)
+    slack = c2_info['slack']
 
     # ==== Details ====
     turbine_profit = w_wind * pr_old * ptur * time
@@ -568,7 +571,7 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
         r1, c1, r2, c2, details = Cal_Rew_PRRBB(
             obs, obs2, action_rbb, rbb_info,
             penalty_NN_H=penalty_NN_H, time=time,
-            ptur=ptur,
+            ptur=ptur, n_rem=5 - (step % 5),
         )
 
         sum_r1 += r1
@@ -727,7 +730,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         r1, c1, r2, c2, details = Cal_Rew_PRRBB(
             obs, obs2, action_rbb, rbb_info,
             penalty_NN_H=penalty_NN_H, time=time,
-            ptur=ptur,
+            ptur=ptur, n_rem=5 - (step % 5),
         )
 
         bi = step // 5

@@ -21,8 +21,12 @@ Reward structure (td3prrbb_myfunc.Cal_Rew_PRRBB):
                   - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                   wT = wT_u(u)×wT_p(pr), wB ≡ 1.0 (【本轮变更】BESS 分段系数已去掉)
              c1 = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + 50*unfeasible_gap
-  Lower (L): r2 = −1·clip_amount (SOC 目标语义; 影子套利项已删除)
-             c2 = 10·slack (能力内追踪失败量; 零成本动作 = 规则 SocTracker)
+  Lower (L) —— 两区间分治 (hsrl_soctarget):
+             r2 = −1·clip_amount      [MW] 越出平抑窗口的裁剪量
+             c2 = +1·trackerr         [MW] 实际施加 pb 到参考集合的距离
+                  参考集合 = Soctrack范围[δ/(g·n_rem), δ/g] ∩ 平抑窗口
+                             (空交集 ⇒ 最近可达端点 = 尽力而为, 不罚)
+             零成本集合 = 该区间 (L 可在「摊还端…一步填平端」间任选努力水平)
 
 Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
@@ -266,7 +270,7 @@ def train(num_iterations_H,
         r1, c1, r2, c2, reward_details = Cal_Rew_PRRBB(
             observation, observation2, action_rbb, rbb_info,
             penalty_NN_H=penalty_NN_H, time=time,
-            ptur=ptur,
+            ptur=ptur, n_rem=5 - (episode_steps % 5),
         )
 
         # Total reward and cost (H uses r1/c1; L uses r2/c2)
@@ -892,7 +896,7 @@ if __name__ == "__main__":
     # L 层(步骤A): policy_delay/--policy_noise 独立于 H —— 放松到 delay=1+noise≈0 时节奏接近 DDPG
     # (twin critic 与 EMA 对偶仍保留, 仅去掉延迟更新与 target smoothing 对窄可行窗的抹平)
     agent_L = SP_TD3(nb_states = 5, nb_actions = 1, args = args,
-                     lam_max=500.0, lam_min=10.0,
+                     lam_max=hst.L_LAM_MAX, lam_min=hst.L_LAM_MIN,
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=hst.L_EMA_LAM_LR,
                      policy_delay=args.l_policy_delay,
                      policy_noise=args.l_policy_noise,

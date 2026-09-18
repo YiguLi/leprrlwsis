@@ -4,7 +4,7 @@
 
 分两支：
   * **SOC 目标支**（td3per / td3prrbb / prle）：口径集中在单一真源 `hsrl_soctarget.py`
-    （`r2 = −1·clip`、`c2 = 10·slack`、`d_block_L = 0.2`、地板 0.025、`cost_limit = 0.1`、
+    （`r2 = −1·clip`、`c2 = +1·trackerr`、`d_block_L = 1.2`、地板 0.15、`cost_limit = 0.6`、
     L 对偶 η2 = 1.0）。本文件只查"接线是否都指向真源"；
     **三项目逐位等价**与目标映射/零成本动作性质见 `test_soctarget_uniform.py`。
   * **其它支**（per / prrbb 影子电价、td3prle 目标中心二次势）：系数仍在各自项目里，
@@ -67,17 +67,18 @@ print('=' * 84)
 print('A. SOC 目标支: 三个项目都接在单一真源 hsrl_soctarget 上')
 print('=' * 84)
 import hsrl_soctarget as hst                                     # noqa: E402
-assert (hst.L_CLIP_COEF, hst.L_SOC_COEF, hst.L_D_BLOCK,
+assert (hst.L_CLIP_COEF, hst.L_TRACK_COEF, hst.L_D_BLOCK,
         hst.L_D_BLOCK_MIN, hst.L_COST_LIMIT, hst.L_EMA_LAM_LR) == \
-       (1.0, 10.0, 0.2, 0.025, 0.1, 1.0)
-assert abs(hst.L_D_BLOCK / hst.L_SOC_COEF - 0.02) < 1e-12
-assert abs(hst.L_EMA_LAM_LR * hst.L_SOC_COEF - 10.0) < 1e-12
+       (1.0, 1.0, 1.2, 0.15, 0.6, 0.16)
+_g = 0.98 * (1.0 / 60.0)
+assert abs(hst.L_D_BLOCK * _g - 0.02) < 2e-3          # 物理等价: 允许搁置 0.02 MWh/块
+assert abs(hst.L_EMA_LAM_LR / _g - 10.0) < 0.3        # 对偶物理步长与旧口径一致
 for proj, (main_py, mf_py) in SOC_FAMILY.items():
     mt, ft = src(main_py), src(mf_py)
     if proj == 'td3per':
-        # td3per 保留**本地实现**（与真源逐位一致，由 test_soctarget_uniform 第 4 节钉住）
-        assert 'def soc_track_slack(' in ft and 'L_CLIP_COEF = 1.0' in ft \
-            and 'L_SOC_COEF = 10.0' in ft, proj
+        # td3per 保留**本地包装**（转发真源，由 test_soctarget_uniform 第 4 节钉住逐位一致）
+        assert 'def soc_track_slack(' in ft and 'L_CLIP_COEF = hst.L_CLIP_COEF' in ft \
+            and 'L_SOC_COEF = hst.L_TRACK_COEF' in ft, proj
     else:
         assert 'import hsrl_soctarget as hst' in ft, (proj, 'myfunc 未接真源')
         for call in ('hst.soc_target_from_signal(', 'hst.lower_reward(',
@@ -95,7 +96,7 @@ for proj, (main_py, mf_py) in SOC_FAMILY.items():
     n_lo = len(re.findall(r'ema_lam=True, ema_alpha=0\.02, ema_lam_lr=(?:hst\.L_EMA_LAM_LR|1\.0)', mt))
     n_hi = len(re.findall(r'ema_lam=True, ema_alpha=0\.02, ema_lam_lr=0\.01', mt))
     assert n_lo == 1 and n_hi == 1, (proj, n_lo, n_hi)
-    for v, exp in ((d, 0.2), (f, 0.025), (c, 0.1)):
+    for v, exp in ((d, 1.2), (f, 0.15), (c, 0.6)):
         assert v is None or abs(v - exp) < 1e-12, (proj, v, exp)
     body = re.sub(r'(?s)def Cal_r2_PER_baseline.*?(?=^def )', '', ft, flags=re.M)
     for bad in (r'shadow_profit\s*=',                       # 旧套利项赋值

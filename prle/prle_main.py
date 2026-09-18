@@ -83,7 +83,8 @@ def train_prle(num_iterations_H,
                       - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                  c1 = risk_coeff * (10*max(0,P_F-3) + 0.1*P_F)
       Lower (L, SOC 目标语义): r2 = −1·clip_amount (影子套利项已删除)
-                 c2 = 10·slack (能力内追踪失败量)
+                 c2 = +1·trackerr [MW] (两区间: Soctrack范围 ∩ 平抑窗口;
+                                        空交集 ⇒ 最近可达端点)
 
     PRLE additions:
       - Sub-step context accumulation for reward relabeling
@@ -251,7 +252,7 @@ def train_prle(num_iterations_H,
         r1, c1, r2, c2, reward_details = Cal_Rew_PRRBB(
             observation, observation2, action_rbb, rbb_info,
             penalty_NN_H=penalty_NN_H, time=time,
-            ptur=ptur,
+            ptur=ptur, n_rem=5 - (episode_steps % 5),
         )
 
         # Total reward and cost
@@ -916,7 +917,7 @@ if __name__ == "__main__":
     # L agent: also PRLE_DDPG (block_size=1, stores context=None — no relabeling context)
     # L 层对偶改 EMA 实际成本更新; lam2 ∈ [10, 200] (500→200, 抑制对偶顶格后成本通道失效)
     agent_L = PRLE_DDPG(nb_states=5, nb_actions=1, args=args,
-                        lam_max=200.0, lam_min=10.0,
+                        lam_max=hst.L_LAM_MAX, lam_min=hst.L_LAM_MIN,
                         ema_lam=True, ema_alpha=0.02, ema_lam_lr=hst.L_EMA_LAM_LR)
     agent_L.cost_limit = hst.L_COST_LIMIT  # L-layer c2 dedicated initial value (EMA 模式下不使用)
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
