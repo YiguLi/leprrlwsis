@@ -290,20 +290,34 @@ def train(num_iterations_H,
         # ================================================================
         # 下层 L: RL BESS (td3per 自己的操作, 每步决策)
         # ================================================================
+        # ---- 残余动作: 命令 = 规则基线 + Δ (Δ 由 actor 输出, 初值 0) ----
+        # 基线 = 规则动作 (单一真源 hst.rule_action, 与 SocTracker.act 逐位一致):
+        #   Δ≡0 ⇒ 命令逐位等于规则下层 ⇒ r2≡0、c2≡0 —— "先稳定到规则"是**结构保证**。
+        #   基线负责 clip/物理限幅/被迫吞吐等非线性, 网络只学"相对规则偏多少 [MW]"。
+        _n_rem_L = 5 - (episode_steps % 5)
+        _soc_tgt_L = hst.soc_target_from_signal(float(applied_action_H[5]))
+        pb_rule = hst.rule_action(
+            _soc_tgt_L, E_current, rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
+            _n_rem_L, eta_c=rbb_system.eta_c, eta_d=rbb_system.eta_d,
+            time=rbb_system.time, rated_power=rbb_system.rated_power)
         if step <= args.warmup:
-            # warmup 期下层 = 规则行为体 (RBB 窗口内一步填平跟踪 SOC 目标; 无随机数)
+            # warmup 期下层 = 规则行为体 (rule 臂: Δ=0, 命令 = 基线)
             if warmup_rule is not None:
-                _w_obs = rbb_system.compute_pbrule(
-                    pb_original=0.0, ptur=float(pw_tru),
-                    pg_prev=float(observation[-1]), E=float(observation[2]))[1]
-                applied_action_L = original_action_L = warmup_rule.action(
-                    float(observation[2]), _w_obs["pbrulemin"], _w_obs["pbrulemax"])
-            else:                                   # 对照臂 (--warmup_bess random)
-                applied_action_L = original_action_L = agent_L.random_action()
+                delta_L = np.zeros(1, dtype=np.float64)
+                pb_cmd_L = float(pb_rule)
+            else:               # 对照臂 (--warmup_bess random): 仍是"绝对随机功率"命令
+                delta_L = np.asarray(agent_L.random_action(), dtype=float).reshape(-1)
+                pb_cmd_L = float(delta_L[0])
+                delta_L = np.array([pb_cmd_L - float(pb_rule)])
             penalty_NN_L = 0
         else:
-            original_action_L = agent_L.select_action(norm_observation_L)
-            applied_action_L, penalty_NN_L = CheckAction(original_action_L)
+            delta_L = np.asarray(agent_L.select_action(norm_observation_L),
+                                 dtype=float).reshape(-1)
+            pb_cmd_L = float(pb_rule) + float(delta_L[0])
+        original_action_L = delta_L          # 入 buffer 的动作 = Δ (actor 的动作空间)
+        applied_action_L, penalty_NN_L = CheckAction(np.array([pb_cmd_L]))
+        prGreen('--L-- rule = {:.3f} | Δ = {:.3f} | cmd = {:.3f}'.format(
+            float(pb_rule), float(delta_L[0]), float(pb_cmd_L)))
         prGreen('--L-- ori a_t = {}'.format(round_list(original_action_L, 3)))
 
         action = np.concatenate((applied_action_H, applied_action_L))
@@ -316,7 +330,7 @@ def train(num_iterations_H,
         # 自动含两段 clip: ① CheckAction 的 ±10 夹裁 + ② 平抑窗口夹裁。
         # 因窗口 ⊆ ±10, 传命令值与传夹后值给出的 pbrule 逐位相同 (见 test_l_lower_unit);
         # 若改回传夹后值, |cmd|>10 时该方向梯度恒 0 (死区)。见 hsrl_soctarget.lower_reward。
-        pb_original = float(np.ravel(np.asarray(original_action_L, dtype=float))[0])
+        pb_original = float(pb_cmd_L)   # 命令值 (CheckAction 前) = 规则基线 + Δ
 
         pbrule, rbb_info = rbb_system.compute_pbrule(
             pb_original=pb_original,
@@ -450,6 +464,8 @@ def train(num_iterations_H,
             agent_L, norm_observation_L, original_action_L, r2, c2,
             norm_observation2_L, done_L,
             applied_pb=float(pbrule), warmup=bool(step <= args.warmup),
+            cmd_pb=float(pb_cmd_L),
+            rule_pb=float(pb_rule),
             stats=bess_fill_stats)
 
         if step > args.warmup:
@@ -570,7 +586,10 @@ def train(num_iterations_H,
                 'soc_target': soc_target,
                 # 下层 (RL BESS)
                 'norm_observation_L': norm_observation_L,
-                'original_action_L': original_action_L,
+                'original_action_L': delta_L,              # = Δ (actor 输出; 残余动作)
+                'delta_L': float(delta_L[0]),
+                'pb_rule': float(pb_rule),
+                'pb_cmd': float(pb_cmd_L),
                 'applied_action_L': applied_action_L,
                 'action_rbb': action_rbb,
                 'r1': r1, 'c1_step': c1_step, 'c1': c1_step + gap_pen,
@@ -716,6 +735,8 @@ def train(num_iterations_H,
                 writer.add_scalar('action/soc_signal', applied_action_H[5], step)
                 writer.add_scalar('action/soc_target', soc_target, step)
                 writer.add_scalar('action/pb_original', pb_original, step)
+                writer.add_scalar('action/pb_rule', float(pb_rule), step)
+                writer.add_scalar('action/delta_L', float(delta_L[0]), step)
                 writer.add_scalar('action/pbrule', float(pbrule), step)
 
             # ---- Env 1440-step window metrics ----
@@ -929,6 +950,8 @@ if __name__ == "__main__":
     # L 层折扣 (步级语义) 与 H 层解耦: L episode = 5 步块 (done_L=True), 视野 ≤5 步
     parser.add_argument('--l_discount', default=0.98, type=float,
                         help='L 层(BESS)折扣: 步级语义; 默认 0.98 (td3per 原口径; H 为块级 0.99)')
+    parser.add_argument('--l_noise_amp', default=1.0, type=float,
+                        help='L 层探索噪声半宽 [MW] (残余动作量级; 旧式 ±0.05 比所需小 ~50 倍)')
     parser.add_argument('--cost_critic_mode', default='max', type=str,
                         choices=['min', 'max'],
                         help='cost twin-critic aggregation: max (safe, recommended) or min')
@@ -1084,6 +1107,11 @@ if __name__ == "__main__":
     agent_L.lam = hst.L_LAM_INIT
     agent_L.cost_limit = hst.L_COST_LIMIT  # L层c2专用初始值（单一真源）
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
+    # ---- 残余动作: L actor 输出层零初始化 ⇒ t=0 时 Δ≡0 ⇒ 起点逐位等于规则下层 ----
+    hinit.zero_actor_output(agent_L, verbose=True)
+    # L 层探索半宽 [MW] (残余动作量级): 旧式 ±0.05 MW 比所需动作小 ~50 倍
+    agent_L.explore_amp = np.full(1, float(getattr(args, 'l_noise_amp', 1.0)), dtype=np.float32)
+    agent_L.explore_floor = np.zeros(1, dtype=np.float32)
 
     agent_L.discount = args.l_discount          # L 步级折扣 (与 H 的块级折扣解耦)
     agent_L.depsilon = 1.0 / max(args.l_epsilon, 1)  # L 探索衰减 (与 H 的 --epsilon 解耦)

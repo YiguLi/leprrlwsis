@@ -154,6 +154,8 @@ def main():
         # SOC 目标支: L 观测统一走各项目自己的 5 维构造器 (单一真源 hst.build_L_obs)
         soc_obs_builders = {'TD3PER': build_L_obs_TD3PER, 'TD3PRRBB': build_L_obs_TD3PRRBB,
                             'TD3PRLE': build_L_obs_TD3PRLE, 'PRLE': build_L_obs_PRLE}
+        # TD3 全系列: 下层 = **残余动作** (actor 输出 Δ, 命令 = 规则基线 + Δ); PRLE 仍是绝对动作
+        residual_proj = ('TD3PER', 'TD3PRRBB', 'TD3PRLE')
 
         while episode_steps < EPISODE_LENGTH:
             if episode_steps % 10 == 0:
@@ -173,6 +175,13 @@ def main():
             else:
                 norm_obs_L = np.append(norm_obs, action_H[-1])
             action_L = agent_L.select_action(norm_obs_L)
+            if proj_type in residual_proj:
+                # 命令 = 规则基线 (单一真源 hst.rule_action) + Δ; RBB 仍收"命令值"⇒ 两段 clip 都计费
+                pb_rule = hst.rule_action(
+                    hst.soc_target_from_signal(action_H[-1]), float(obs[2]),
+                    rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
+                    5 - (episode_steps % 5))
+                action_L = np.array([float(pb_rule) + float(action_L[0])])
             action_L, penalty_NN_L = CheckAction(action_L)
 
             action = np.concatenate((action_H, action_L))

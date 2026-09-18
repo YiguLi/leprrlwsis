@@ -32,6 +32,9 @@ for _s in (sys.stdout, sys.stderr):
 
 OLD_ETA = 0.01
 
+# TD3 全系列已改用**残余动作** (命令 = 规则基线 + Δ); prle 是 DDPG 兄弟, 仍是绝对动作
+TD3_RESIDUAL = ('td3per', 'td3prrbb', 'td3prle')
+
 SOC_FAMILY = {                      # 项目 -> (main, myfunc)
     'td3per': ('td3per/td3per_main.py', 'td3per/td3per_myfunc.py'),
     'td3prrbb': ('td3prrbb/td3prrbb_main.py', 'td3prrbb/td3prrbb_myfunc.py'),
@@ -97,8 +100,17 @@ for proj, (main_py, mf_py) in SOC_FAMILY.items():
     assert re.search(r'(?:hst\.)?gap_penalty\(', mt), (proj, '块末 gap 罚未接真源')
     assert re.search(r'sum_r1 -= (?:gap_pen|c1_soc_track)\b', mt), \
         (proj, 'uniform 下块末追踪罚未进 r1')
-    assert re.search(r'pb_original = float\(np\.ravel\(np\.asarray\(original_action_L', mt), \
-        (proj, '未把**命令值**交给 compute_pbrule ⇒ clip_amount 只含窗口那段 (|cmd|>10 死区)')
+    if proj in TD3_RESIDUAL:
+        # 残余动作 (TD3 全系列): 命令 = 规则基线 + Δ ⇒ clip_amount 仍含两段 clip
+        assert re.search(r'pb_cmd_L = float\(pb_rule\) \+ float\(delta_L\[0\]\)', mt), \
+            (proj, '残余动作: 命令必须是 规则基线 + Δ')
+        assert re.search(r'pb_original = float\(pb_cmd_L\)', mt), \
+            (proj, '未把**命令值**交给 compute_pbrule ⇒ clip_amount 只含窗口那段 (|cmd|>10 死区)')
+        assert re.search(r'original_action_L = delta_L', mt), (proj, '入池动作必须是 Δ')
+    else:
+        # prle (DDPG, 不在 td3 系列内): 仍是绝对动作, a_L 本身就是命令值
+        assert re.search(r'pb_original = float\(np\.ravel\(np\.asarray\(original_action_L', mt), \
+            (proj, '未把**命令值**交给 compute_pbrule ⇒ clip_amount 只含窗口那段 (|cmd|>10 死区)')
     # L 层对偶走单一真源 + λ2 初值/curriculum 计量显式 + 计数每块 1 次
     assert 'hst.dual_update_L(' in mt, (proj, 'L 对偶未走 hsrl_soctarget.dual_update_L')
     assert re.search(r'def build_L_obs_distilled\([^)]*n_rem=None', ft), \

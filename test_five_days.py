@@ -62,7 +62,8 @@
   * agent 类、CheckAction / Normalize(_H)、RuleBasedBESS 各自取自本项目模块；
   * L 层观测：
       - per / prrbb (影子电价支) : np.append(Normalize(obs), applied_action_H[-1])
-      - td3per / td3prle / td3prrbb (SOC 目标支) : build_L_obs_distilled(
+                  - td3per / td3prle / td3prrbb (SOC 目标支) : 下层 = **残余动作**
+              (actor 输出 Δ, 命令 = 规则基线 + Δ) + build_L_obs_distilled(
               [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5])
       - prle (SOC 目标支) : build_L_obs_distilled(
               Normalize(obs) + soc_target/10)
@@ -71,7 +72,8 @@
   * td3per / td3prrlrb / td3perrb / td3leprrlrb 的 H 观测 = Normalize(obs) + 24h 相位特征，
     维数（4 + 0/2/5）从 actor_6.pkl 的 fc1.weight 自动探测，无需手填。
     相位时刻 = episode 内的分钟序号（与训练一致：episode 恰好 1440 步）。
-  * td3per 改造后其 L 层仍走 RL（不是规则），只是 L 观测换成 5 维规则原配料 [pg(t−1), ptur, SOC, target, n_rem]；
+    * td3per 改造后其 L 层仍走 RL（不是规则），只是 L 观测换成 5 维规则原配料 [pg(t−1), ptur, SOC, target, n_rem]，
+    且 actor 输出 Δ（命令 = 规则基线 + Δ；旧 checkpoint 的动作语义是绝对功率，不可直接加载）；
     因此 H 权重（actor_6）与 L 权重（actor_1）都必须来自改造后的 td3per 训练 run，
     改造前的 TD3PER-run* 权重语义不同（影子电价 + 4 维 H 观测），不可混用。
 
@@ -148,6 +150,8 @@ from copy import deepcopy
 
 import numpy as np
 import pandas as pd
+
+import hsrl_soctarget as hst        # 下层 r2/c2 与规则基线的单一真源
 
 warnings.filterwarnings("ignore")
 
@@ -253,6 +257,7 @@ PROJECTS = {
         # 下层 = td3per 自己的 RL BESS, 5 维观测 = [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5],
         #        r2 = -1·min(clip_amount,20), c2 = +1·trackerr [MW] (到参考集合的距离; 口径见 hsrl_soctarget)
         label='TD3PER',
+        residual=True,          # 下层 = 残余动作 (命令 = hst.rule_action + Δ)
         agent=('td3per.td3per_ddpg', 'SP_TD3'),
         myfunc='td3per.td3per_myfunc',
         rule_bess=('rbb.rbb_rule_bess', 'RuleBasedBESS'),
@@ -268,6 +273,7 @@ PROJECTS = {
     ),
     'td3prrbb': dict(
         label='TD3PRRBB',
+        residual=True,          # 下层 = 残余动作 (命令 = hst.rule_action + Δ)
         agent=('td3prrbb.td3prrbb_ddpg', 'SP_TD3'),
         myfunc='td3prrbb.td3prrbb_myfunc',
         rule_bess=('td3prrbb.td3prrbb_rule_bess', 'RuleBasedBESS'),
@@ -282,6 +288,7 @@ PROJECTS = {
     ),
     'td3prle': dict(
         label='TD3PRLE',
+        residual=True,          # 下层 = 残余动作 (命令 = hst.rule_action + Δ)
         agent=('td3prle.td3prle_ddpg', 'SP_TD3_PRLE'),
         myfunc='td3prle.td3prle_myfunc',
         rule_bess=('td3prle.td3prle_rule_bess', 'RuleBasedBESS'),
@@ -649,7 +656,17 @@ class ProjectRunner:
                 if t % 5 == 0:
                     agent_L.reset(norm_obs_L)
                 original_action_L = agent_L.select_action(norm_obs_L)
-                applied_action_L, _pen_L = CheckAction(original_action_L)
+                if self.spec.get('residual', False):
+                    # TD3 全系列: actor 输出 **Δ**, 命令 = 规则基线 + Δ (单一真源 hst.rule_action)
+                    pb_rule = hst.rule_action(
+                        hst.soc_target_from_signal(action_H[5]), E_now,
+                        rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'], 5 - (t % 5),
+                        eta_c=self.rbb.eta_c, eta_d=self.rbb.eta_d,
+                        time=self.rbb.time, rated_power=self.rbb.rated_power)
+                    applied_action_L, _pen_L = CheckAction(
+                        np.array([float(pb_rule) + float(original_action_L[0])]))
+                else:
+                    applied_action_L, _pen_L = CheckAction(original_action_L)
             else:                                  # RLRB：规则 SocTracker
                 pb_cmd = self.tracker.act(E_now, soc_target,
                                           rbb_info_obs['pbrulemin'],

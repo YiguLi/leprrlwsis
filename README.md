@@ -588,8 +588,8 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 
 | 项目 | 第 6 维语义 | 下层 | L 观测 (5 维) | `r2` | `c2` |
 |---|---|---|---|---|---|
-| td3per / td3prrbb / td3prle | SOC 目标 | RL | 统一 5 维 **规则原配料**：`[pg(t−1), ptur, SOC, soc_target, n_rem]`（各 ÷10，`n_rem`÷5） | `−1·clip_amount` | `+1·trackerr` |
-| prle | SOC 目标 | RL（+ LLM relabel） | 同左（统一 5 维，不再用 `Normalize(obs)` 基线） | `−1·clip_amount` | `+1·trackerr` |
+| td3per / td3prrbb / td3prle | SOC 目标 | RL（**残余动作** `pb_cmd = 规则 + Δ`） | 统一 5 维 **规则原配料**：`[pg(t−1), ptur, SOC, soc_target, n_rem]`（各 ÷10，`n_rem`÷5） | `−1·clip_amount` | `+1·trackerr` |
+| prle | SOC 目标 | RL（+ LLM relabel；**仍是绝对动作**, 未同步残余） | 同左（统一 5 维，不再用 `Normalize(obs)` 基线） | `−1·clip_amount` | `+1·trackerr` |
 | td3perrb / td3prrlrb / td3leprrlrb | SOC 目标 | 规则 SocTracker | — | — | — |
 | **per / prrbb** | **影子电价** | RL | `Normalize(obs)` + a6 原值 | `0.1·shadow_profit − 1·clip` | `10 / 7·soc_deviation` |
 
@@ -605,6 +605,25 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
   `r* = clip(δ/g, W)`（W 里离 B 最近的端点，`ref_is_point=True`）——只有恰好顶到 `r*` 才不罚，
   两侧偏离都按 `|pbrule − r*|` 线性计费（缺口本身不可达 ⇒ 由上层块末 gap 罚承接）；
   `n_rem = 1` 时退化为"一步填平"点（= 旧 `slack` 口径）；窗口不可行时 `trackerr = 0`
+* **L 动作 = 残余动作**（TD3 全系列 `td3per` / `td3prrbb` / `td3prle`）：
+  `pb_cmd = hst.rule_action(soc_target, SOC, W, n_rem) + Δ`，`Δ` 由 actor 输出。
+  基线 `hst.rule_action` 与各项目 `SocTracker.act` **逐位一致**（含不可行窗口与死区，
+  4000 组断言），它承担窗口/额定限幅/被迫吞吐等全部非线性；网络只学"相对规则偏多少 [MW]"。
+  * **起点 = 规则，是结构保证而非初始化偶然**：`hinit.zero_actor_output(agent_L)` 把 actor 输出层
+    权重+bias 置 0 ⇒ t=0 时 `Δ≡0` ⇒ 命令逐位等于规则动作 ⇒ `r2 ≡ 0` **且** `c2 ≡ 0`
+    （规则动作正是 L 奖励的唯一最优/零成本动作；见下"参考集合"）。
+  * **入 buffer 的动作是 Δ**（= actor 的动作空间），交给 RBB 的是**命令值** `pb_cmd`
+    ⇒ `clip_amount = |pb_cmd − pbrule|` 仍是**两段 clip 合计**（±10 执行器 + 平抑窗口），
+    不会出现"|cmd|>10 时该方向梯度恒 0"的死区；事后填入用 `cmd_pb`(=命令) 与
+    `rule_pb`(=基线) 核对 `|rule_pb + a_L − cmd_pb| == 0`（抓接线 bug），
+    而"命令被窗口夹掉"单独计 `n_clipped`（**正常工况**, 不是失配）。
+  * **残余自由度 = 参考集合的宽度**（实测）：`F = ∅`（≈82% 的步，只有"竭力值"免费）时
+    **任何 Δ≠0 都在两个通道之一被计费**；`F` 是区间（≈9%）时免费残余区间**恰好 = F − pb_rule**；
+    窗口不可行（≈9%，整步不可归责）时至少"减吞吐"方向完全平坦。
+    ⇒ 旧参数化下"规则的绝对功率依赖观测里没有的窗口"这一死结被基线吃掉，残余只学小修正。
+  * 探索半宽 `--l_noise_amp` 默认 **1.0 MW**（旧式 ±0.05 MW 比所需动作小 ~50 倍）。
+  * **旧 checkpoint 不兼容**（L 观测与动作语义同时改变）。
+
 * **L 观测 = 规则的原配料**（单一真源 `hsrl_soctarget.build_L_obs`，四项目逐位相同）：
   `[pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]`
   —— `pg(t−1)` 与 `ptur` 给出平抑窗口中心（± 已知限幅）；SOC 与目标同刻度 ⇒
@@ -634,6 +653,9 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
   逐位一致；零成本动作 = 规则动作；目标映射与观测目标维一致
 * `python agentutil/test_l_lower_unit.py` —— SOC 支的接线（都指向真源）+ 其它支的系数与
   ÷100 物理量守恒
+* `python agentutil/test_l_residual.py` —— 残余动作的 6 组不变量：基线 ≡ `SocTracker.act`（逐位）/
+  `Δ≡0 ⇒ r2≡0 ∧ c2≡0` 与"残余自由度 = 参考集合宽度"/零初始化输出层 ⇒ 输出**精确** 0/
+  三个 main 的接线（命令入 RBB、Δ 入 buffer、日志列、探索半宽）/ ddpg 侧噪声/事后填入核对语义
 
 **遗留**：`Cal_r2_PER_baseline()`（prrbb / prle / td3prrbb）是 **LEGACY 基线**，
 系数保持 ÷100 之前的原值，用于对照旧 PER 设计。
@@ -659,7 +681,7 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 | 层 | 旧 | 新 |
 |---|---|---|
 | 上层动作 | `random_action()`（wt ~ U(0,0.5)、信号 ~ U(−0.5,0.5)） | `WarmupSchedule`：wt 各维 0.33 起、每块 ±0.05、clip **[0.20,0.45]**（Cp 保持最优的 86%~100%，E[ΣCp]=2.82 ≈ 95% 最优）；信号维**恒 0**（SOC 目标语义 ⇒ `soc_target ≡ 3`；影子电价语义 ⇒ 中性 0）——两者都等于 actor 的 `init_wt_action_bias(..., sig_value=0.0)`，即 warmup 与策略起步**同分布** |
-| 下层 BESS（BESS-RL 的 6 个项目） | `agent_L.random_action()`（每步随机 pb） | `WarmupBessRule`：RBB 窗口内"一步填平"跟踪 SOC 目标（语义与各项目 `SocTracker.act` 逐位相同，有对照断言）；该步**真实的** (s_L, a_L=规则命令, r2, c2, s_L′) 经 `fill_bess_transition()` 入池（"事后填入"，a_L 不再取 agent 抽的随机值） |
+| 下层 BESS（BESS-RL 的 6 个项目） | `agent_L.random_action()`（每步随机 pb） | `WarmupBessRule`：RBB 窗口内"一步填平"跟踪 SOC 目标（语义与各项目 `SocTracker.act` 逐位相同，有对照断言）；该步**真实的** (s_L, a_L=Δ=0、cmd_pb=规则命令, r2, c2, s_L′) 经 `fill_bess_transition()` 入池（"事后填入"，a_L 不再取 agent 抽的随机值；残余动作下 buffer 存 Δ, 命令由 `cmd_pb` 单独记录） |
 | bias 触发 | `step == args.warmup`（不可达） | `hsrl_agent_init.BiasInitTracker`：warmup 期逐块收集，在 **warmup 之后第一个块末**一次性应用（`first_trigger_step(warmup)`），且排在 `step > warmup` 的首次更新之前 |
 
 **效果（同 day0 序列，离线干跑 5 seed）**：`r̄ = +70.4 元/块 ⇒ b_p ≈ +7042`（与 +9983 差 1.4×、同号），
@@ -678,7 +700,10 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 `clip(δ/g, 平抑窗口)`（参考集合由它定义 ⇒ `trackerr ≡ 0`），且 `r2 = −1·min(clip_amount, 20) ≡ 0`（规则动作不越窗）；
 `per/prrbb`（影子电价支）的 `r2 = 0.1·shadow_profit − 1·clip_amount` 而影子价恒 0（`shadow_profit ≡ 0`）。
 所以本机制保证的是**环境侧行为正常 + H 层 warmup 基线可用 + L buffer 内是真实的 (s,a,r,c,s′) 行**，
-**不等价于对 L 的行为克隆**；若要 L 真正 warm start 到规则，需要另加监督项或塑形奖励（见 `hsrl_warmup.py` 文档）。
+**不等价于对 L 的行为克隆**。
+（TD3 全系列改用**残余动作**后，这条不再是缺口：`Δ≡0` 就**逐位**等于规则下层，
+warmup 期的 (s_L, Δ=0, 0, 0, s_L′) 行本身就在教 actor"保持 Δ=0 即最优"，
+即"warm start 到规则"由参数化结构直接给出，不需要监督项或塑形奖励。）
 
 ---
 

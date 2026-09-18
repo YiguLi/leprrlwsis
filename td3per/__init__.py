@@ -13,6 +13,9 @@ TD3 (Twin Delayed Deep Deterministic Policy Gradient) 结合 PER 与拉格朗日
     uniform 下 lam1 ∈ [0.967, 4.833] 初值 0.967 (乘性对偶)。
   * 下层 L 保留 td3per 自己的 BESS 操作 (TD3+PER+EMA 对偶+RBB 硬裁剪),
     只把信号/追踪目标换成 SOC 目标: 5 维观测 = [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5],
+    **动作 = 残余动作** pb_cmd = 规则基线 (hst.rule_action ≡ SocTracker.act) + Δ (actor 输出,
+    输出层零初始化 ⇒ t=0 时 Δ≡0 ⇒ 起点逐位等于规则下层, r2≡0 且 c2≡0; 入 buffer 的是 Δ,
+    交给 RBB 的是命令值, 事后填入用 cmd_pb/rule_pb 核对; 探索半宽 --l_noise_amp 默认 1.0 MW),
     r2 = −1·min(clip_amount, 20) [MW] (命令与实际之差 = 两段 clip), c2 = +1·trackerr [MW] (两区间分治, 单一真源 hsrl_soctarget:
     参考集合 = Soctrack范围[δ/(g·n_rem), δ/g] ∩ 平抑窗口; 空交集 ⇒ **不存在范围,
     只有纯粹一个竭力值 r*** = 窗口里离该范围最近的端点, 顶到才不罚);
