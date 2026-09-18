@@ -16,7 +16,8 @@
 | `test_critic_bias.py` | critic 输出层 bias（价值基线）初始化 | `python agentutil/test_critic_bias.py` |
 | `test_warmup_schedule.py` | warmup 调度 + bias 触发点（含旧 `step==warmup` 不可达 bug 回归） | `python agentutil/test_warmup_schedule.py` |
 | `test_value_scale.py` | H 层 `--value_scale` 归一化：覆盖性 + 两臂数值不变量 | `python agentutil/test_value_scale.py` |
-| `test_l_lower_unit.py` | RL-BESS 下层口径 ÷100：系数/预算/步长 + 物理量守恒 | `python agentutil/test_l_lower_unit.py` |
+| `test_l_lower_unit.py` | RL-BESS 下层口径 ÷100 / SOC 目标接线 + 物理量守恒 | `python agentutil/test_l_lower_unit.py` |
+| `test_soctarget_uniform.py` | 下层 SOC 目标三项目（td3per/td3prrbb/prle）逐位等价 | `python agentutil/test_soctarget_uniform.py` |
 | `analyse_q_scale.py` | 从 `update_stats_H.csv` 量化 Q 尺度瞬态与相对 TD 误差 | `python agentutil/analyse_q_scale.py [csv|通配 ...]` |
 | `ab_critic_bias.py` | 同 seed 短程 A/B 驱动（bias 初始化 / 值函数尺度） | `python agentutil/ab_critic_bias.py --project td3perrb --seed 101 --steps 20000 [--dry-run]` |
 | `probe_action_symmetry.py` | 已训练 critic 的 ∂Q/∂a 动作对称性探针 | `python agentutil/probe_action_symmetry.py output/<run1> [run2 ...]` |

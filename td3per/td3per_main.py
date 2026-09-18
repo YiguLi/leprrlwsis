@@ -361,7 +361,8 @@ def train(num_iterations_H,
             soc_target, E_current, float(observation2[2]),
             rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
             return_info=True)
-        c2_slack = c2_info['d_next'] - c2_info['d_best']
+        c2_slack = 0.0 if c2_info['infeasible_window'] else \
+            max(0.0, c2_info['d_next'] - c2_info['d_best'])
         sum_c2 += c2
 
         # 下一状态 L 观测: 用下一状态重算可行域 (pb 无关; soc_target 块内固定)

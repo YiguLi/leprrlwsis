@@ -347,7 +347,8 @@ python agentutil/test_c1_uniform.py        # H 层 c1 口径统一
 python agentutil/test_critic_bias.py       # critic bias 初始化
 python agentutil/test_warmup_schedule.py   # warmup 调度 + bias 触发点
 python agentutil/test_value_scale.py       # H 层 --value_scale 归一化
-python agentutil/test_l_lower_unit.py      # RL-BESS 下层口径 ÷100
+python agentutil/test_l_lower_unit.py      # RL-BESS 下层口径 ÷100 / SOC 目标接线
+python agentutil/test_soctarget_uniform.py # 下层 SOC 目标三项目逐位等价
 python agentutil/audit_coverage.py         # 九方法覆盖审计 (归一化/bias/η1)
 
 # 分析 / 诊断 / A-B 驱动
@@ -536,7 +537,7 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 | 项 | per / td3per | prrbb / prle / td3prrbb | td3prle |
 |---|---|---|---|
 | `r2` 的 clip 系数 | 100 → **1** | 100 → **1** | `min(100·(clip+over), 1000)` → **`min(1·(clip+over), 10)`** |
-| `r2` 的 shadow 系数 | 10 → **0.1**（td3per 无此项） | 10 → **0.1** | 无 |
+| `r2` 的 shadow 系数 | 10 → **0.1**（td3per 无此项） | 10 → **0.1**（td3prrbb/prle 改为 SOC 目标后亦无此项） | 无 |
 | `c2` 系数 | 1000 → **10** | 700 → **7** | `10·(SOC−target)²` → **`0.1·(SOC−target)²`** |
 | `d_block_L` / 地板 | 20 / 2.5 → **0.2 / 0.025** | 14 / 1.75 → **0.14 / 0.0175** | 40 / 40 → **0.4 / 0.4** |
 | `agent_L.cost_limit` | 10 → **0.1** | 10 → **0.1** | 10 → **0.1** |
@@ -572,6 +573,52 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 
 ---
 
+---
+
+## 附：下层信号语义统一为 SOC 目标（`td3prrbb` / `prle`，单一真源 `hsrl_soctarget.py`）
+
+**背景**：9 个方法的下层信号有**两种**语义。本次把 `td3prrbb` 与 `prle` 从"影子电价"改成
+"**SOC 目标**"（与 `td3per` 对齐）；两者上层的 PRRBB 风价分段奖励（`wT`/`wB`）**保持不动**。
+
+| 项目 | 第 6 维语义 | 下层 | L 观测的目标 | `r2` | `c2` |
+|---|---|---|---|---|---|
+| td3per / td3prrbb | SOC 目标 | RL | 蒸馏 5 维第 3 维 = `soc_target/10` | `−1·clip_amount` | `10·slack` |
+| prle | SOC 目标 | RL（+ LLM relabel） | `Normalize(obs)` + 末维 = `soc_target/10` | `−1·clip_amount` | `10·slack` |
+| td3perrb / td3prrlrb / td3leprrlrb | SOC 目标 | 规则 SocTracker | — | — | — |
+| td3prle | SOC 目标（二次势中心） | RL | 蒸馏 5 维 | `−min(1·(clip+over), 10)` | `0.1·(SOC−target)²` |
+| **per / prrbb** | **影子电价** | RL | `Normalize(obs)` + a6 原值 | `0.1·shadow_profit − 1·clip` | `10 / 7·soc_deviation` |
+
+**下层口径**（集中在 `hsrl_soctarget.py`，三个 SOC 目标 + RL 下层的项目共用）
+
+* `a6 → soc_target = clip(3 + 5·a6, 0.5, 5.5)`（块级 5 步固定）
+* `r2 = −1·clip_amount`（`clip_amount = |pb_cmd − pbrule|`；影子套利项随语义删除）
+* 块末追踪偏好进 **r1**：`10·max(0, |soc_target − SOC_end| − 0.1)`（uniform；legacy 进 c1）
+* `c2 = 10·slack`，`slack = max(0, |target − SOC'| − d_best)` —— **能力内追踪失败量**：
+  零成本动作恰好是规则 SocTracker 的 `pb = clip(δ/g, 窗口)`；块首够不着的跳变（结构性不可行）
+  不计费，由上层 gap 罚负责；窗口不可行时 `slack = 0`
+* L 层数值口径同上一节：`d_block_L = 0.2`、地板 `0.025`、`cost_limit = 0.1`、`η2 = 1.0`
+
+**记录列**（与 td3per 对齐）
+
+* CSV：`soc_signal` / `soc_target` / `soc_slack` / `soc_track_err`
+* TensorBoard：`target/soc_target`、`target/soc_signal`、`action/soc_target`、`soc_track_err`、
+  `gap_penalty`、`sum_gap_pen`、`reward_lower/soc_slack`
+* 原 `shadow_price` / `shadow_profit` 列随语义删除；`bess_profit_net` 改用**真实** `bess_profit`
+
+**不变量测试**
+
+* `python agentutil/test_soctarget_uniform.py` —— 三个项目在 60 组随机输入（含不可行窗口）上
+  `(r2, c2, soc_target, slack)` **逐位相同**；`td3per` 的本地实现与单一真源在 343 组网格上
+  逐位一致；零成本动作 = 规则动作；目标映射与观测目标维一致
+* `python agentutil/test_l_lower_unit.py` —— SOC 支的接线（都指向真源）+ 其它支的系数与
+  ÷100 物理量守恒
+
+**遗留**：`Cal_r2_PER_baseline()`（prrbb / prle / td3prrbb）是 **LEGACY 基线**，
+系数保持 ÷100 之前的原值，用于对照旧 PER 设计。
+
+**评测夹具同步**：`test_compare_projects.py` 的 PRRBB(影子)/PRLE(SOC) 不再共用同一公式；
+`test_simple.py` 的 TD3PRRBB / TD3PER 分支改为直接调用各自项目 myfunc（此前手写的影子公式已 stale）。
+
 ## 附：warmup 重构 + critic bias 触发修复（`--warmup_sched`，9 个方法共用单一真源 `hsrl_warmup.py`）
 
 **问题（`output/TD3PRRLRB-run3` day0 实测）**
@@ -606,7 +653,8 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 
 **注（"事后填入"能做什么、不能做什么）**：BESS-RL 项目的 warmup 期 r2/c2 在这些奖励定义下
 **天然接近 0** —— `td3per` 的 `c2 = 1000·slack` 以规则动作作为零参照（slack≡0）、`r2 = −100·clip_amount≡0`；
-`prrbb/prle/td3prrbb/td3prle` 的 `r2 = 10·shadow_profit − 100·clip_amount` 而影子价恒 0（`shadow_profit≡0`）。
+`per/prrbb`（影子电价支）的 `r2 = 0.1·shadow_profit − 1·clip_amount` 而影子价恒 0（`shadow_profit ≡ 0`）；
+SOC 目标支（`td3per/td3prrbb/prle/td3prle`）的 `r2 = −1·clip_amount` 本身就与目标无关。
 所以本机制保证的是**环境侧行为正常 + H 层 warmup 基线可用 + L buffer 内是真实的 (s,a,r,c,s′) 行**，
 **不等价于对 L 的行为克隆**；若要 L 真正 warm start 到规则，需要另加监督项或塑形奖励（见 `hsrl_warmup.py` 文档）。
 

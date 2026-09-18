@@ -58,6 +58,7 @@ warnings.filterwarnings("ignore")
 import matlab
 import matlab.engine
 import hsrl_cost as hc   # H 层 c1/λ/d_block 统一口径
+import hsrl_soctarget as hst   # 下层 SOC 目标单一真源
 import hsrl_agent_init as hinit   # critic 输出层 bias(价值基线)
 import hsrl_warmup as hwarm       # warmup 调度 + 规则下层 + transition 填入
 
@@ -81,8 +82,8 @@ def train_prle(num_iterations_H,
       Upper (H): r1 = w_wind*pr*ptur*time + w_bess*(-pr*pbrule*time)
                       - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                  c1 = risk_coeff * (10*max(0,P_F-3) + 0.1*P_F)
-      Lower (L): r2 = 0.1*shadow_profit - 1*clip_amount
-                 c2 = 7*soc_deviation  (SOC-safe 项, 拉格朗日约束)
+      Lower (L, SOC 目标语义): r2 = −1·clip_amount (影子套利项已删除)
+                 c2 = 10·slack (能力内追踪失败量)
 
     PRLE additions:
       - Sub-step context accumulation for reward relabeling
@@ -106,8 +107,9 @@ def train_prle(num_iterations_H,
     _h = hc.h_settings()   # uniform: 统一 d=15 / legacy: 原值
     d_block_H = _h['d_block'] if _h else 1.2          # 每块 sum_c1 的约束目标（初始, 与 PRRBB H 同量级）
     d_block_H_min = _h['d_block_min'] if _h else 0.3      # curriculum 收紧地板
-    d_block_L = 0.14         # 每块 sum_c2 的约束目标（初始, 按 7 系数标定）
-    d_block_L_min = 0.0175     # curriculum 收紧地板
+    d_block_L = hst.L_D_BLOCK        # 每块 sum_c2 预算 (单一真源 hsrl_soctarget)
+    d_block_L_min = hst.L_D_BLOCK_MIN
+    soc_tol_upper = float(getattr(args, "soc_tol", hc.SOC_TOL))   # 块末残差豁免
 
     # ---- PRLE: Window statistics for LLM analysis ----
     window_stats = WindowStats()
@@ -162,12 +164,13 @@ def train_prle(num_iterations_H,
             agent_H.reset(norm_observation)
 
         # ================================================================
-        # Upper Level (H): WT agent + shadow price signal
+        # Upper Level (H): WT agent + SOC 目标信号
         # ================================================================
         if episode_steps % 5 == 0:
             sum_r1 = 0.0
             sum_c1 = 0.0
             sum_c2 = 0.0  # L 层 5 步块累计成本 (喂 EMA 对偶)
+            sum_gap_pen = 0.0
             block_ctx_H = []  # reset sub-step context for new 5-step block
             if step <= args.warmup:
                 _wa = warmup_sched.action()          # None ⇒ 对照臂 (--warmup_sched random)
@@ -185,7 +188,8 @@ def train_prle(num_iterations_H,
         # ================================================================
         # Lower Level (L): BESS agent
         # ================================================================
-        norm_observation_L = np.append(norm_observation, applied_action_H[-1])
+        soc_target = hst.soc_target_from_signal(float(applied_action_H[-1]))
+        norm_observation_L = np.append(norm_observation, hst.obs_target_dim(soc_target))
         prPurple('--L-- obs = {}.'.format(round_list(norm_observation_L, 3)))
 
         if episode_steps % 5 == 0:
@@ -239,7 +243,7 @@ def train_prle(num_iterations_H,
         prGreen('Applied action = {}.'.format(round_list(action_rbb, 3)))
 
         norm_observation2 = Normalize(observation2)
-        norm_observation2_L = np.append(norm_observation2, applied_action_H[-1])
+        norm_observation2_L = np.append(norm_observation2, hst.obs_target_dim(soc_target))
 
         # ================================================================
         # PRRBB Segmented Reward Computation (forward, with current thresholds)
@@ -258,8 +262,22 @@ def train_prle(num_iterations_H,
         sum_c1 += c1
         sum_c2 += c2  # 累计块成本 (每 5 步归零)
 
-        # Track shadow price for logging
-        shadow_price = reward_details['shadow_price']
+        # ---- 块末结算: SOC 目标可行性罚 (豁免 tol = --soc_tol, 默认 0.1) ----
+        #   偏好用固定价 W_GAP=10 元/MWh 进 r1 (uniform); legacy 仍进 c1
+        gap_raw = abs(soc_target - float(observation2[2]))
+        gap_pen = 0.0
+        if episode_steps % 5 == 4:
+            gap_pen = hst.gap_penalty(soc_target, float(observation2[2]),
+                                      tol=soc_tol_upper)
+            if hc.mode() == 'uniform':
+                sum_r1 -= gap_pen
+            else:
+                sum_c1 += gap_pen
+            sum_gap_pen += gap_pen
+
+        # SOC 目标/信号 (块内固定; 供 L 观测、块末罚与日志用)
+        soc_target = reward_details['soc_target']
+        soc_signal = reward_details['soc_signal']
 
         # ---- Track BESS original intent vs actual ----
         pb_l.append(pb_original)
@@ -270,11 +288,12 @@ def train_prle(num_iterations_H,
             round(reward_details['degradation'], 3)))
         prGreen('c1 = {} (fluct={})'.format(
             round(c1, 3), round(reward_details['c1_fluct'], 3)))
-        prGreen('r2 = {} (shadow_profit={}, clip={})'.format(
-            round(r2, 3), round(reward_details['shadow_profit'], 3),
-            round(reward_details['clip_amount'], 3)))
-        prGreen('c2 = {} (soc_dev={})'.format(
-            round(c2, 3), round(reward_details['soc_deviation'], 3)))
+        prGreen('r2 = {} (clip={})'.format(
+            round(r2, 3), round(reward_details['clip_amount'], 3)))
+        prGreen('c2 = {} (slack={:.4f}, soc_dev={} | target={:.2f}, SOC={:.2f})'.format(
+            round(c2, 3), reward_details['soc_slack'],
+            round(reward_details['soc_deviation'], 3),
+            soc_target, float(observation2[2])))
         prGreen('price={} p_level={} wind={:.1f} w_level={} (wT={}, wB={})'.format(
             reward_details['pr'], reward_details['price_level'],
             reward_details['u'], reward_details['wind_level'],
@@ -484,8 +503,10 @@ def train_prle(num_iterations_H,
                 'revenue': reward_details['revenue'],
                 'degradation': reward_details['degradation'],
                 'soc_deviation': reward_details['soc_deviation'],
-                'shadow_profit': reward_details['shadow_profit'],
-                'shadow_price': reward_details['shadow_price'],
+                'soc_signal': reward_details['soc_signal'],
+                'soc_target': reward_details['soc_target'],
+                'soc_slack': reward_details['soc_slack'],
+                'soc_track_err': abs(soc_target - float(observation2[2])),
                 'c1_fluct': reward_details['c1_fluct'],
                 'clip_amount': reward_details['clip_amount'],
                 'unfeasible_gap': reward_details['unfeasible_gap'],
@@ -495,7 +516,7 @@ def train_prle(num_iterations_H,
                 'penalty_L': penalty_L,
                 'penalty_NN_L': penalty_NN_L,
                 # Convenience
-                'bess_profit': reward_details['shadow_profit'] - reward_details['degradation'],
+                'bess_profit': reward_details['bess_profit'] - reward_details['degradation'],
                 # PRLE: current wind thresholds
                 'wind_low_max': get_wind_thresholds()[0],
                 'wind_high_min': get_wind_thresholds()[1],
@@ -542,9 +563,13 @@ def train_prle(num_iterations_H,
             writer.add_scalar('reward_upper/degradation', reward_details['degradation'], step)
 
             # PRRBB reward sub-components (lower)
-            writer.add_scalar('reward_lower/shadow_profit', reward_details['shadow_profit'], step)
             writer.add_scalar('reward_lower/soc_deviation', reward_details['soc_deviation'], step)
-            writer.add_scalar('reward_lower/shadow_price', shadow_price, step)
+            writer.add_scalar('reward_lower/soc_slack', reward_details['soc_slack'], step)
+            writer.add_scalar('target/soc_target', soc_target, step)
+            writer.add_scalar('target/soc_signal', soc_signal, step)
+            writer.add_scalar('soc_track_err', abs(soc_target - float(observation2[2])), step)
+            writer.add_scalar('gap_penalty', gap_pen, step)
+            writer.add_scalar('sum_gap_pen', sum_gap_pen, step)
             writer.add_scalar('reward_lower/clip_amount', reward_details['clip_amount'], step)
 
             # RBB-specific metrics
@@ -571,7 +596,7 @@ def train_prle(num_iterations_H,
                                       original_action_H[i], step)
                     writer.add_scalar('action/a_H_clipped_{}'.format(i),
                                       applied_action_H[i], step)
-                writer.add_scalar('action/shadow_price_signal',
+                writer.add_scalar('action/soc_signal_raw',
                                   applied_action_H[5], step)
                 writer.add_scalar('action/pb_original', pb_original, step)
                 writer.add_scalar('action/pbrule', float(pbrule), step)
@@ -650,7 +675,7 @@ def train_prle(num_iterations_H,
         episode_cost2 += c2
         episode_profit += observation2[-1] * observation[0] * time \
             - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
-        episode_bess_profit += reward_details['shadow_profit'] \
+        episode_bess_profit += reward_details['bess_profit'] \
             - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
 
         norm_observation = deepcopy(norm_observation2)
@@ -745,6 +770,8 @@ if __name__ == "__main__":
     parser.add_argument('--init_w', default=0.003, type=float, help='')
     parser.add_argument('--train_iter_H', default=200000, type=int,
                         help='train iters each timestep')
+    parser.add_argument('--soc_tol', default=hc.SOC_TOL, type=float,
+                        help='块末 SOC 目标残差豁免 (MWh); 只属于上层 gap 罚')
     parser.add_argument('--epsilon', default=50000, type=int,
                         help='linear decay of exploration policy')
     parser.add_argument('--seed', default=-1, type=int, help='')
@@ -890,8 +917,8 @@ if __name__ == "__main__":
     # L 层对偶改 EMA 实际成本更新; lam2 ∈ [10, 200] (500→200, 抑制对偶顶格后成本通道失效)
     agent_L = PRLE_DDPG(nb_states=5, nb_actions=1, args=args,
                         lam_max=200.0, lam_min=10.0,
-                        ema_lam=True, ema_alpha=0.02, ema_lam_lr=1.0)
-    agent_L.cost_limit = 0.1  # L-layer c2 dedicated initial value (EMA 模式下不使用)
+                        ema_lam=True, ema_alpha=0.02, ema_lam_lr=hst.L_EMA_LAM_LR)
+    agent_L.cost_limit = hst.L_COST_LIMIT  # L-layer c2 dedicated initial value (EMA 模式下不使用)
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
 
 

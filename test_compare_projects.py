@@ -37,7 +37,8 @@ from PER_ddpg import SP_DDPG
 from prrbb.prrbb_rule_bess import RuleBasedBESS
 from prle.prle_ddpg import PRLE_DDPG
 from prrbb.prrbb_myfunc import Cal_Rew_PRRBB
-from prle.prle_myfunc import get_wind_thresholds, set_wind_thresholds
+from prle.prle_myfunc import (get_wind_thresholds, set_wind_thresholds,
+                              Cal_Rew_PRRBB as Cal_Rew_PRLE)
 from torch.utils.tensorboard import SummaryWriter
 
 import matlab
@@ -127,7 +128,7 @@ def test_one_episode(env, agent_H, agent_L, rbb_system,
     Each project uses its own training reward structure:
       - PER:    r1 = revenue - penalty_NN_H - 490·max(-pbrule,0)·time
                 c1 = 10·max(P_F−3, 0)
-                r2 = 0.1·shadow_profit − 1·clip_amount
+                r2 = -1·clip_amount, c2 = 10·slack   (PRLE: SOC 目标支)
                 c2 = 10·soc_deviation
       - PRRBB:  Cal_Rew_PRRBB (segmented wind×price reward)
       - PRLE:   same as PRRBB
@@ -211,8 +212,10 @@ def test_one_episode(env, agent_H, agent_L, rbb_system,
         # Project-specific reward computation
         # ================================================================
         if project_type in ('PRRBB', 'PRLE'):
-            # ---- PRRBB / PRLE: segmented wind×price reward ----
-            r1, c1, r2, c2, reward_details = Cal_Rew_PRRBB(
+            # ---- PRRBB (影子电价支) / PRLE (SOC 目标支): 各自项目的 myfunc ----
+            #      两者 r1/c1 都是风价分段, 但下层 r2/c2 口径不同, 不能共用
+            _rew = Cal_Rew_PRRBB if project_type == 'PRRBB' else Cal_Rew_PRLE
+            r1, c1, r2, c2, reward_details = _rew(
                 obs, obs2, action_env, rbb_info,
                 penalty_NN_H=penalty_NN_H, time=TIME,
                 ptur=ptur,

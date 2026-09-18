@@ -61,11 +61,11 @@
 关键细节（都按各自 main 的写法对齐，不混用）：
   * agent 类、CheckAction / Normalize(_H)、RuleBasedBESS 各自取自本项目模块；
   * L 层观测：
-      - per / prrbb / prle : np.append(Normalize(obs), applied_action_H[-1])
-      - td3perrb 化后的 td3per / td3prle : build_L_obs_distilled(
+      - per / prrbb (影子电价支) : np.append(Normalize(obs), applied_action_H[-1])
+      - td3per / td3prle / td3prrbb (SOC 目标支) : build_L_obs_distilled(
               [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10])
-      - td3prrbb           : build_L_obs_distilled(
-              [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10])
+      - prle (SOC 目标支) : build_L_obs_distilled(
+              Normalize(obs) + soc_target/10)
       - td3prrlrb / td3perrb / td3leprrlrb : 无 RL 下层，L 由 SocTracker 规则给出
               pb = clip((soc_target - E)/gain, pbrulemin, pbrulemax)
   * td3per / td3prrlrb / td3perrb / td3leprrlrb 的 H 观测 = Normalize(obs) + 24h 相位特征，
@@ -239,7 +239,7 @@ PROJECTS = {
         agent=('prle.prle_ddpg', 'PRLE_DDPG'),
         myfunc='prle.prle_myfunc',
         rule_bess=('prrbb.prrbb_rule_bess', 'RuleBasedBESS'),
-        lower='rl', l_obs='baseline', h_obs='normalize',
+        lower='rl', l_obs='distilled', h_obs='normalize',
         h_kwargs={**_EMA, 'lam_max': 20.0, 'lam_min': 3.0,
                   'record_update_stats': True},
         h_lam=5.0,

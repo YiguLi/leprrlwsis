@@ -26,8 +26,8 @@ Upper (H) c1（风险侧）:
     W_GAP = 50.0  (平抑可行性缺口 unfeasible_gap 的直接代价, 单位 MW)
 
 Lower (L):
-  r2 = 0.1 * shadow_profit - 1.0 * clip_amount
-  c2 = 7.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束; 全库下层口径 ÷100)
+  r2 = −1 · clip_amount              (RBB 硬裁剪量; 影子套利项随信号语义删除)
+  c2 = 10 · slack                    (能力内追踪失败量, 见 hsrl_soctarget)
 
 Wind boundaries: dynamic (default LOW < 8.5 m/s, HIGH >= 12.0 m/s, 专家起点),
 由 LLM 元控制器在 1440 步窗口边界处调整；启动时可用 --seg 选择 percentile /
@@ -36,6 +36,7 @@ kmeans / expert 三种起点。
 
 import numpy as np
 import hsrl_cost as hc
+import hsrl_soctarget as hst   # 下层 SOC 目标单一真源
 import pandas as pd
 from copy import deepcopy
 
@@ -327,13 +328,13 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
                    penalty_NN_H=0.0, time=1.0 / 60, ptur=None):
     """
     PRRBB reward: wind × price joint segmentation (upper);
-    lower r2 = 0.1*shadow_profit - 1*clip_amount, c2 = 7*soc_deviation.
+    lower r2 = −1·clip_amount (SOC 目标语义), c2 = 10·slack.
 
     Parameters
     ----------
     observation  : [pr, u, E, P_G_last]
     observation2 : [pr', u', E', P_G]
-    action_rbb   : [a1..a5, shadow_price_signal, pbrule]
+    action_rbb   : [a1..a5, soc_signal, pbrule]
     rbb_info     : dict from RuleBasedBESS.compute_pbrule()
     penalty_NN_H : float, upper action boundary penalty
     time         : step duration in hours
@@ -357,7 +358,8 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     clip_amount = float(rbb_info['clip_amount'])
     P_F = abs(P_G_new - P_G_old)
 
-    shadow_price = float(action_rbb[5]) * 2.0  # (-0.5, 0.5) → (-1, 1)
+    soc_signal = float(action_rbb[5])
+    soc_target = hst.soc_target_from_signal(soc_signal)   # SOC 目标 (块级固定)
 
     wind_level = get_wind_level(u)
     price_level = get_price_level(pr_old)
@@ -383,13 +385,16 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     c1 = c1 + W_GAP * unfeasible_gap
     c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样)
 
-    # ==== Lower Level (L) ====
-    # r2: 影子套利利润 - 1*clip_amount（pbrule 裁剪惩罚进入 r2）
-    # c2: SOC 越界项进入拉格朗日约束（保留原系数 700/MWh）
-    shadow_profit = -shadow_price * pbrule
-    soc_dev = Cal_soc_deviation(SOC_new, wind_level)
-    r2 = 0.1 * shadow_profit - 1.0 * clip_amount
-    c2 = 7.0 * soc_dev
+    # ==== Lower Level (L) —— SOC 目标追踪口径 (单一真源 hsrl_soctarget) ====
+    # r2 = −1·clip_amount  (RBB 硬裁剪量; 影子套利项随信号语义一起删除)
+    # c2 = 10·slack        (能力内追踪失败量; 零成本动作 = 规则 SocTracker)
+    soc_dev = Cal_soc_deviation(SOC_new, wind_level)   # 仅诊断: 原安全带偏离
+    r2 = hst.lower_reward(clip_amount)
+    c2, c2_info = hst.lower_cost_soc_track(
+        soc_target, float(observation[2]), SOC_new,
+        rbb_info['pbrulemin'], rbb_info['pbrulemax'], return_info=True)
+    slack = 0.0 if c2_info['infeasible_window'] else \
+        max(0.0, c2_info['d_next'] - c2_info['d_best'])
 
     # ==== Details ====
     turbine_profit = w_wind * pr_old * ptur * time
@@ -409,8 +414,9 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
         'bess_profit': bess_profit,
         'revenue': turbine_profit + bess_profit,
         'degradation': BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time,
-        'shadow_profit': shadow_profit,
-        'shadow_price': shadow_price,
+        'soc_signal': soc_signal,
+        'soc_target': soc_target,
+        'soc_slack': slack,
         'soc_deviation': soc_dev,
         # Power
         'ptur': ptur,
@@ -488,6 +494,18 @@ def Normalize(obs, max_E=6.):
 
 def Original(obs, max_E=6.):
     return np.array([obs[0] * 1000, obs[1] * 10, obs[2] * 10, obs[3] * 10])
+
+
+def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
+    """prle 下层观测 (5 维) = Normalize(obs) + soc_target/10.
+
+    SOC 目标语义 (= td3per/td3prrbb 同口径, 单一真源 hsrl_soctarget):
+    第 5 维由改造前的 **a6 原值** 换成 `soc_target/10` —— 与 obs 里的 SOC/10 同刻度,
+    网络可直接比较"目标 vs 自身"。签名与其它项目的同名函数保持一致
+    (pw_tru / rbb_info 本函数用不到, 仅为 harness 统一调用)。
+    """
+    soc_target = hst.soc_target_from_signal(float(applied_action_H[-1]))
+    return np.append(Normalize(observation), hst.obs_target_dim(soc_target))
 
 
 # =============================================================================
@@ -580,8 +598,8 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
                 'turbine_profit': details['turbine_profit'],
                 'bess_profit': details['bess_profit'],
                 'soc_deviation': details['soc_deviation'],
-                'shadow_profit': details['shadow_profit'],
-                'shadow_price': details['shadow_price'],
+                'soc_slack': details['soc_slack'],
+                'soc_target': details['soc_target'],
                 'revenue': details['revenue'],
                 'degradation': details['degradation'],
                 'P_F': details['P_F'],

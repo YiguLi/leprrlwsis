@@ -24,6 +24,8 @@ from td3prle.td3prle_ddpg import SP_TD3_PRLE
 from td3prle.td3prle_myfunc import Cal_Rew_PRRBB as Cal_Rew_TD3PRLE
 from prrbb.prrbb_rule_bess import RuleBasedBESS
 from prrbb.prrbb_myfunc import Cal_Rew_PRRBB
+from td3prrbb.td3prrbb_myfunc import Cal_Rew_PRRBB as Cal_Rew_TD3PRRBB
+from td3per.td3per_myfunc import Cal_Rew_RB as Cal_Rew_TD3PER
 from torch.utils.tensorboard import SummaryWriter
 import matlab, matlab.engine
 import warnings
@@ -179,9 +181,14 @@ def main():
             P_F = info['P_F']  # 提前提取: reward 分支与 cvm 统计共用
             profit_step = (obs2[-1] * obs[0] - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0.0)) * TIME
 
-            if proj_type in ('PRRBB', 'TD3PRRBB'):
-                # PRRBB 与 TD3PRRBB 公式一致 (td3prrbb_myfunc 为 prrbb_myfunc 拷贝)
+            if proj_type == 'PRRBB':
+                # PRRBB: 影子电价支 (r2 含影子套利项)
                 r1, c1, r2, c2, _ = Cal_Rew_PRRBB(
+                    obs, obs2, action_env, rbb_info,
+                    penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru))
+            elif proj_type == 'TD3PRRBB':
+                # TD3PRRBB: SOC 目标支 (r2 = −1·clip, c2 = 10·slack)
+                r1, c1, r2, c2, _ = Cal_Rew_TD3PRRBB(
                     obs, obs2, action_env, rbb_info,
                     penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru))
             elif proj_type == 'PRLE':
@@ -193,7 +200,12 @@ def main():
                 r1, c1, r2, c2, _ = Cal_Rew_TD3PRLE(
                     obs, obs2, action_env, rbb_info,
                     penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru))
-            else:  # PER / TD3PER
+            elif proj_type == 'TD3PER':
+                # TD3PER: SOC 目标支 —— 直接调用项目 myfunc (此前手写影子公式, 已 stale)
+                r1, c1, r2, c2, _ = Cal_Rew_TD3PER(
+                    obs, obs2, action_env, rbb_info,
+                    penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru))
+            else:  # PER (影子电价支)
                 _, c = Cal_Rew(obs, obs2, action_env)
                 r1 = obs2[-1] * obs[0] * TIME - penalty_NN_H - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0.0) * TIME
                 # c1 与训练口径一致: 越限惩罚 + 平滑项 + 50*unfeasible_gap (PER/TD3PER 相同)

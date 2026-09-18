@@ -14,8 +14,9 @@ with PRRBB's Wind × Price Segmented Reward structure.
   H 层 r1 用 wT/wB 分段收益权重分解风机/BESS 收益 (wT=wT_u(u)×wT_p(pr),
   wB=wB_p(pr)×wB_soc(SOC,wind)), c1 用 r_u(u) 风险系数
   + W_GAP*unfeasible_gap 编码波动/平抑可行性风险;
-  L 层 r2 = 0.1*shadow_profit - 1*clip_amount,
-  c2 = 7*soc_deviation (wind-segmented SOC 安全带).
+  L 层 (SOC 目标追踪口径, 单一真源 hsrl_soctarget):
+      a6 → soc_target = clip(3+5a6, 0.5, 5.5); r2 = −1·clip_amount;
+      c2 = 10·slack (能力内追踪失败量; 零成本动作 = 规则 SocTracker).
 
 File layout follows prrbb (own myfunc / rule_bess / main) and td3per
 (own ddpg agent / main):

@@ -21,8 +21,8 @@ Reward structure (td3prrbb_myfunc.Cal_Rew_PRRBB):
                   - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                   wT = wT_u(u)×wT_p(pr), wB ≡ 1.0 (【本轮变更】BESS 分段系数已去掉)
              c1 = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + 50*unfeasible_gap
-  Lower (L): r2 = 0.1*shadow_profit - 1*clip_amount
-             c2 = 7*soc_deviation   (wind-segmented SOC 安全带)
+  Lower (L): r2 = −1·clip_amount (SOC 目标语义; 影子套利项已删除)
+             c2 = 10·slack (能力内追踪失败量; 零成本动作 = 规则 SocTracker)
 
 Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
@@ -68,6 +68,7 @@ warnings.filterwarnings("ignore")
 import matlab
 import matlab.engine
 import hsrl_cost as hc   # H 层 c1/λ/d_block 统一口径
+import hsrl_soctarget as hst   # 下层 SOC 目标单一真源
 import hsrl_agent_init as hinit   # critic 输出层 bias(价值基线)
 import hsrl_warmup as hwarm       # warmup 调度 + 规则下层 + transition 填入
 engine = matlab.engine.start_matlab()
@@ -105,9 +106,10 @@ def train(num_iterations_H,
     d_block_H = _h['d_block'] if _h else 1.2         # 初值: 每块 sum_c1 预算
     d_block_H_min = _h['d_block_min'] if _h else 0.3     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    # PRRBB 标定: c2 = 7*soc_deviation
-    d_block_L = 0.14        # 初值: 每块 sum_c2 预算
-    d_block_L_min = 0.0175    # curriculum 收紧地板
+    # 下层 SOC 目标口径 (单一真源 hsrl_soctarget): r2 = −1·clip, c2 = 10·slack
+    d_block_L = hst.L_D_BLOCK
+    d_block_L_min = hst.L_D_BLOCK_MIN
+    soc_tol_upper = float(getattr(args, "soc_tol", hc.SOC_TOL))   # 块末残差豁免
     if use_csv:
         df = pd.DataFrame()
         df_episode = pd.DataFrame()
@@ -146,6 +148,7 @@ def train(num_iterations_H,
             sum_r1 = 0
             sum_c1 = 0
             sum_c2 = 0     # L 层 5 步块累计成本 (喂 EMA 对偶)
+            sum_gap_pen = 0.0
             if step <= args.warmup:
                 _wa = warmup_sched.action()          # None ⇒ 对照臂 (--warmup_sched random)
                 applied_action_H = original_action_H = (
@@ -158,7 +161,7 @@ def train(num_iterations_H,
             pw_tru = env.PowerOutput(observation[1], applied_action_H)
         prGreen('--H-- ori a_t = {}'.format(round_list(original_action_H, 3)))
 
-        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
+        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
         # 可行域 (RBB, 与 pb 无关, 预计算) + H 影子价格信号 + 自身 SOC + 风速;
         # 不再直接看 pr/P_G/ptur —— 分层: H 给信号, L 在约束内执行.
         ptur = float(pw_tru)
@@ -240,8 +243,22 @@ def train(num_iterations_H,
         sum_c1 += c1
         sum_c2 += c2  # 累计块成本 (每 5 步归零)
 
-        # Track shadow price for logging
-        shadow_price = reward_details['shadow_price']
+        # ---- 块末结算: SOC 目标可行性罚 (豁免 tol = --soc_tol, 默认 0.1) ----
+        #   偏好用固定价 W_GAP=10 元/MWh 进 r1 (uniform); legacy 仍进 c1
+        gap_raw = abs(soc_target - float(observation2[2]))
+        gap_pen = 0.0
+        if episode_steps % 5 == 4:
+            gap_pen = hst.gap_penalty(soc_target, float(observation2[2]),
+                                      tol=soc_tol_upper)
+            if hc.mode() == 'uniform':
+                sum_r1 -= gap_pen
+            else:
+                sum_c1 += gap_pen
+            sum_gap_pen += gap_pen
+
+        # SOC 目标/信号 (块内固定; 供 L 观测、块末罚与日志用)
+        soc_target = reward_details['soc_target']
+        soc_signal = reward_details['soc_signal']
 
         pb_l.append(pb_original)  # track original intent
 
@@ -255,11 +272,12 @@ def train(num_iterations_H,
             round(reward_details['degradation'], 3)))
         prGreen('c1 = {} (fluct={})'.format(
             round(c1, 3), round(reward_details['c1_fluct'], 3)))
-        prGreen('r2 = {} (shadow_profit={}, clip={})'.format(
-            round(r2, 3), round(reward_details['shadow_profit'], 3),
-            round(reward_details['clip_amount'], 3)))
-        prGreen('c2 = {} (soc_dev={})'.format(
-            round(c2, 3), round(reward_details['soc_deviation'], 3)))
+        prGreen('r2 = {} (clip={})'.format(
+            round(r2, 3), round(reward_details['clip_amount'], 3)))
+        prGreen('c2 = {} (slack={:.4f}, soc_dev={} | target={:.2f}, SOC={:.2f})'.format(
+            round(c2, 3), reward_details['soc_slack'],
+            round(reward_details['soc_deviation'], 3),
+            soc_target, float(observation2[2])))
         prGreen('price={} p_level={} wind={:.1f} w_level={} (wT={}, wB={})'.format(
             reward_details['pr'], reward_details['price_level'],
             reward_details['u'], reward_details['wind_level'],
@@ -438,8 +456,10 @@ def train(num_iterations_H,
                 'revenue': reward_details['revenue'],
                 'degradation': reward_details['degradation'],
                 'soc_deviation': reward_details['soc_deviation'],
-                'shadow_profit': reward_details['shadow_profit'],
-                'shadow_price': reward_details['shadow_price'],
+                'soc_signal': reward_details['soc_signal'],
+                'soc_target': reward_details['soc_target'],
+                'soc_slack': reward_details['soc_slack'],
+                'soc_track_err': abs(soc_target - float(observation2[2])),
                 'c1_fluct': reward_details['c1_fluct'],
                 'penalty_NN_H': penalty_NN_H,
                 'SOC': reward_details['SOC'],
@@ -448,7 +468,7 @@ def train(num_iterations_H,
                 'penalty_NN_L': penalty_NN_L,
                 # Convenience
                 'soc_next': float(observation2[2]),
-                'bess_profit_net': reward_details['shadow_profit'] - reward_details['degradation'],
+                'bess_profit_net': reward_details['bess_profit'] - reward_details['degradation'],
             }])], ignore_index=True)
             if step % 50 == 0:
                 df.to_csv('{}/df_td3prrbb.csv'.format(output))
@@ -495,13 +515,17 @@ def train(num_iterations_H,
             writer.add_scalar('reward_upper/degradation', reward_details['degradation'], step)
 
             # PRRBB reward sub-components (lower)
-            writer.add_scalar('reward_lower/shadow_profit', reward_details['shadow_profit'], step)
             writer.add_scalar('reward_lower/soc_deviation', reward_details['soc_deviation'], step)
-            writer.add_scalar('reward_lower/shadow_price', shadow_price, step)
+            writer.add_scalar('reward_lower/soc_slack', reward_details['soc_slack'], step)
+            writer.add_scalar('target/soc_target', soc_target, step)
+            writer.add_scalar('target/soc_signal', soc_signal, step)
+            writer.add_scalar('soc_track_err', abs(soc_target - float(observation2[2])), step)
+            writer.add_scalar('gap_penalty', gap_pen, step)
+            writer.add_scalar('sum_gap_pen', sum_gap_pen, step)
             writer.add_scalar('reward_lower/clip_amount', reward_details['clip_amount'], step)
 
             # Shadow price (action栏)
-            writer.add_scalar('action/shadow_price', shadow_price, step)
+            writer.add_scalar('action/soc_target', soc_target, step)
             # RBB-specific metrics
             writer.add_scalar('rbb/clip_amount', clip_amount, step)
             writer.add_scalar('rbb/pbrule', float(pbrule), step)
@@ -522,7 +546,7 @@ def train(num_iterations_H,
                                       original_action_H[i], step)
                     writer.add_scalar('action/a_H_clipped_{}'.format(i),
                                       applied_action_H[i], step)
-                writer.add_scalar('action/shadow_price_signal',
+                writer.add_scalar('action/soc_signal_raw',
                                   applied_action_H[5], step)
                 writer.add_scalar('action/pb_original', pb_original, step)
                 writer.add_scalar('action/pbrule', float(pbrule), step)
@@ -546,7 +570,7 @@ def train(num_iterations_H,
         # 上层利润: pg * 实际电价 * dt - BESS_DEG_RMB_PER_MWH * pb * dt
         episode_profit += observation2[-1] * observation[0] * time - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
         # BESS盈亏: 影子套利 - 退化成本
-        episode_bess_profit += reward_details['shadow_profit'] - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
+        episode_bess_profit += reward_details['bess_profit'] - BESS_DEG_RMB_PER_MWH * max(-float(pbrule), 0) * time
         # update env
         norm_observation = deepcopy(norm_observation2)
         observation = deepcopy(observation2)
@@ -665,6 +689,8 @@ if __name__ == "__main__":
                         default=200000,
                         type=int,
                         help='train iters each timestep')
+    parser.add_argument('--soc_tol', default=hc.SOC_TOL, type=float,
+                        help='块末 SOC 目标残差豁免 (MWh); 只属于上层 gap 罚')
     parser.add_argument('--epsilon',
                         default=50000,
                         type=int,
@@ -822,17 +848,17 @@ if __name__ == "__main__":
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
     #     lam2 ∈ [10, 500]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=1.0  (c2 口径 ÷100 后同步 ×100)
-    #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
+    #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
     # L 层(步骤A): policy_delay/--policy_noise 独立于 H —— 放松到 delay=1+noise≈0 时节奏接近 DDPG
     # (twin critic 与 EMA 对偶仍保留, 仅去掉延迟更新与 target smoothing 对窄可行窗的抹平)
     agent_L = SP_TD3(nb_states = 5, nb_actions = 1, args = args,
                      lam_max=500.0, lam_min=10.0,
-                     ema_lam=True, ema_alpha=0.02, ema_lam_lr=1.0,
+                     ema_lam=True, ema_alpha=0.02, ema_lam_lr=hst.L_EMA_LAM_LR,
                      policy_delay=args.l_policy_delay,
                      policy_noise=args.l_policy_noise,
                      noise_clip=args.noise_clip,
                      cost_critic_mode=args.cost_critic_mode)
-    agent_L.cost_limit = 0.1  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
+    agent_L.cost_limit = hst.L_COST_LIMIT  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
 
     prYellow('L 层(BESS)策略超参: policy_delay={}, policy_noise={} (H 层 TD3: delay={}, noise={})'.format(

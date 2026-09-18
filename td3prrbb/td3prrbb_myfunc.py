@@ -27,13 +27,15 @@ Upper (H) c1（风险侧）:
     W_GAP = 50.0  (平抑可行性缺口 unfeasible_gap 的直接代价, 单位 MW)
 
 Lower (L):
-  r2 = 0.1 * shadow_profit - 1.0 * clip_amount
-    shadow_profit = -shadow_price * pbrule  (影子电价引导套利)
-  c2 = 7.0 * soc_deviation   (SOC-safe 项进入拉格朗日约束; 全库下层口径 ÷100)
+  r2 = −1 · clip_amount              (RBB 硬裁剪量; 影子套利项随信号语义删除)
+
+    a6 → soc_target = clip(3+5·a6, 0.5, 5.5)   (SOC 目标, 块级固定)
+  c2 = 10 · slack                    (能力内追踪失败量, 见 hsrl_soctarget)
 """
 
 import numpy as np
 import hsrl_cost as hc
+import hsrl_soctarget as hst   # 下层 SOC 目标单一真源
 import pandas as pd
 from copy import deepcopy
 
@@ -265,14 +267,14 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     Upper r1 = wT*pr*ptur*dt + wB*(-pr*pbrule*dt) - 退化 - penalty_NN_H
              （wT = wT_u×wT_p; wB ≡ 1.0 —— 【本轮变更】BESS 分段系数已去掉）
     Upper c1 = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
-    Lower r2 = 0.1*shadow_profit - 1*clip_amount
+    Lower r2 = −1·clip_amount (SOC 目标语义; 影子套利项已删除), c2 = 10·slack
     Lower c2 = 7*soc_deviation
 
     Parameters
     ----------
     observation  : [pr, u, E, P_G_last]
     observation2 : [pr', u', E', P_G]
-    action_rbb   : [a1..a5, shadow_price_signal, pbrule]
+    action_rbb   : [a1..a5, soc_signal, pbrule]
     rbb_info     : dict from RuleBasedBESS.compute_pbrule()
     penalty_NN_H : float, upper action boundary penalty
     time         : step duration in hours
@@ -296,7 +298,8 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     clip_amount = float(rbb_info['clip_amount'])
     P_F = abs(P_G_new - P_G_old)
 
-    shadow_price = float(action_rbb[5]) * 2.0  # (-0.5, 0.5) → (-1, 1)
+    soc_signal = float(action_rbb[5])
+    soc_target = hst.soc_target_from_signal(soc_signal)   # SOC 目标 (块级固定)
 
     wind_level = get_wind_level(u)
     price_level = get_price_level(pr_old)
@@ -322,13 +325,16 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     c1 = c1 + W_GAP * unfeasible_gap
     c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样)
 
-    # ==== Lower Level (L) ====
-    # r2: 影子套利利润 - 1*clip_amount (纯信号跟随, 无真实利润项)
-    # c2: SOC 越界项进入拉格朗日约束（保留原系数 700/MWh）
-    shadow_profit = -shadow_price * pbrule
-    soc_dev = Cal_soc_deviation(SOC_new, wind_level)
-    r2 = 0.1 * shadow_profit - 1.0 * clip_amount
-    c2 = 7.0 * soc_dev
+    # ==== Lower Level (L) —— SOC 目标追踪口径 (单一真源 hsrl_soctarget) ====
+    # r2 = −1·clip_amount  (RBB 硬裁剪量; 影子套利项随信号语义一起删除)
+    # c2 = 10·slack        (能力内追踪失败量; 零成本动作 = 规则 SocTracker)
+    soc_dev = Cal_soc_deviation(SOC_new, wind_level)   # 仅诊断: 原安全带偏离
+    r2 = hst.lower_reward(clip_amount)
+    c2, c2_info = hst.lower_cost_soc_track(
+        soc_target, float(observation[2]), SOC_new,
+        rbb_info['pbrulemin'], rbb_info['pbrulemax'], return_info=True)
+    slack = 0.0 if c2_info['infeasible_window'] else \
+        max(0.0, c2_info['d_next'] - c2_info['d_best'])
 
     # ==== Details ====
     turbine_profit = w_wind * pr_old * ptur * time
@@ -348,9 +354,10 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
         'bess_profit': bess_profit,
         'revenue': turbine_profit + bess_profit,
         'degradation': BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time,
-        'shadow_profit': shadow_profit,
-        'shadow_price': shadow_price,
-        'soc_deviation': soc_dev,
+        'soc_signal': soc_signal,
+        'soc_target': soc_target,
+        'soc_slack': slack,
+        'soc_deviation': soc_dev,   # 仅诊断 (原 SOC 安全带偏离)
         # Power
         'ptur': ptur,
         'pbrule': pbrule,
@@ -430,17 +437,17 @@ def Original(obs, max_E=6.):
 
 
 def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
-    """TD3PRRBB 蒸馏 L 观测 (5维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10].
+    """TD3PRRBB 蒸馏 L 观测 (5维): [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10].
 
-    与 TD3PER 同步的五维蒸馏观测: 当前可行域 (RBB, 与 pb 无关) + H 影子价格
-    信号 + 自身 SOC + 风速。u 使 PRRBB 风速分段 c2 SOC 安全带
-    (SOC_SAFE_RANGES[wind_level]) 可观测。
+    与 TD3PER 同步的五维蒸馏观测: 当前可行域 (RBB, 与 pb 无关) + H 给出的 **SOC 目标**
+    + 自身 SOC + 风速。目标与 SOC 都以 /10 进入观测, 网络可直接比较"目标 vs 自身";
+    u 保留供 feasible 域/风速相关逻辑使用。
     """
-    shadow_price = float(applied_action_H[-1]) * 2.0  # (-0.5,0.5) → (-1,1)
+    soc_target = hst.soc_target_from_signal(applied_action_H[-1])
     return np.array([
         rbb_info['pbrulemin'] / 10.0,
         rbb_info['pbrulemax'] / 10.0,
-        shadow_price,
+        hst.obs_target_dim(soc_target),   # SOC 目标 (与 SOC/10 同刻度)
         float(observation[2]) / 10.0,
         float(observation[1]) / 10.0,  # u: 风速 (0~25 → 0~2.5)
     ])
@@ -477,7 +484,7 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
             sum_r1 = 0.0
             sum_c1 = 0.0
 
-        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
+        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
         _, rbb_info_obs = rbb_system.compute_pbrule(
             pb_original=0.0, ptur=float(pw_tru),
             pg_prev=float(obs[-1]), E=float(obs[2]))
@@ -540,8 +547,8 @@ def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
                 'turbine_profit': details['turbine_profit'],
                 'bess_profit': details['bess_profit'],
                 'soc_deviation': details['soc_deviation'],
-                'shadow_profit': details['shadow_profit'],
-                'shadow_price': details['shadow_price'],
+                'soc_slack': details['soc_slack'],
+                'soc_target': details['soc_target'],
                 'revenue': details['revenue'],
                 'degradation': details['degradation'],
                 'P_F': details['P_F'],
@@ -639,7 +646,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             action_H, penalty_NN_H = CheckAction(action_H)
             pw_tru = env_test.PowerOutput(obs[1], action_H)
 
-        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, shadow_price, SOC/10, u/10]
+        # L 层观测蒸馏 (5维): [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
         _, rbb_info_obs = rbb_system.compute_pbrule(
             pb_original=0.0, ptur=float(pw_tru),
             pg_prev=float(obs[-1]), E=float(obs[2]))
