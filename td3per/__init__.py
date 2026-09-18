@@ -16,7 +16,7 @@ TD3 (Twin Delayed Deep Deterministic Policy Gradient) 结合 PER 与拉格朗日
     r2 = −1·min(clip_amount, 20) [MW] (命令与实际之差 = 两段 clip), c2 = +1·trackerr [MW] (两区间分治, 单一真源 hsrl_soctarget:
     参考集合 = Soctrack范围[δ/(g·n_rem), δ/g] ∩ 平抑窗口; 空交集 ⇒ **不存在范围,
     只有纯粹一个竭力值 r*** = 窗口里离该范围最近的端点, 顶到才不罚);
-    uniform 下 lam2 ∈ [1, 20] 初值 1.0, d_block_L = 1.2 (⇔ 0.02 MWh/块)。
+    uniform 下 λ2 ∈ [0.5, 2] (无量纲兑换率: 每 MW c2 至多值 2 MW r2 / 至少 0.5), 初值 1.0, 乘性对偶 (η2 = 0.02), d_block_L = 1.2 (⇔ 0.02 MWh/块)。
 
 Key differences from SP_DDPG:
   1. Twin critics per channel: MIN of the profit pair in targets and

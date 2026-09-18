@@ -37,7 +37,7 @@ Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
               lam1 ∈ [0.967, 4.833], 初值 0.967, d_block_H = 15.0 (= 3 MW × 5 步)
      legacy : 加性 lam1（本项目原式, lam1 ∈ [3, 50]）
   L: EMA ← 0.98*EMA + 0.02*sum_c2
-     lam2 ← clip(lam2 + 0.16*(EMA − d_block_L), 1, 20), 初值 1.0
+     lam2 ← clip(lam2*exp(0.02*(EMA/d_block_L − 1)), 0.5, 2), 初值 1.0  (无量纲兑换率: 每 MW c2 至多值 2 MW r2 / 至少 0.5)
      d_block_L 初始 1.2 (⇔ 允许搁置 0.02 MWh/块), curriculum 减半地板 0.15
 """
 import os
@@ -350,7 +350,17 @@ def train(num_iterations_H,
             # L 层 EMA 对偶上升 —— 用 5 步块实际成本 sum_c2 更新 lam2 (与 d_block_L 同口径)
             if step > args.warmup:
                 agent_L.update_ema_cost(sum_c2)
-                agent_L.update_lam_ema(d_block_L)
+                hst.dual_update_L(agent_L, d_block_L)
+            # ---- L 层 curriculum: EMA 成本连续 L_CURRICULUM_BLOCKS 块满足预算 ⇒ 预算减半 ----
+            #   计数改为块末每块 1 次 (此前嵌在更新循环里 = 每块 10 次, "100" 的含义随 UTD 漂移)
+            if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
+                consecutive_satisfied_L += 1
+            else:
+                consecutive_satisfied_L = 0
+            if consecutive_satisfied_L >= hst.L_CURRICULUM_BLOCKS:
+                d_block_L = max(d_block_L / 2, d_block_L_min)
+                consecutive_satisfied_L = 0
+                prGreen('L: d_block_L halved to {}'.format(d_block_L))
             done_L = True
         hwarm.fill_bess_transition(
             agent_L, norm_observation_L, original_action_L, r2, c2,
@@ -382,20 +392,13 @@ def train(num_iterations_H,
                         consecutive_satisfied_H += 1
                     else:
                         consecutive_satisfied_H = 0
-                    # Track consecutive satisfaction for L (EMA 实际成本判据)
-                    if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
-                        consecutive_satisfied_L += 1
-                    else:
-                        consecutive_satisfied_L = 0
+                    # (L 的 curriculum 计数已移到块末: 每块 1 次, 阈值 hst.L_CURRICULUM_BLOCKS)
 
                 if consecutive_satisfied_H >= 100:
                     d_block_H = max(d_block_H / 2, d_block_H_min)  # H: 收紧块预算
                     consecutive_satisfied_H = 0
                     prGreen('H: d_block_H halved to {}'.format(d_block_H))
-                if consecutive_satisfied_L >= 100:
-                    d_block_L = max(d_block_L / 2, d_block_L_min)  # L: 收紧块预算
-                    consecutive_satisfied_L = 0
-                    prGreen('L: d_block_L halved to {}'.format(d_block_L))
+                # (L 的减半已移到块末: 每块 1 次)
 
                 # ---- H 层更新数据记录（本块 10 批均值 → TB/csv） ----
                 # 记录"神经网络更新时实际采用的数据"：TD/Q/target/batch 奖励成本/ISW。
@@ -779,6 +782,10 @@ if __name__ == "__main__":
                         help='L 层策略更新间隔: 1=每批更新(≈DDPG节奏, 步骤A) / 2=TD3延迟(默认, 与H一致)')
     parser.add_argument('--l_policy_noise', default=0.1, type=float,
                         help='L 层 target smoothing noise std (动作幅度比例): 0.01≈关闭(步骤A) / 0.1=TD3默认')
+    parser.add_argument('--l_discount', default=0.98, type=float,
+                        help='L 层(BESS)折扣: **步级**语义 (H 为块级), 默认 0.98')
+    parser.add_argument('--l_epsilon', default=50000,
+                        help='L 层探索衰减步数 (与 H 的 --epsilon 解耦), 默认 50000')
     parser.add_argument('--cost_critic_mode', default='max', type=str,
                         choices=['min', 'max'],
                         help='cost twin-critic aggregation: max (safe, recommended) or min (TD3 paper; risks cost underestimation -> Q_c collapse)')
@@ -900,9 +907,10 @@ if __name__ == "__main__":
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
-    #     lam2 ∈ [L_LAM_MIN, L_LAM_MAX] = [1, 20]（MW 口径兑换率"MW 追踪缺口 : MW 越窗"），
-    #     初值 1.0，ema_alpha=0.02 (时间常数~50块=250步)，加性步长 ema_lam_lr = L_EMA_LAM_LR = 0.16
-    #     （÷100 时代是 1.0/MWh 口径 ⇒ ×1/6.1 保持同一物理步长）；d_block_L = 1.2 ⇔ 0.02 MWh/块
+    #     lam2 ∈ [L_LAM_MIN, L_LAM_MAX] = [0.5, 2] —— r2/c2 同为 MW ⇒ λ2 是**无量纲兑换率**
+    #       ("每 MW c2 至多值 2 MW r2 / 至少值 0.5 MW r2"), 关于 1.0 对数对称; 初值 1.0
+    #     ema_alpha = 0.02 (时间常数 ~50 块), **乘性**对偶 λ2 ← λ2·exp(0.02·(EMA/d_block_L − 1))
+    #     d_block_L = 1.2 ⇔ 0.02 MWh/块; curriculum 连续 50 块满足 ⇒ 减半 (地板 0.15)
     #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
     # L 层(步骤A): policy_delay/--policy_noise 独立于 H —— 放松到 delay=1+noise≈0 时节奏接近 DDPG
     # (twin critic 与 EMA 对偶仍保留, 仅去掉延迟更新与 target smoothing 对窄可行窗的抹平)
@@ -914,7 +922,10 @@ if __name__ == "__main__":
                      noise_clip=args.noise_clip,
                      cost_critic_mode=args.cost_critic_mode)
     agent_L.cost_limit = hst.L_COST_LIMIT  # L层c2专用初始值（覆盖全局cost_single_limit=1000）
+    agent_L.lam = hst.L_LAM_INIT           # λ2 初值 = 中性兑换率 1.0 (单一真源; 此前漏设, 继承 --lam 默认 3)
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
+    agent_L.discount = args.l_discount      # L 步级折扣 (与 H 的块级折扣解耦)
+    agent_L.depsilon = 1.0 / max(args.l_epsilon, 1)   # L 探索衰减 (与 H 的 --epsilon 解耦)
 
     prYellow('L 层(BESS)策略超参: policy_delay={}, policy_noise={} (H 层 TD3: delay={}, noise={})'.format(
         args.l_policy_delay, args.l_policy_noise, args.policy_delay, args.policy_noise))

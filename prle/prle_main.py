@@ -375,10 +375,7 @@ def train_prle(num_iterations_H,
                         consecutive_satisfied_H += 1
                     else:
                         consecutive_satisfied_H = 0
-                    if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
-                        consecutive_satisfied_L += 1
-                    else:
-                        consecutive_satisfied_L = 0
+                    # (L 的 curriculum 计数已移到块末: 每块 1 次, 阈值 hst.L_CURRICULUM_BLOCKS)
 
                 # Curriculum convergence: tighten constraint targets when
                 # satisfied for 100 consecutive policy updates (EMA: halve d_block)
@@ -386,16 +383,23 @@ def train_prle(num_iterations_H,
                     d_block_H = max(d_block_H / 2, d_block_H_min)
                     consecutive_satisfied_H = 0
                     prGreen('H: d_block_H halved to {}'.format(d_block_H))
-                if consecutive_satisfied_L >= 100:
-                    d_block_L = max(d_block_L / 2, d_block_L_min)
-                    consecutive_satisfied_L = 0
-                    prGreen('L: d_block_L halved to {}'.format(d_block_L))
+                # (L 的减半已移到块末: 每块 1 次)
 
                 # ---- H/L 层 EMA dual ascent on actual block cost ----
                 agent_H.update_ema_cost(sum_c1)
                 hc.dual_update(agent_H, d_block_H)   # uniform=乘性 / legacy=加性
                 agent_L.update_ema_cost(sum_c2)
-                agent_L.update_lam_ema(d_block_L)
+                hst.dual_update_L(agent_L, d_block_L)
+                # ---- L 层 curriculum: EMA 成本连续 L_CURRICULUM_BLOCKS 块满足预算 ⇒ 预算减半 ----
+                #   计数改为块末每块 1 次 (此前嵌在更新循环里, "100" 的含义随 UTD 漂移)
+                if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
+                    consecutive_satisfied_L += 1
+                else:
+                    consecutive_satisfied_L = 0
+                if consecutive_satisfied_L >= hst.L_CURRICULUM_BLOCKS:
+                    d_block_L = max(d_block_L / 2, d_block_L_min)
+                    consecutive_satisfied_L = 0
+                    prGreen('L: d_block_L halved to {}'.format(d_block_L))
 
                 # ---- H 层更新数据记录（本块 10 批均值 → TB/csv） ----
                 # 记录"神经网络更新时实际采用的数据"：TD/Q/target/batch 奖励成本/ISW。
@@ -761,6 +765,10 @@ if __name__ == "__main__":
     parser.add_argument('--warmup', default=200, type=int,
                         help='time without training but only filling the replay memory')
     parser.add_argument('--discount', default=0.98, type=float, help='')
+    parser.add_argument('--l_discount', default=0.98, type=float,
+                        help='L 层(BESS)折扣: **步级**语义 (H 为块级); L episode=5 步块, 默认 0.98')
+    parser.add_argument('--l_epsilon', default=50000,
+                        help='L 层探索衰减步数 (与 H 的 --epsilon 解耦), 默认 50000')
     parser.add_argument('--bsize', default=32, type=int, help='minibatch size')
     parser.add_argument('--rmsize', default=20000, type=int, help='memory size')
     parser.add_argument('--window_length', default=1, type=int, help='')
@@ -923,13 +931,18 @@ if __name__ == "__main__":
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     # L agent: also PRLE_DDPG (block_size=1, stores context=None — no relabeling context)
-    # L 层对偶改 EMA 实际成本更新; lam2 ∈ [L_LAM_MIN, L_LAM_MAX] = [1, 20] (MW 口径兑换率),
-    #   初值 1.0, 加性步长 L_EMA_LAM_LR = 0.16, d_block_L = 1.2 (⇔ 0.02 MWh/块)
+    # L 层对偶: λ2 ∈ [L_LAM_MIN, L_LAM_MAX] = [0.5, 2] —— r2/c2 同为 MW ⇒ λ2 是**无量纲兑换率**
+    #   ("每 MW c2 至多值 2 MW r2 / 至少值 0.5 MW r2"), 关于 1.0 对数对称 (MAX·MIN = 1), 初值 1.0
+    #   每块 1 次**乘性**更新 λ2 ← λ2·exp(hst.L_EMA_LAM_LR·(EMA_c2/d_block_L − 1)) (η2 = 0.02)
+    #   d_block_L = 1.2 (⇔ 0.02 MWh/块); curriculum 连续 50 块满足 ⇒ 减半 (地板 0.15)
     agent_L = PRLE_DDPG(nb_states=5, nb_actions=1, args=args,
                         lam_max=hst.L_LAM_MAX, lam_min=hst.L_LAM_MIN,
                         ema_lam=True, ema_alpha=0.02, ema_lam_lr=hst.L_EMA_LAM_LR)
     agent_L.cost_limit = hst.L_COST_LIMIT  # L-layer c2 dedicated initial value (EMA 模式下不使用)
+    agent_L.lam = hst.L_LAM_INIT           # λ2 初值 = 中性兑换率 1.0 (单一真源; 此前继承 --lam 默认 3)
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
+    agent_L.discount = args.l_discount      # L 步级折扣 (与 H 的块级折扣解耦)
+    agent_L.depsilon = 1.0 / max(args.l_epsilon, 1)   # L 探索衰减 (与 H 的 --epsilon 解耦)
 
 
     if args.mode == 'train':

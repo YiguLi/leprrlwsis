@@ -5,7 +5,7 @@
 分两支：
   * **SOC 目标支**（td3per / td3prrbb / prle / td3prle）：口径集中在单一真源 `hsrl_soctarget.py`
     （`r2 = −1·min(clip_amount, 20)`、`c2 = +1·trackerr`、`d_block_L = 1.2`、地板 0.15、
-    `cost_limit = 0.6`、L 对偶 η2 = 0.16）。本文件只查"接线是否都指向真源 + 是否把
+    `cost_limit = 0.6`、λ2 ∈ [0.5, 2] 无量纲兑换率 (η2 = 0.02 乘性对数步长)）。本文件只查"接线是否都指向真源 + 是否把
     **命令值**交给 RBB（两段 clip 都计费）"；
     **四项目逐位等价**与目标映射/零成本动作性质见 `test_soctarget_uniform.py`。
   * **其它支**（per / prrbb 影子电价）：系数仍在各自项目里，本文件按项目核对取值，
@@ -71,12 +71,17 @@ print('A. SOC 目标支: 四个项目都接在单一真源 hsrl_soctarget 上')
 print('=' * 84)
 import hsrl_soctarget as hst                                     # noqa: E402
 assert (hst.L_CLIP_COEF, hst.L_TRACK_COEF, hst.L_D_BLOCK,
-        hst.L_D_BLOCK_MIN, hst.L_COST_LIMIT, hst.L_EMA_LAM_LR) == \
-       (1.0, 1.0, 1.2, 0.15, 0.6, 0.16)
+        hst.L_D_BLOCK_MIN, hst.L_COST_LIMIT) == \
+       (1.0, 1.0, 1.2, 0.15, 0.6)
 assert hst.L_CLIP_CAP == 20.0               # r2 封顶 (实测窗内容量 ≤20 ⇒ 不截断真实值)
 _g = 0.98 * (1.0 / 60.0)
 assert abs(hst.L_D_BLOCK * _g - 0.02) < 2e-3          # 物理等价: 允许搁置 0.02 MWh/块
-assert abs(hst.L_EMA_LAM_LR / _g - 10.0) < 0.3        # 对偶物理步长与旧口径一致
+# λ2 = 无量纲兑换率: 每 MW c2 至多值 2 MW r2 / 至少值 0.5 MW r2, 关于中性 1.0 对数对称
+assert (hst.L_LAM_MIN, hst.L_LAM_MAX, hst.L_LAM_INIT) == (0.5, 2.0, 1.0)
+assert abs(hst.L_LAM_MAX * hst.L_LAM_MIN - 1.0) < 1e-12
+assert abs(hst.L_LAM_INIT ** 2 - hst.L_LAM_MAX * hst.L_LAM_MIN) < 1e-12
+# 乘性对数步长 (看无量纲比值 EMA/d_block) + curriculum 以"块"计量
+assert hst.L_EMA_LAM_LR == 0.02 and hst.L_CURRICULUM_BLOCKS == 50
 for proj, (main_py, mf_py) in SOC_FAMILY.items():
     mt, ft = src(main_py), src(mf_py)
     if proj == 'td3per':
@@ -94,13 +99,20 @@ for proj, (main_py, mf_py) in SOC_FAMILY.items():
         (proj, 'uniform 下块末追踪罚未进 r1')
     assert re.search(r'pb_original = float\(np\.ravel\(np\.asarray\(original_action_L', mt), \
         (proj, '未把**命令值**交给 compute_pbrule ⇒ clip_amount 只含窗口那段 (|cmd|>10 死区)')
+    # L 层对偶走单一真源 + λ2 初值/curriculum 计量显式 + 计数每块 1 次
+    assert 'hst.dual_update_L(' in mt, (proj, 'L 对偶未走 hsrl_soctarget.dual_update_L')
+    assert re.search(r'agent_L\.lam = hst\.L_LAM_INIT', mt), (proj, 'λ2 初值未显式设为真源')
+    assert re.search(r'consecutive_satisfied_L >= hst\.L_CURRICULUM_BLOCKS', mt), \
+        (proj, 'L curriculum 未按"块数"计量')
+    assert mt.count('consecutive_satisfied_L += 1') == 1, \
+        (proj, 'L curriculum 计数出现多次 ⇒ 仍嵌在按 UTD 计数的循环里')
     d = num_or_ref(mt, r'(?m)^\s*d_block_L = hst\.L_D_BLOCK\b',
                    r'(?m)^\s*d_block_L = ([0-9.]+)', proj + ' d_block_L')
     f = num_or_ref(mt, r'(?m)^\s*d_block_L_min = hst\.L_D_BLOCK_MIN\b',
                    r'(?m)^\s*d_block_L_min = ([0-9.]+)', proj + ' floor')
     c = num_or_ref(mt, r'agent_L\.cost_limit = hst\.L_COST_LIMIT',
                    r'agent_L\.cost_limit = ([0-9.]+)', proj + ' cost_limit')
-    n_lo = len(re.findall(r'ema_lam=True, ema_alpha=0\.02, ema_lam_lr=(?:hst\.L_EMA_LAM_LR|1\.0)', mt))
+    n_lo = len(re.findall(r'ema_lam=True, ema_alpha=0\.02, ema_lam_lr=hst\.L_EMA_LAM_LR', mt))
     n_hi = len(re.findall(r'ema_lam=True, ema_alpha=0\.02, ema_lam_lr=0\.01', mt))
     assert n_lo == 1 and n_hi == 1, (proj, n_lo, n_hi)
     for v, exp in ((d, 1.2), (f, 0.15), (c, 0.6)):
@@ -203,6 +215,44 @@ print('  {} 组 (|pbrule|≤10): max|clip_amount − (窗口段 + 越界段)| = 
       '越界 {} 组 r2 恰好多扣 |cmd|−10（斜率 1，无死区，偏差 {:.1e}），触顶 {} 组'
       .format(n_two, mx_two, n_over, mx_lin, n_cap))
 print('  SOC 越带的退化窗口样本 {} 组已跳过 (|pbrule|>10, 真实 run 未见)'.format(n_deg))
+
+print('=' * 84)
+print('E. λ2 对偶律 (乘性, 只吃无量纲比值): 不动点 / 饱和 / 回落 / 刻度免疫 / 限幅')
+print('=' * 84)
+
+
+class _Ag:
+    """最小假体: 只需 .ema_cost 与 .lam。"""
+    def __init__(self, ema, lam=hst.L_LAM_INIT):
+        self.ema_cost, self.lam = ema, lam
+
+
+# 不动点: EMA_c2 = d_block_L (预算刚好满足) ⇒ λ2 不动
+_a = _Ag(hst.L_D_BLOCK)
+assert abs(hst.dual_update_L(_a, hst.L_D_BLOCK) - hst.L_LAM_INIT) < 1e-15
+# 违约 (实测当前工况 EMA/d ≈ 13/1.2 ≈ 11) ⇒ 上升, 4 块内顶到上限
+_a = _Ag(11.0 * hst.L_D_BLOCK)
+_traj = [hst.dual_update_L(_a, hst.L_D_BLOCK) for _ in range(4)]
+assert _traj[0] > hst.L_LAM_INIT * 1.15 and _traj[-1] == hst.L_LAM_MAX, _traj
+# 超额完成 (比值 0.5) ⇒ 回落, 且不越下界
+_a = _Ag(0.5 * hst.L_D_BLOCK)
+_traj2 = [hst.dual_update_L(_a, hst.L_D_BLOCK) for _ in range(80)]
+assert _traj2[-1] == hst.L_LAM_MIN, _traj2[-1]
+# 尺度免疫: 同一比值、不同绝对刻度 ⇒ 同一乘子 (加性式 λ+=η(EMA−d) 做不到)
+_x1, _x2 = _Ag(3.0 * 1.0), _Ag(3.0 * 1000.0)
+assert abs(hst.dual_update_L(_x1, 1.0) - hst.dual_update_L(_x2, 1000.0)) < 1e-15
+# ema 未建立 ⇒ 完全不动
+assert hst.dual_update_L(_Ag(None), hst.L_D_BLOCK) is None
+assert hst.dual_update_L(None, hst.L_D_BLOCK) is None
+# 限幅: 任何比值迭代任意步都不越界
+for _r in (1e-6, 1.0, 1e6):
+    _a = _Ag(_r * hst.L_D_BLOCK, lam=hst.L_LAM_INIT)
+    for _ in range(200):
+        _v = hst.dual_update_L(_a, hst.L_D_BLOCK)
+    assert hst.L_LAM_MIN - 1e-12 <= _v <= hst.L_LAM_MAX + 1e-12, (_r, _v)
+print('  EMA=d_block ⇒ 不动; 比值 11 ⇒ {} 块到上限 {:.1f}; 比值 0.5 ⇒ 回落到下限 {:.1f}'
+      .format(len(_traj), hst.L_LAM_MAX, hst.L_LAM_MIN))
+print('  同比值不同刻度 ⇒ 同一乘子 (无量纲); ema 未建立 ⇒ 不动; 任意比值恒在 [0.5, 2] 内')
 
 print('=' * 84)
 print('TEST OK')

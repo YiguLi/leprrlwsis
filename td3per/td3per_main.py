@@ -22,8 +22,9 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
         F ≠ ∅ ⇒ 该区间内任选努力水平; F = ∅ ⇒ **不存在范围, 只有纯粹一个竭力值 r***,
         顶到 r* 才不罚、两侧偏离都按 |pbrule − r*| 线性计费 (缺口由 r1 块末 gap 罚承接);
         零成本动作仍是规则下层 (旧名 soc_track_slack 保留为兼容别名);
-      - lam2 ∈ [1, 20] (兑换率口径"MW 追踪缺口 : MW 越窗"), 初值 1.0, d_block_L 1.2 → 地板 0.15,
-        每块 1 次 EMA 对偶更新 (加性步长 0.16);
+      - lam2 ∈ [hst.L_LAM_MIN, hst.L_LAM_MAX] = [0.5, 2] —— **无量纲兑换率**
+        ("每 MW c2 至多值 2 MW r2 / 至少值 0.5 MW r2", 关于 1.0 对数对称), 初值 1.0,
+        d_block_L 1.2 → 地板 0.15, 每块 1 次**乘性**对偶更新 (η2 = 0.02);
       - L 层折扣/探索按 td3per 原口径: --l_discount 0.98 (步级), --l_epsilon 50000。
 
 奖励 / 成本口径
@@ -45,7 +46,7 @@ L: r2 = −1·min(clip_amount, 20)   [MW] 命令与实际之差 (两段 clip 合
        uniform: 乘性 lam1 ← lam1·exp(0.02·(EMA/d_block_H − 1)),
                 lam1 ∈ [0.967, 4.833], 初值 0.967, d_block_H = 15.0 (= 3 MW × 5 步)
        legacy : 加性 lam1（本项目原式）
-    L: EMA ← 0.98·EMA + 0.02·sum_c2;  lam2 ← clip(lam2 + 0.16·(EMA − d_block_L), 1, 20), 初值 1.0
+    L: EMA ← 0.98·EMA + 0.02·sum_c2;  lam2 ← clip(lam2·exp(0.02·(EMA/d_block_L − 1)), 0.5, 2), 初值 1.0 (无量纲兑换率)
        d_block_L = 1.2 (⇔ 允许搁置 0.02 MWh/块), curriculum 减半地板 0.15
 """
 import os
@@ -431,7 +432,17 @@ def train(num_iterations_H,
             # L 层 EMA 对偶上升 —— 用块实际成本 sum_c2 更新 lam2 (与 d_block_L 同口径)
             if step > args.warmup:
                 agent_L.update_ema_cost(sum_c2)
-                agent_L.update_lam_ema(d_block_L)
+                hst.dual_update_L(agent_L, d_block_L)
+            # ---- L 层 curriculum: EMA 成本连续 L_CURRICULUM_BLOCKS 块满足预算 ⇒ 预算减半 ----
+            #   计数改为块末每块 1 次 (此前嵌在更新循环里 = 每块 10 次, "100" 的含义随 UTD 漂移)
+            if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
+                consecutive_satisfied_L += 1
+            else:
+                consecutive_satisfied_L = 0
+            if consecutive_satisfied_L >= hst.L_CURRICULUM_BLOCKS:
+                d_block_L = max(d_block_L / 2, d_block_L_min)
+                consecutive_satisfied_L = 0
+                prGreen('L: d_block_L halved to {}'.format(d_block_L))
             done_L = True
         hwarm.fill_bess_transition(
             agent_L, norm_observation_L, original_action_L, r2, c2,
@@ -454,20 +465,12 @@ def train(num_iterations_H,
                 # L 层更新频率: 每块 10 次 (td3per 口径, L 只有 1 维动作)
                 for _ in range(10):
                     agent_L.update_policy()
-                    # Track consecutive satisfaction for L (EMA 实际成本判据)
-                    if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
-                        consecutive_satisfied_L += 1
-                    else:
-                        consecutive_satisfied_L = 0
 
                 if consecutive_satisfied_H >= 100:
                     d_block_H = max(d_block_H / 2, d_block_H_min)  # H: 收紧块预算
                     consecutive_satisfied_H = 0
                     prGreen('H: d_block_H halved to {}'.format(d_block_H))
-                if consecutive_satisfied_L >= 100:
-                    d_block_L = max(d_block_L / 2, d_block_L_min)  # L: 收紧块预算
-                    consecutive_satisfied_L = 0
-                    prGreen('L: d_block_L halved to {}'.format(d_block_L))
+                # (L 的 curriculum 计数与减半已移到块末: 每块 1 次, 阈值 hst.L_CURRICULUM_BLOCKS)
 
                 # ---- H 层更新数据记录（本块 2 批均值 → TB/csv） ----
                 if agent_H.record_update_stats and len(agent_H.update_stats) > 0:
@@ -1064,11 +1067,14 @@ if __name__ == "__main__":
     #   * r2 = −1·min(clip_amount, 20)
     #   * c2 = +1·trackerr [MW] (实际施加 pb 到参考集合的距离; 零成本动作 = 规则 SocTracker,
     #        F=∅ 时参考集合退化为单点竭力值 ⇒ 只有顶到它才不罚; 见 hsrl_soctarget)
-    #   * lam2 ∈ [hst.L_LAM_MIN, hst.L_LAM_MAX] = [1, 20] 初值 1.0;
-    #        每块 1 次 EMA 对偶更新 (加性步长 L_EMA_LAM_LR = 0.16); 步级折扣 --l_discount
+    #   * lam2 ∈ [hst.L_LAM_MIN, hst.L_LAM_MAX] = [0.5, 2] —— **无量纲兑换率**
+    #       "每 MW c2 至多值 2 MW r2 / 至少值 0.5 MW r2", 关于 1.0 对数对称 (MAX·MIN = 1);
+    #       初值 L_LAM_INIT = 1.0 (中性兑换率)
+    #   * 每块 1 次**乘性**对偶: λ2 ← clip(λ2·exp(hst.L_EMA_LAM_LR·(EMA_c2/d_block_L − 1)), 0.5, 2);
+    #       步级折扣 --l_discount
     agent_L = SP_TD3(nb_states=5, nb_actions=1, args=args,
                      lam_max=hst.L_LAM_MAX, lam_min=hst.L_LAM_MIN,
-                     ema_lam=True, ema_alpha=0.02, ema_lam_lr=1.0,
+                     ema_lam=True, ema_alpha=0.02, ema_lam_lr=hst.L_EMA_LAM_LR,
                      policy_delay=args.l_policy_delay,
                      policy_noise=args.l_policy_noise,
                      noise_clip=args.noise_clip,

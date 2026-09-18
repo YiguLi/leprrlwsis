@@ -86,11 +86,12 @@ MWh 口径）。本轮**把 c2 也换成 MW 口径**（与 r2 一致），于是
 | `L_D_BLOCK` | 0.2 | **1.2** | 允许每块搁置 ≈0.02 MWh 的可达量（≈0.4 步能力） |
 | `L_D_BLOCK_MIN` | 0.025 | **0.15** | curriculum 地板 ≈0.0025 MWh（≈0.05 步能力） |
 | `L_COST_LIMIT` | 0.1 | **0.6** | `agent_L.cost_limit`（仅 non-EMA 分支用） |
-| `L_EMA_LAM_LR` | 1.0 | **0.16** | 加性对偶步长 η2，保持同一物理步长（1.0/6.1） |
-| `L_LAM_MIN/MAX` | 10 / 500（价格口径） | **1 / 20** | λ2 现在读作"MW 追踪缺口 : MW 越窗"的兑换率 |
+| `L_EMA_LAM_LR` | 1.0（加性，MWh 口径） | **0.02（乘性对数步长）** | 对偶改为看无量纲比值 `EMA_c2/d_block`；与 H 层 `hc.ETA_LAM` 同刻度 |
+| `L_LAM_MIN/MAX` | 10 / 500（价格口径） | **0.5 / 2** | λ2 = "1 MW c2 值多少 MW r2"的无量纲**兑换率**：至多 2 倍、至少 1/2（对数对称，MAX·MIN = 1），初值 1.0 |
+| `L_CURRICULUM_BLOCKS` | 100 次检查（λ 计数） | **50 块** | 预算减半所需"连续满足块数" = EMA 时间常数 1/α |
 
-⇒ `L_D_BLOCK / L_TRACK_COEF / L_CLIP_COEF` 三者在同一量纲上，λ2 的区间也是同一量纲
-（`agentutil/test_l_track_range.py` 断言这些不变量）。
+⇒ `L_D_BLOCK / L_TRACK_COEF / L_CLIP_COEF` 三者在同一量纲上，λ2 是无量纲兑换率
+（`agentutil/test_l_track_range.py` / `test_soctarget_uniform.py` 断言这些不变量）。
 """
 import numpy as np
 
@@ -113,10 +114,18 @@ L_SOC_COEF = L_TRACK_COEF   # 兼容旧名（旧口径里它是 MWh→代价的�
 L_D_BLOCK = 1.2          # 每块 sum_c2 预算（= 允许搁置 0.02 MWh 的可达量）
 L_D_BLOCK_MIN = 0.15     # curriculum 地板
 L_COST_LIMIT = 0.6       # agent_L.cost_limit（仅 non-EMA 分支用）
-L_EMA_LAM_LR = 0.16      # 加性对偶步长 η2（保持 ÷100 时代的物理步长）
-L_LAM_MIN = 1.0          # λ2 下限（兑换率口径）
-L_LAM_MAX = 20.0         # λ2 上限
-L_LAM_INIT = 1.0         # λ2 初值
+L_CURRICULUM_BLOCKS = 50 # L 层预算减半所需的"连续满足块数"（= EMA 时间常数 1/α = 50 块；
+                         #   早于它收紧 = 在 EMA 还没反映上一次收紧时又收紧一次）
+# ---- λ2：r2 与 c2 同为 MW ⇒ λ2 是"1 MW c2 值多少 MW r2"的无量纲兑换率 ----
+# 核心指导思想: 两个 MW 通道的权重必须可比。上限"每 MW c2 至多值 2 MW r2"、
+# 下限"至少值 0.5 MW r2" ⇒ 区间关于中性兑换率 1.0 **对数对称**（MAX·MIN = 1）。
+L_LAM_MIN = 0.5          # λ2 下限 = r2 的 1/2（c2 至少值 0.5 MW r2 / MW）
+L_LAM_MAX = 2.0          # λ2 上限 = r2 的 2 倍（c2 至多值 2 MW r2 / MW）
+L_LAM_INIT = 1.0         # λ2 初值 = 中性兑换率（1 MW c2 = 1 MW r2）；= sqrt(MIN·MAX)
+L_EMA_LAM_LR = 0.02      # 乘性对偶的**对数**步长 η2（与 hc.ETA_LAM 同刻度）：
+                         #   λ2 ← λ2 · exp(η2·(EMA_c2/d_block − 1))
+                         # 只看无量纲比值 ⇒ 对 c2 的绝对刻度免疫（加性式带 MW 量纲，
+                         # 在 [0.5, 2] 这样窄的区间里会一个块就撞顶）。
 
 # ---------------------------------------------------------------- 观测刻度
 OBS_SOC_SCALE = 10.0     # SOC 与目标都以 /10 进入下层观测
@@ -276,3 +285,37 @@ def lower_cost_soc_track(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n
     if return_info:
         return cost, info
     return cost
+
+
+# ---------------------------------------------------------------- L 层对偶（单一真源）
+def dual_update_L(agent, d_block):
+    """L 层对偶上升：λ2 ← clip(λ2 · exp(η2·(EMA_c2/d_block − 1)), L_LAM_MIN, L_LAM_MAX)。
+
+    调用方需先 `agent.update_ema_cost(sum_c2)`（EMA ← (1−α)·EMA + α·sum_c2，每 5 步块一次）。
+
+    为什么是**乘性**（与 H 层 `hc.dual_update` 同形）
+    ------------------------------------------------
+    * r2 与 c2 现在同为 MW ⇒ λ2 是"1 MW c2 值多少 MW r2"的**无量纲兑换率**。
+      乘性式只看无量纲比值 `EMA_c2/d_block`，对 c2/预算的绝对刻度免疫（换单位不会静默
+      改变对偶速度）；加性式 `λ2 += η2·(EMA − d)` 的 η2 带 MW 量纲，且在新区间 [0.5, 2]
+      （宽 1.5）里，实测 `EMA−d ≈ 13` ⇒ `Δλ2 ≈ 0.16×13 = 2.1` **一个块就撞上限** ⇒ 退化成
+      bang-bang、反向同样暴烈。乘性式在同等失配（比值 ≈ 11）下约 22%/块 ⇒ ~4 块到上限。
+    * 区间关于中性兑换率 **对数对称**：`L_LAM_MAX·L_LAM_MIN = 2 × 0.5 = 1`，
+      `L_LAM_INIT = sqrt(MIN·MAX) = 1` ⇒ "至多 2 倍、至少 1/2"这条指导思想直接可断言。
+    * 不动点 = 预算刚好满足（比值 1）；比值 < 1（超额完成）时 λ2 按同样步长回落。
+
+    Parameters
+    ----------
+    agent   : 具备 `.ema_cost` 与 `.lam` 的下层 agent（本函数不改其它属性）
+    d_block : 每块 sum_c2 预算（`L_D_BLOCK`）
+
+    Returns
+    -------
+    lam2 : float or None（`ema_cost` 尚未建立时返回 None，不动 λ2）
+    """
+    if agent is None or getattr(agent, 'ema_cost', None) is None:
+        return None
+    ratio = float(agent.ema_cost) / max(float(d_block), 1e-9)
+    lam = float(agent.lam) * float(np.exp(L_EMA_LAM_LR * (ratio - 1.0)))
+    agent.lam = float(np.clip(lam, L_LAM_MIN, L_LAM_MAX))
+    return agent.lam

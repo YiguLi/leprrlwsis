@@ -49,17 +49,21 @@ assert hst.L_SOC_COEF == hst.L_TRACK_COEF          # 兼容别名
 assert hst.L_CLIP_CAP == 20.0                      # r2 封顶 (真实窗内容量 ≤20 ⇒ 只截断病态饱和)
 assert abs(hst.lower_reward(1e6) + hst.L_CLIP_CAP) < 1e-12
 assert hst.L_D_BLOCK == 1.2 and hst.L_D_BLOCK_MIN == 0.15
-assert hst.L_COST_LIMIT == 0.6 and hst.L_EMA_LAM_LR == 0.16
-assert hst.L_LAM_MIN == 1.0 and hst.L_LAM_MAX == 20.0 and hst.L_LAM_INIT == 1.0
+assert hst.L_COST_LIMIT == 0.6 and hst.L_EMA_LAM_LR == 0.02
+# λ2 = 无量纲兑换率 ("1 MW c2 值多少 MW r2"): 至多 2 倍 / 至少 1/2, 关于 1.0 对数对称
+assert (hst.L_LAM_MIN, hst.L_LAM_MAX, hst.L_LAM_INIT) == (0.5, 2.0, 1.0)
+assert abs(hst.L_LAM_MAX * hst.L_LAM_MIN - 1.0) < 1e-12
 # 物理等价: 预算仍 = 允许搁置 0.02 MWh/块 (旧 0.2 @10×MWh 口径)
 _g = 0.98 * (1.0 / 60.0)
 assert abs(hst.L_D_BLOCK * _g - 0.02) < 2e-3, hst.L_D_BLOCK * _g
-# 对偶物理步长: 旧 1.0 × (10/MWh) 口径 == 新 lr × (1/g /MWh)
-assert abs(hst.L_EMA_LAM_LR / _g * hst.L_TRACK_COEF - 10.0) < 0.3, hst.L_EMA_LAM_LR / _g
+# λ2 对偶: 乘性、只看无量纲比值 ⇒ 对 c2/预算绝对刻度免疫 (加性式带 MW 量纲, 已弃)
+_ag = type('A', (), {'ema_cost': hst.L_D_BLOCK, 'lam': 1.0})()
+assert hst.dual_update_L(_ag, hst.L_D_BLOCK) == hst.L_LAM_INIT          # 不动点 = 预算刚好满足
+_ag2 = type('A', (), {'ema_cost': 11.0 * hst.L_D_BLOCK, 'lam': 1.0})()
+assert hst.dual_update_L(_ag2, hst.L_D_BLOCK) > hst.L_LAM_INIT          # 违约 ⇒ 涨价
 for a6, exp in ((-0.5, 0.5), (0.0, 3.0), (0.2, 4.0), (0.5, 5.5), (2.0, 5.5)):
     assert abs(hst.soc_target_from_signal(a6) - exp) < 1e-12, (a6, exp)
-print('  a6→target 映射、L_CLIP/L_TRACK=1、d_block_L=1.2 (⇔0.02 MWh)、η2=0.16 (⇔旧 10/MWh)、'
-      'λ2∈[1,20] 全部正确')
+print('  a6→target 映射、L_CLIP/L_TRACK=1、d_block_L=1.2 (⇔0.02 MWh)、' 'η2=0.02 (乘性对数步长)、λ2∈[0.5,2] (无量纲兑换率, MAX·MIN=1) 全部正确')
 print('  物理等价: d_block_L·g = {:.4g} MWh/块 ; η2·(1/g) = {:.3g} (旧口径 10/MWh)'
       .format(hst.L_D_BLOCK * _g, hst.L_EMA_LAM_LR / _g))
 
