@@ -74,7 +74,8 @@ engine = matlab.engine.start_matlab()
 RUN_TAG = 'td3prrlrb'
 
 
-def init_wt_action_bias(agent, lo=0.25, hi=0.40, sig_value=0.0, verbose=True):
+def init_wt_action_bias(agent, lo=hinit.WT_START, hi=hinit.WT_START,
+                        sig_value=0.0, verbose=True):
     """把 actor 输出层前 5 维 (WT 轴向诱导因子 a) 的 bias 初始化到 Cp 高效区。
 
     为什么必须做 (run160/初始策略诊断):
@@ -933,7 +934,7 @@ if __name__ == "__main__":
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     # ---- P0.1: WT 输出层 bias 初始化到 Cp 高效区 (避免"半停机"起步) ----
     if args.wt_bias_init:
-        init_wt_action_bias(agent_H, lo=0.25, hi=0.40, sig_value=0.0)
+        init_wt_action_bias(agent_H, lo=hinit.WT_START, hi=hinit.WT_START, sig_value=0.0)
 
     if args.mode == 'train':
         train(args.train_iter_H,

@@ -5,13 +5,14 @@ HSRL warmup 期调度助手（多项目共享）
 
 1. `WarmupSchedule` —— warmup 期上层 H 的**确定性动作调度**（不再 `random_action()`）：
       * 5 个风机轴向因子各维从 **0.33** 起步（Cp = 4a(1−a)² 的最优点，也是
-        `env.reset()` 的标称动作 a=1/3 与 actor 的 `init_wt_action_bias(0.25~0.40)` 中心）；
+        `env.reset()` 的标称动作 a=1/3 与 actor 的 `init_wt_action_bias(value=0.33)` **同一点**）；
       * 每**块**（= 5 环境步，H 的决策周期）各维独立随机 **±0.05**，并直接 clip 到
         **[0.20, 0.45]**（该带内 Cp 仍为最优的 86%~100%，E[ΣCp]=2.82 ≈ 95% 最优；
         clip 到 [0,0.5] 则 89% 的样本会出现某维 ≤0.05、ΣCp 掉到 83% 最优）；
       * 第 6 维（信号维）**恒为 0.0**：对 SOC 目标语义的项目 = `soc_target ≡ 3`，
         对影子电价语义的项目 = 中性影子价 0。两者都恰好等于 actor 的
-        `init_wt_action_bias(..., sig_value=0.0)`，即 warmup 与策略起步**同分布**。
+        `init_wt_action_bias(value=WT_START=0.33, sig_value=0.0)`，即 warmup 与策略起步是
+        **同一个点**（6 个 TD3 项目的风机起始点已统一为 0.33，不再是"同分布"）。
     RNG 用**独立 RandomState**（不吃全局 np.random 流，避免扰动 episode SOC 随机化与探索噪声）。
 
 2. `WarmupBessRule` —— warmup 期下层 BESS 的**规则行为体**（BESS-RL 项目专用）：

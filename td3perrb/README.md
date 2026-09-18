@@ -26,7 +26,7 @@ td3perrb/
 - L 只做一件事——**追踪目标**；"物理可行 + 平抑波动"由 RBB 可行窗口 `[pbrulemin, pbrulemax]`
   硬保证，因此下层不需要 RL（无 actor/critic/λ2/c2/PBRS）。
 - H 观测 = `Normalize(obs)` 4 维 + `--phase_feat 1` 的 24h 相位 2 维 = 6 维。
-- `--wt_bias_init 1`：构造后把 actor 输出层前 5 维 bias 覆写到 Cp 高效区 `U(0.25,0.40)`。
+- `--wt_bias_init 1`：构造后把 actor 输出层前 5 维 bias 覆写为**固定 0.33**（`hinit.WT_START`，Cp 最优点 a=1/3；早期为 `U(0.25,0.40)`）。
 
 ## 2. 奖励 / 成本（仅 H，非分段）
 
@@ -84,7 +84,7 @@ H 每块更新 2 次; H 层越界罚 penalty_NN_H 系数 100/单位, 不封顶 (
 | `--soc_tol` / `--tracker_soc_tol` | 0.1 / 0.0 | 0.1 豁免只属于上层 gap 罚；下层尽力追随 |
 | `--pb_cap` | −1（不限制） | 仅实验用 |
 | `--phase_feat` | 1（H 观测 4→6 维） | 0=关 / 1=sin·cos / 2=+分段剩余特征 |
-| `--wt_bias_init` | 1 | Cp 高效区 bias 初始化 |
+| `--wt_bias_init` | 1 | 风机起始点 = **0.33**（Cp 最优点, `hinit.WT_START`） |
 | `--rbb_fluctuation_limit` / `--rbb_rated_power` | 3.0 / 10.0 | RBB 窗口参数 |
 
 ## 4. 继承自规则下层的结构性不变量

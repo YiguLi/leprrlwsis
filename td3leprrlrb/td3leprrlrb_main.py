@@ -131,8 +131,8 @@ def _flush_csv(path, rows, written):
 # 不动共享的 model.py; fc4.weight 仍是 ±0.003, 所以"策略强度"依然随机, 只是
 #   "基准工作点"落在高效区。
 
-WT_BIAS_LOW = 0.25
-WT_BIAS_HIGH = 0.40
+WT_BIAS_LOW = 0.33     # = hsrl_agent_init.WT_START (Cp 最优点)
+WT_BIAS_HIGH = 0.33    #   lo == hi ⇒ 5 维起始点都是同一个值, 不再随机
 CP_MAX_PER_TURBINE = 16.0 / 27.0        # a=1/3 处的 Cp 上限 4a(1−a)²
 
 
@@ -1285,7 +1285,7 @@ if __name__ == "__main__":
 
     # ---- P0.1: 起始点 (覆写 actor/actor_target 输出层 bias) ----
     if args.wt_bias_init:
-        init_wt_action_bias(agent_H)
+        init_wt_action_bias(agent_H, low=hinit.WT_START, high=hinit.WT_START)
     else:
         _b = agent_H.actor.fc4.bias.detach().cpu().numpy()
         _s = wt_cp_summary(_b)

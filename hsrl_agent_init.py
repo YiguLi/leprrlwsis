@@ -127,6 +127,69 @@ def init_critic_bias(agent, b_p=None, b_c=None, verbose=True):
     return done
 
 
+# =============================================================================
+# 风机 (WT) 起始点：actor 输出层 bias
+# =============================================================================
+WT_START = 0.33          # 轴向诱导因子 a 的起始值, = 单机 Cp 最优点 (a = 1/3)
+
+CP_MAX_PER_TURBINE = 4.0 * (1.0 / 3.0) * (1.0 - 1.0 / 3.0) ** 2      # ≈ 0.5926
+
+
+def init_wt_action_bias(agent, value=WT_START, sig_value=0.0, n_wt=5, verbose=True):
+    """把 H 层 actor 输出层 `fc4.bias` 的前 n_wt 维**精确**置为 `value`, 末维置 `sig_value`。
+
+    为什么必须做（run160 诊断，各 TD3 项目都保留同一段说明）
+    ------------------------------------------------------
+    `model.py` 的 `Actor` 只把 `fc4.weight` 初始化到 ±3e-3，`fc4.bias` 仍是 PyTorch 默认
+    `U(±1/√fan_in)`；而单机功率系数 `Cp = 4a(1−a)²`（见 `WFSim_port.m`）：
+
+        a = 0    → Cp = 0     （整机停机）
+        a = 1/3  → Cp = 0.593 （Betz 最优）
+        a = 0.5  → Cp = 0.5
+
+    初始策略 ≈ bias ⇒ 从"半停机"出发（实测 5 个种子：死机 2~4 台、全场 ΣCp 仅 0.47~0.72，
+    效率 16%~24%），而 a<0 区被 `CheckAction` 裁掉后梯度为 0 ⇒ 没有恢复力就会长期停在停机态。
+
+    为什么是 0.33
+    -------------
+    与 `hsrl_warmup.WT_START`（warmup 期确定性调度的起点）**取同一个值**，于是
+    "warmup 与策略起步同分布"从"同分布"收紧为"**同一点**"：warmup 结束、策略接管时
+    动作分布不发生跳变，`bias_init` 收集到的 warmup 块收益也因此更有代表性。
+
+    实现
+    ----
+    `model.py` 为 9 个项目共享，不改；构造后覆写 actor 与 actor_target 的 bias
+    （与 `init_critic_bias` 覆写 fc3.bias 同一套路）。
+
+    Returns
+    -------
+    np.ndarray 实际写入的 bias 向量；agent 无 actor.fc4 时返回 None（安全跳过）。
+    """
+    if agent is None or not hasattr(agent, 'actor') or not hasattr(agent.actor, 'fc4'):
+        if verbose:
+            prCyan('init_wt_action_bias: agent 无 actor.fc4，跳过')
+        return None
+    a = float(value)
+    with torch.no_grad():
+        b = agent.actor.fc4.bias
+        nb = int(b.numel())
+        k = min(int(n_wt), nb)
+        b[:k].fill_(a)
+        if nb > k:
+            b[k:].fill_(float(sig_value))
+        tgt = getattr(agent, 'actor_target', None)
+        if tgt is not None and hasattr(tgt, 'fc4'):
+            tgt.fc4.bias.copy_(b)
+    out = b.detach().cpu().numpy().copy()
+    if verbose:
+        cp1 = 4.0 * a * (1.0 - a) ** 2
+        prCyan('init_wt_action_bias: WT 起始 a = {:.3f} ×{} (单机 Cp = {:.3f}, 合计 {:.3f}; '
+               '最优 {:.3f}); 信号维 = {}'.format(
+                   a, k, cp1, k * cp1, k * CP_MAX_PER_TURBINE,
+                   None if nb <= k else float(sig_value)))
+    return out
+
+
 def q_probe(agent, states, actions, critic='critic_p'):
     """诊断用：给定状态/动作，返回该 critic 的输出均值（验证基线是否生效）。"""
     net = getattr(agent, critic, None)

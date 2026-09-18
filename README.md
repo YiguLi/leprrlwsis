@@ -282,7 +282,7 @@ python td3leprrlrb/td3leprrlrb_main.py    # 需配置 LLM
 | `--discount` | 0.99 | 折扣因子（以 5 min 的"块"为单位） |
 | `--policy_delay` | 2 | TD3 延迟策略更新频率 |
 | `--phase_feat` | 1 | H 观测加入 24h 相位特征（4→6 维） |
-| `--wt_bias_init` | 1 | 风机输出层 bias 初始化到 Cp 高效区 |
+| `--wt_bias_init` | 1 | 风机输出层 bias 初始化到 **0.33**（Cp 最优点, `hinit.WT_START`） |
 | `--critic_bias_init` | `estimate` | critic 输出层 bias（价值基线）初始化：`estimate` = 用 warmup 块均值估计 `r̄/(1−γ)`；`none` = 对照臂 |
 | `--critic_bias_p/_c` | −1 | 显式覆盖利润/成本基线（>0 生效，**须保持 `--critic_bias_init estimate`**） |
 | `--epsilon` | 4000 | 探索 ε 从 1 衰减到 0 的**决策次数**（× 5 = 环境步数） |
@@ -636,7 +636,7 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 
 | 层 | 旧 | 新 |
 |---|---|---|
-| 上层动作 | `random_action()`（wt ~ U(0,0.5)、信号 ~ U(−0.5,0.5)） | `WarmupSchedule`：wt 各维 0.33 起、每块 ±0.05、clip **[0.20,0.45]**（Cp 保持最优的 86%~100%，E[ΣCp]=2.82 ≈ 95% 最优）；信号维**恒 0**（SOC 目标语义 ⇒ `soc_target ≡ 3`；影子电价语义 ⇒ 中性 0）——两者都等于 actor 的 `init_wt_action_bias(..., sig_value=0.0)`，即 warmup 与策略起步**同分布** |
+| 上层动作 | `random_action()`（wt ~ U(0,0.5)、信号 ~ U(−0.5,0.5)） | `WarmupSchedule`：wt 各维 0.33 起、每块 ±0.05、clip **[0.20,0.45]**（Cp 保持最优的 86%~100%，E[ΣCp]=2.82 ≈ 95% 最优）；信号维**恒 0**（SOC 目标语义 ⇒ `soc_target ≡ 3`；影子电价语义 ⇒ 中性 0）——两者都等于 actor 的 `init_wt_action_bias(value=0.33, sig_value=0.0)`，即 warmup 与策略起步是**同一个点**（6 个 TD3 项目的风机起始点已统一为 0.33） |
 | 下层 BESS（BESS-RL 的 6 个项目） | `agent_L.random_action()`（每步随机 pb） | `WarmupBessRule`：RBB 窗口内"一步填平"跟踪 SOC 目标（语义与各项目 `SocTracker.act` 逐位相同，有对照断言）；该步**真实的** (s_L, a_L=规则命令, r2, c2, s_L′) 经 `fill_bess_transition()` 入池（"事后填入"，a_L 不再取 agent 抽的随机值） |
 | bias 触发 | `step == args.warmup`（不可达） | `hsrl_agent_init.BiasInitTracker`：warmup 期逐块收集，在 **warmup 之后第一个块末**一次性应用（`first_trigger_step(warmup)`），且排在 `step > warmup` 的首次更新之前 |
 
