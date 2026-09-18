@@ -99,12 +99,13 @@ PRRBB ──(加 LLM)──→ PRLE          TD3PRRBB ──(加 LLM)──→ T
 - `td3perrb` ← `td3prrlrb`：**唯一差异是奖励不分段**（收益权重与风险系数恒取 1.0）
 - `td3per`（**反向改造**：`td3perrb` 的上层 + `td3per` 自己的 RL 下层）：
   上层 6 维动作第 6 维语义由"影子电价"改为 **SOC 目标信号**（与 td3perrb 逐项一致：
-  非分段奖励、块末 gap 罚、相位观测、逐维探索噪声、`lam1∈[3,100]`、每块 2 次更新）；
+  非分段奖励、块末 gap 罚、相位观测、逐维探索噪声、`lam1∈[0.967,4.833]`、每块 2 次更新）；
   下层仍是 TD3+PER 的 RL BESS，但信号与追踪目标同为 SOC 目标
-  （观测第 3 维 `soc_target/10`、`r2 = −100·clip_amount`、
-  `c2 = 1000·slack`，其中 `slack = max(0, |target−SOC'| − |target−SOC_best|)` 为
-  "能力内追踪失败量"、`SOC_best = SOC + g·clip(δ/g, 窗口)` 即规则下层的动作——
-  块首够不着的目标跳变不计费，零成本动作恰是规则 `SocTracker`）。
+  （观测第 3 维 `soc_target/10`、`r2 = −1·clip_amount`、
+  `c2 = +1·trackerr [MW]`（到**参考集合** = Soctrack范围 ∩ 平抑窗口 的距离）：
+  `F ≠ ∅` 时零成本集合是该区间；`F = ∅` 时**不存在范围, 只有纯粹一个竭力值 `r*`**
+  （窗口里离 Soctrack 范围最近的端点）, 顶到它才不罚；
+  块首够不着的目标跳变由 r1 块末 gap 罚承接）。
   ⚠️ 改造前的 `output/TD3PER-run*` 权重（4 维 H 观测 + 影子电价下层）与新代码不兼容。
 - `td3leprrlrb` ← `td3prrlrb`：增加 **LLM 在线微调风速分段阈值**（±1 m/s 硬约束）+ 回放池 relabel
 - `td3prle` ← `td3prrbb`：增加 LLM 元控制器；`prle` ← `prrbb` 同理
@@ -658,9 +659,10 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 逐位一致（20000 组随机含 3080 组不可行窗口，max|Δ|=0）、transition 填入计数。
 
 **注（"事后填入"能做什么、不能做什么）**：BESS-RL 项目的 warmup 期 r2/c2 在这些奖励定义下
-**天然接近 0** —— `td3per` 的 `c2 = 1000·slack` 以规则动作作为零参照（slack≡0）、`r2 = −100·clip_amount≡0`；
+**天然接近 0** —— SOC 目标支（`td3per`/`td3prrbb`/`prle`）的零成本动作**就是**规则动作
+`clip(δ/g, 平抑窗口)`（参考集合由它定义 ⇒ `trackerr ≡ 0`），且 `r2 = −1·clip_amount ≡ 0`（规则动作不越窗）；
 `per/prrbb`（影子电价支）的 `r2 = 0.1·shadow_profit − 1·clip_amount` 而影子价恒 0（`shadow_profit ≡ 0`）；
-SOC 目标支（`td3per/td3prrbb/prle/td3prle`）的 `r2 = −1·clip_amount` 本身就与目标无关。
+`td3prle` 的二次势 c2 以目标为中心、warmup 期目标恒 3.0 ⇒ 仅在 SOC≠3 时非零。
 所以本机制保证的是**环境侧行为正常 + H 层 warmup 基线可用 + L buffer 内是真实的 (s,a,r,c,s′) 行**，
 **不等价于对 L 的行为克隆**；若要 L 真正 warm start 到规则，需要另加监督项或塑形奖励（见 `hsrl_warmup.py` 文档）。
 

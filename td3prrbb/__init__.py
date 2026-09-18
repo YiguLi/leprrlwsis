@@ -16,7 +16,8 @@ with PRRBB's Wind × Price Segmented Reward structure.
   + W_GAP*unfeasible_gap 编码波动/平抑可行性风险;
   L 层 (SOC 目标追踪口径, 单一真源 hsrl_soctarget):
       a6 → soc_target = clip(3+5a6, 0.5, 5.5); r2 = −1·clip_amount;
-      c2 = 10·slack (能力内追踪失败量; 零成本动作 = 规则 SocTracker).
+      c2 = +1·trackerr [MW] (到参考集合=Soctrack范围∩平抑窗口的距离; 零成本动作 =
+      规则 SocTracker; F=∅ ⇒ **无范围, 只有纯粹一个竭力值 r***, 顶到才不罚).
 
 File layout follows prrbb (own myfunc / rule_bess / main) and td3per
 (own ddpg agent / main):

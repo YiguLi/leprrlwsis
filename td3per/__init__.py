@@ -9,12 +9,14 @@ TD3 (Twin Delayed Deep Deterministic Policy Gradient) 结合 PER 与拉格朗日
   * 上层 H 与 td3perrb 完全一致 —— 非分段奖励 (收益权重/c1 风险系数恒 1.0,
     W_GAP=10), 第 6 维动作语义由"影子电价"改为 **SOC 目标信号**
     (a6 → soc_target = 3 + 5·a6 ∈ [0.5, 5.5], 块级固定), 块末 SOC 目标
-    可行性罚进入 c1, H 观测 = 4 维基础 + 24h 相位特征, lam1 ∈ [3,100]。
+    可行性罚 uniform 时进 r1 (legacy 进 c1); H 观测 = 4 维基础 + 24h 相位特征;
+    uniform 下 lam1 ∈ [0.967, 4.833] 初值 0.967 (乘性对偶)。
   * 下层 L 保留 td3per 自己的 BESS 操作 (TD3+PER+EMA 对偶+RBB 硬裁剪),
     只把信号/追踪目标换成 SOC 目标: 5 维蒸馏观测第 3 维 = soc_target/10,
-    r2 = −1·clip_amount, c2 = 10·slack (能力内追踪失败量:
-    slack = max(0, |target−SOC'| − |target−SOC_best|),
-    SOC_best = SOC + g·clip(δ/g, RBB 窗口) 即规则下层动作), lam2 ∈ [10,500]。
+    r2 = −1·clip_amount, c2 = +1·trackerr [MW] (两区间分治, 单一真源 hsrl_soctarget:
+    参考集合 = Soctrack范围[δ/(g·n_rem), δ/g] ∩ 平抑窗口; 空交集 ⇒ **不存在范围,
+    只有纯粹一个竭力值 r*** = 窗口里离该范围最近的端点, 顶到才不罚);
+    uniform 下 lam2 ∈ [1, 20] 初值 1.0, d_block_L = 1.2 (⇔ 0.02 MWh/块)。
 
 Key differences from SP_DDPG:
   1. Twin critics per channel: MIN of the profit pair in targets and

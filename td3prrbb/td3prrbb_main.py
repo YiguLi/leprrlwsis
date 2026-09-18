@@ -20,20 +20,25 @@ Reward structure (td3prrbb_myfunc.Cal_Rew_PRRBB):
   Upper (H): r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
                   - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                   wT = wT_u(u)×wT_p(pr), wB ≡ 1.0 (【本轮变更】BESS 分段系数已去掉)
-             c1 = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + 50*unfeasible_gap
+             c1: uniform(默认 --c1-mode) = P_F + 20*(P_F-3)+   [MW·step]  (hsrl_cost.fluct_cost)
+                 legacy  = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + W_GAP(50)*unfeasible_gap
   Lower (L) —— 两区间分治 (hsrl_soctarget):
              r2 = −1·clip_amount      [MW] 越出平抑窗口的裁剪量
              c2 = +1·trackerr         [MW] 实际施加 pb 到参考集合的距离
                   参考集合 = Soctrack范围[δ/(g·n_rem), δ/g] ∩ 平抑窗口
-                             (空交集 ⇒ 最近可达端点 = 尽力而为, 不罚)
-             零成本集合 = 该区间 (L 可在「摊还端…一步填平端」间任选努力水平)
+                    F ≠ ∅ ⇒ **区间**（L 可在「摊还端…一步填平端」间任选努力水平）
+                    F = ∅ ⇒ **不存在范围, 只有纯粹一个竭力值 r*** = W 里离 B 最近的端点:
+                            只有顶到 r* 才不罚, 两侧偏离都按 |pbrule − r*| 线性计费
+                            (够不着的缺口不可达 ⇒ 由上层块末 gap 罚承接)
 
 Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
   H: EMA   ← (1-0.02)*EMA + 0.02*sum_c1          (每 5 步块)
-     lam1  ← clip(lam1 + 0.01*(EMA − d_block_H), 3, 20), 初始 5.0
-     d_block_H 初始 1.2, curriculum 连续 100 次满足则减半, 地板 0.3
-  L: lam2  ← clip(lam2 + 0.01*(EMA − d_block_L), 10, 100)
-     d_block_L 初始 14.0, curriculum 减半地板 1.75
+     uniform: 乘性 lam1 ← clip(lam1*exp(0.02*(EMA/d_block_H − 1))),
+              lam1 ∈ [0.967, 4.833], 初值 0.967, d_block_H = 15.0 (= 3 MW × 5 步)
+     legacy : 加性 lam1（本项目原式, lam1 ∈ [3, 50]）
+  L: EMA ← 0.98*EMA + 0.02*sum_c2
+     lam2 ← clip(lam2 + 0.16*(EMA − d_block_L), 1, 20), 初值 1.0
+     d_block_L 初始 1.2 (⇔ 允许搁置 0.02 MWh/块), curriculum 减半地板 0.15
 """
 import os
 import sys
@@ -144,7 +149,7 @@ def train(num_iterations_H,
     d_block_H = _h['d_block'] if _h else 1.2         # 初值: 每块 sum_c1 预算
     d_block_H_min = _h['d_block_min'] if _h else 0.3     # curriculum 收紧地板
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    # 下层 SOC 目标口径 (单一真源 hsrl_soctarget): r2 = −1·clip, c2 = 10·slack
+    # 下层 SOC 目标口径 (单一真源 hsrl_soctarget): r2 = −1·clip_amount, c2 = +1·trackerr [MW]
     d_block_L = hst.L_D_BLOCK
     d_block_L_min = hst.L_D_BLOCK_MIN
     soc_tol_upper = float(getattr(args, "soc_tol", hc.SOC_TOL))   # 块末残差豁免
@@ -891,7 +896,9 @@ if __name__ == "__main__":
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     # L 层对偶改 EMA 实际成本更新 —— lam2 不再读 critic (Q_c)，断高估→顶死传导；
-    #     lam2 ∈ [10, 500]，ema_alpha=0.02 (时间常数~50块=250步), ema_lam_lr=1.0  (c2 口径 ÷100 后同步 ×100)
+    #     lam2 ∈ [L_LAM_MIN, L_LAM_MAX] = [1, 20]（MW 口径兑换率"MW 追踪缺口 : MW 越窗"），
+    #     初值 1.0，ema_alpha=0.02 (时间常数~50块=250步)，加性步长 ema_lam_lr = L_EMA_LAM_LR = 0.16
+    #     （÷100 时代是 1.0/MWh 口径 ⇒ ×1/6.1 保持同一物理步长）；d_block_L = 1.2 ⇔ 0.02 MWh/块
     #     蒸馏观测 5 维 = [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
     # L 层(步骤A): policy_delay/--policy_noise 独立于 H —— 放松到 delay=1+noise≈0 时节奏接近 DDPG
     # (twin critic 与 EMA 对偶仍保留, 仅去掉延迟更新与 target smoothing 对窄可行窗的抹平)

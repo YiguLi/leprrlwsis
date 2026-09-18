@@ -18,26 +18,35 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
       - 观测 (5 维蒸馏) = [pbrulemin/10, pbrulemax/10, **soc_target/10**, SOC/10, u/10]
         (第 3 维原为 shadow_price);
       - r2 = −1·clip_amount            (原影子套利项随信号语义一起删除);
-      - c2 = 10·slack,  slack = max(0, |target−SOC'| − |target−SOC_best|),
-        SOC_best = SOC + g·clip(δ/g, RBB 窗口)  ← 规则 SocTracker 的动作;
-        只罚"本步能做到却没做"的部分 —— 块首够不着的目标跳变不计费, 零成本动作
-        恰好是规则下层 (见 td3per_myfunc.soc_track_slack);
-      - lam2 ∈ [1, 20] (兑换率口径), d_block_L = 1.2 → 地板 0.15, 每块 10 次更新;
+      - c2 = +1·trackerr [MW] (参考集合 = Soctrack范围 ∩ 平抑窗口),
+        F ≠ ∅ ⇒ 该区间内任选努力水平; F = ∅ ⇒ **不存在范围, 只有纯粹一个竭力值 r***,
+        顶到 r* 才不罚、两侧偏离都按 |pbrule − r*| 线性计费 (缺口由 r1 块末 gap 罚承接);
+        零成本动作仍是规则下层 (旧名 soc_track_slack 保留为兼容别名);
+      - lam2 ∈ [1, 20] (兑换率口径"MW 追踪缺口 : MW 越窗"), 初值 1.0, d_block_L 1.2 → 地板 0.15,
+        每块 1 次 EMA 对偶更新 (加性步长 0.16);
       - L 层折扣/探索按 td3per 原口径: --l_discount 0.98 (步级), --l_epsilon 50000。
 
 奖励 / 成本口径
 ----------------
 H: r1 = pr·P_G·dt − 490·max(−pbrule,0)·dt − penalty_NN_H          (P_G = ptur − pbrule)
-    c1 = 1.0·[10·(P_F−3)⁺ + 0.1·P_F] + 10·unfeasible_gap
-         + [块末] 10·max(0, |soc_target − SOC_末| − 0.1)
-L: r2 = −1·clip_amount
-    c2 = 10·slack,  slack = max(0, |target−SOC'| − |target−SOC_best|)
-         SOC_best = SOC + g·clip(δ/g, RBB窗口)   (能力内追踪失败量; 见 myfunc)
+    − [块末] W_GAP(10)·max(0, |soc_target − SOC_末| − SOC_TOL(0.1))   (uniform: 进 r1; legacy: 进 c1)
+    c1: uniform(默认 --c1-mode) = P_F + 20·(P_F−3)⁺  [MW·step]       (hsrl_cost.fluct_cost)
+        legacy = 1.0·[10·(P_F−3)⁺ + 0.1·P_F] + W_GAP(10)·unfeasible_gap
+L: r2 = −1·clip_amount   [MW] 越出平抑窗口的裁剪量
+    c2 = +1·trackerr [MW] = 实际施加 pb（由 SOC 变化反解）到**参考集合**的距离
+         参考集合 = Soctrack范围[δ/(g·n_rem), δ/g] ∩ 平抑窗口（两区间分治, hsrl_soctarget）
+           F ≠ ∅ ⇒ 区间（L 可在「摊还端…一步填平端」间任选努力水平）
+           F = ∅ ⇒ **不存在范围, 只有纯粹一个竭力值 r*** = W 里离 B 最近的端点:
+                   只有顶到 r* 才不罚, 两侧偏离都按 |pbrule − r*| 线性计费（见 myfunc）
 
 对偶上升 (两层都是 EMA 实际块成本)
 ----------------------------------
-    H: EMA ← 0.98·EMA + 0.02·sum_c1;  lam1 ← clip(lam1 + 0.01·(EMA − d_block_H), 3, 100)
-    L: EMA ← 0.98·EMA + 0.02·sum_c2;  lam2 ← clip(lam2 + 0.01·(EMA − d_block_L), 10, 500)
+    H: EMA ← 0.98·EMA + 0.02·sum_c1
+       uniform: 乘性 lam1 ← lam1·exp(0.02·(EMA/d_block_H − 1)),
+                lam1 ∈ [0.967, 4.833], 初值 0.967, d_block_H = 15.0 (= 3 MW × 5 步)
+       legacy : 加性 lam1（本项目原式）
+    L: EMA ← 0.98·EMA + 0.02·sum_c2;  lam2 ← clip(lam2 + 0.16·(EMA − d_block_L), 1, 20), 初值 1.0
+       d_block_L = 1.2 (⇔ 允许搁置 0.02 MWh/块), curriculum 减半地板 0.15
 """
 import os
 import sys
@@ -173,7 +182,7 @@ def train(num_iterations_H,
     d_block_H = _h['d_block'] if _h else 50.0        # 初值: 每块 sum_c1 预算 (先松后紧; 与 td3perrb 一致)
     d_block_H_min = _h['d_block_min'] if _h else 5.0     # 地板: 10·max(0,|δ|−0.1) ≤ 5 → 含死区总 |δ| ≤ 0.6
     # L 层 EMA 对偶 —— 每 5 步块实际成本预算 d_block_L (与 sum_c2 同口径)
-    #   sum_c2 = 10·slack 的块内累计, slack = "能力内追踪失败量" (见 myfunc)
+    #   sum_c2 = +1·trackerr 的块内累计 [MW] (参考集合见 myfunc / hsrl_soctarget)
     #   * 尽力追的 L: sum_c2 ≡ 0;  完全不动而 |δ|≥A: 每步 ~50, 每块 ~250;
     #     最坏 (反向满功率): 每步 ≤ 340。
     #   * 于是 d_block_L = 20 现读作"允许每块浪费 ≈0.02 MWh 的可达量 (≈0.4 步能力)",
@@ -349,7 +358,7 @@ def train(num_iterations_H,
         # ================================================================
         # 下层 L 奖励/成本 (SOC 目标追踪口径)
         #   r2 = −1·clip_amount                 (RBB 硬裁剪量)
-        #   c2 = 10·slack, slack = max(0, |target−SOC'| − |target−SOC_best|)
+        #   c2 = +1·trackerr [MW] = 实际施加 pb 到参考集合(=Soctrack范围∩平抑窗口)的距离
         #        SOC_best = SOC + g·clip(δ/g, 窗口) —— 规则 SocTracker 的动作;
         #        只罚"本步能做到却没做"的部分 (块首够不着的跳变不计费)
         # ================================================================
@@ -1049,9 +1058,10 @@ if __name__ == "__main__":
     # 下层 L: 保留 td3per 自己的 RL BESS 操作
     #   * 观测 5 维蒸馏 = [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]
     #   * r2 = −1·clip_amount
-    #   * c2 = 10·slack (能力内追踪失败量: 只罚"本步能做到却没做"的部分,
-    #        零成本动作 = 规则 SocTracker 的 clip(δ/g, 窗口); 见 myfunc.soc_track_slack)
-    #   * lam2 ∈ [10, 500] 初始 10.0; 每块 10 次更新; 步级折扣 --l_discount
+    #   * c2 = +1·trackerr [MW] (实际施加 pb 到参考集合的距离; 零成本动作 = 规则 SocTracker,
+    #        F=∅ 时参考集合退化为单点竭力值 ⇒ 只有顶到它才不罚; 见 hsrl_soctarget)
+    #   * lam2 ∈ [hst.L_LAM_MIN, hst.L_LAM_MAX] = [1, 20] 初值 1.0;
+    #        每块 1 次 EMA 对偶更新 (加性步长 L_EMA_LAM_LR = 0.16); 步级折扣 --l_discount
     agent_L = SP_TD3(nb_states=5, nb_actions=1, args=args,
                      lam_max=hst.L_LAM_MAX, lam_min=hst.L_LAM_MIN,
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=1.0,
@@ -1071,8 +1081,8 @@ if __name__ == "__main__":
                  args.l_policy_delay, args.l_policy_noise, args.policy_delay, args.policy_noise,
                  agent_L.discount, agent_H.discount, args.l_epsilon, args.epsilon))
     prCyan('下层奖励/成本口径: r2 = -1·clip_amount; '
-           'c2 = 10·slack, slack = max(0, |target-SOC\'| - |target-SOC_best|), '
-           'SOC_best = SOC + g·clip(δ/g, RBB窗口) (能力内追踪失败量); '
+           'c2 = +1·trackerr [MW] (dist(实际施加 pb, 参考集合=Soctrack范围∩平抑窗口)); '
+           'F=∅ ⇒ 无范围, 只有纯粹一个竭力值 r* (顶到才不罚); '
            'L 观测第 3 维 = soc_target/10 (原 shadow_price)')
     #TODO 是否预训练
     # agent_H.load_weights('output/1_2310S-run18')

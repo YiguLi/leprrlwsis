@@ -187,7 +187,7 @@ def main():
                     obs, obs2, action_env, rbb_info,
                     penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru))
             elif proj_type == 'TD3PRRBB':
-                # TD3PRRBB: SOC 目标支 (r2 = −1·clip, c2 = 10·slack)
+                # TD3PRRBB: SOC 目标支 (r2 = −1·clip_amount, c2 = +1·trackerr [MW])
                 r1, c1, r2, c2, _ = Cal_Rew_TD3PRRBB(
                     obs, obs2, action_env, rbb_info,
                     penalty_NN_H=penalty_NN_H, time=TIME, ptur=float(pw_tru))

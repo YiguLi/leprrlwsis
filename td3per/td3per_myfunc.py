@@ -22,11 +22,13 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
       直接比较"目标 vs 自身"); 见 build_L_obs_distilled()。
   r2 = −1 · clip_amount              (clip_amount = |pb − pbrule|, RBB 硬裁剪量)
       —— 原影子套利项 (−pr·pbrule 形式) 随信号语义一起删除。
-  c2 = 10 · slack                    (能力内追踪失败量, 进拉格朗日约束口)
-      slack = max(0, |target − SOC'| − |target − SOC_best|),
-      SOC_best = SOC + g·clip(δ/g, 窗口)   ← 规则 SocTracker 的动作
-      —— 只罚"本步能做到却没做"的部分: 块首够不着的跳变(结构性不可行)不计费,
-         零成本动作恰好就是规则下层; 见 soc_track_slack()。
+   c2 = +1 · trackerr                 [MW] 两区间分治 (单一真源 hsrl_soctarget)
+       参考集合 = Soctrack范围[δ/(g·n_rem), δ/g] ∩ 平抑窗口 [pbrulemin, pbrulemax]
+       trackerr = dist(实际施加的 pb (由 SOC 变化反解), 参考集合)
+       —— F ≠ ∅ ⇒ 零成本集合是该**区间** (L 可在「摊还端…一步填平端」间任选努力水平);
+          F = ∅ ⇒ **不存在范围, 只有纯粹一个竭力值 r*** = 窗口里离该范围最近的端点,
+                   顶到 r* 才不罚, 两侧偏离都按 |pbrule − r*| 线性计费
+                   (够不着的缺口不可达 ⇒ 由 r1 块末 gap 罚承接)。
 
   即: 下层的职责被收敛成 "在 RBB 可行窗口内贴住上层给的 SOC 目标";
       收益/波动/可行性由上层 r1/c1 + RBB 硬裁剪负责, 下层不再需要套利激励。

@@ -81,10 +81,14 @@ def train_prle(num_iterations_H,
     Reward structure (same as PRRBB):
       Upper (H): r1 = w_wind*pr*ptur*time + w_bess*(-pr*pbrule*time)
                       - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
-                 c1 = risk_coeff * (10*max(0,P_F-3) + 0.1*P_F)
-      Lower (L, SOC 目标语义): r2 = −1·clip_amount (影子套利项已删除)
-                 c2 = +1·trackerr [MW] (两区间: Soctrack范围 ∩ 平抑窗口;
-                                        空交集 ⇒ 最近可达端点)
+                      - [块末] W_GAP*max(0, |soc_target − SOC_末| − SOC_TOL)  (uniform: 进 r1)
+                 c1: uniform(默认 --c1-mode) = P_F + 20*(P_F-3)+  [MW·step]
+                     legacy = C1_RISK*(10*max(0,P_F-3) + 0.1*P_F) + W_GAP(50)*unfeasible_gap
+      Lower (L, SOC 目标语义): r2 = −1·clip_amount [MW] (影子套利项已删除)
+                 c2 = +1·trackerr [MW] = 实际施加 pb 到参考集合的距离
+                      参考集合 = Soctrack范围 ∩ 平抑窗口（两区间分治, hsrl_soctarget）
+                        F ≠ ∅ ⇒ 区间；F = ∅ ⇒ **无范围, 只有纯粹一个竭力值 r***
+                                 = W 里离 B 最近的端点（顶到才不罚, 两侧偏离线性计费）
 
     PRLE additions:
       - Sub-step context accumulation for reward relabeling
@@ -915,7 +919,8 @@ if __name__ == "__main__":
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     # L agent: also PRLE_DDPG (block_size=1, stores context=None — no relabeling context)
-    # L 层对偶改 EMA 实际成本更新; lam2 ∈ [10, 200] (500→200, 抑制对偶顶格后成本通道失效)
+    # L 层对偶改 EMA 实际成本更新; lam2 ∈ [L_LAM_MIN, L_LAM_MAX] = [1, 20] (MW 口径兑换率),
+    #   初值 1.0, 加性步长 L_EMA_LAM_LR = 0.16, d_block_L = 1.2 (⇔ 0.02 MWh/块)
     agent_L = PRLE_DDPG(nb_states=5, nb_actions=1, args=args,
                         lam_max=hst.L_LAM_MAX, lam_min=hst.L_LAM_MIN,
                         ema_lam=True, ema_alpha=0.02, ema_lam_lr=hst.L_EMA_LAM_LR)
