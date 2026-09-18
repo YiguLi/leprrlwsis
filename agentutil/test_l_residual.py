@@ -293,7 +293,8 @@ print('  不可行窗口 (真 RBB, {} 组): 命令 ≠ 施加值 {:.1f}%; r2 打
       ' 最坏 r2={:.1f}'.format(_n_inf, 100.0 * _n_disagree / _n_inf,
                               100.0 * _n_cap / _n_inf, _worst_inf_r2))
 print('  ⇒ c2 已豁免但 r2 仍按 |cmd − 物理边界| 封顶计费, 而 Δ=±1 MW 的杠杆 ≤ {:.3f} MW'
-      ' (基本不可控; 是否像 c2 一样豁免 r2 是待定口径)'.format(_max_leverage))
+            ' (基本不可控). 口径已决定保留 (只记录不改): 见 hsrl_soctarget.lower_reward 文档与 README'
+      .format(_max_leverage))
 
 # ------------------------------------------------------------------ C
 print('=' * 84)

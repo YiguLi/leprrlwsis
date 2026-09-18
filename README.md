@@ -597,6 +597,12 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 
 * `a6 → soc_target = clip(3 + 5·a6, 0.5, 5.5)`（块级 5 步固定）
 * `r2 = −1·min(clip_amount, 20)`（`clip_amount = |pb_cmd − pbrule|` = **两段 clip 合计**：±10 执行器 + 平抑窗口；各 main 传命令值，r2 封顶 20 MW；影子套利项随语义删除）
+  * ⚠ **已知口径洞（保留不改，2026-03 决定）**：**窗口不可行**（`pbrulemin > pbrulemax`）时 RBB
+    **完全忽略命令**、改施加物理边界 `pbphysicsmin/max`（可与命令**反号**），而 `c2` 已按设计豁免
+    （`trackerr ≡ 0`）**但 `r2` 没有** ⇒ 该步 `r2` 可打到封顶 −20，规则动作（Δ=0）也躲不掉，
+    且 `Δ` 对它的杠杆 ≤ 1 MW/MW（不可控）。实测（起点+阵风工况 387 组）：54.8% 命令 ≠ 施加值、
+    48.1% 的 r2 打到 −20。影响只落在 L 的 reward/critic（λ2 只吃 `c2`，对偶不受影响）；
+    故 warmup 的"零成本行"在**这 ~1% 的步上不成立**。见 `agentutil/test_l_residual.py` 第 B4 节
 * 块末追踪偏好进 **r1**：`10·max(0, |soc_target − SOC_end| − 0.1)`（uniform；legacy 进 c1）
 * `c2 = +1·trackerr` [MW] —— **两区间分治**：Soctrack 范围 `[δ/(g·n_rem), δ/g]`（摊还端…一步填平端，
   `n_rem = 5 − step%5`）交平抑窗口 `[pbrulemin, pbrulemax]` 得参考集合；`trackerr` = 实际施加的

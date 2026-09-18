@@ -337,6 +337,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     if n_rem is None:
         raise ValueError('Cal_Rew_PRRBB: 需要 n_rem (块内剩余步数 = 5 − step%5)')
     soc_dev = Cal_soc_deviation(SOC_new, wind_level)   # 仅诊断: 原安全带偏离
+        # r2 = −1·min(clip_amount,20); 不可行窗口下 RBB 忽略命令(见 hst.lower_reward 的 ⚠), 本口径保留
     r2 = hst.lower_reward(clip_amount)
     c2, c2_info = hst.lower_cost_soc_track(
         soc_target, float(observation[2]), SOC_new,

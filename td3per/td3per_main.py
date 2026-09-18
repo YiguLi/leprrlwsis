@@ -395,6 +395,7 @@ def train(num_iterations_H,
         is_infeasible = rbb_info['is_infeasible']
         inevitable_violation = rbb_info['inevitable_violation']
 
+                # 不可行窗口下 RBB 会忽略命令、改施加物理边界 ⇒ 该步 r2 可打到封顶 (口径保留; 见 hst.lower_reward)
         r2 = lower_reward(clip_amount)
         c2, c2_info = lower_cost_soc_track(
             soc_target, E_current, float(observation2[2]),

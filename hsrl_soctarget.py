@@ -308,6 +308,15 @@ def lower_reward(clip_amount, coef=None, cap=None):
     若改传 CheckAction 之后的值，则 |pb_cmd| > 10 时 `pbrule` 与 r2 都不再随动作变化
     ⇒ 该方向失去梯度（"±10 死区"，run165 曾出现 |raw|≈900 MW 而 clip≡10）。
 
+        ⚠ **不可行窗口（`pbrulemin > pbrulemax`）下 r2 与 c2 不对称**（已决定保留本口径, 只记录）:
+    `c2` 在该步按设计豁免（`soc_range` 直接 `trackerr = 0`）, 但 `r2` 仍按上式计算, 而这时
+    `RuleBasedBESS.compute_pbrule` 会**完全忽略命令**、改施加物理边界 `pbphysicsmin/max`
+    （可能与命令**反号**）⇒ `clip_amount` 可以打到封顶 20, **规则动作(Δ=0)也躲不掉**, 且
+    `Δ = ±1 MW` 的杠杆 ≤ 1 MW（基本不可控）。实测（起点+阵风工况, 387 组不可行窗口）:
+    54.8% 命令 ≠ 施加值、48.1% 的 r2 打到 −20、最坏 −20；见
+    `agentutil/test_l_residual.py` 第 B4 节（含真 RBB 采样断言）。
+    影响面: λ2 只吃 c2 ⇒ 对偶不受影响; 受影响的只有 L 的 reward/critic 目标。
+
     `coef=None` ⇒ 取 `L_CLIP_COEF`（=1.0），即 r2 与 c2 同为 MW 口径、系数同为 1。
     `cap=None`  ⇒ 取 `L_CLIP_CAP`（=20.0 MW，只截断病态饱和，不改真实窗内容量）；
     传 `cap=float('inf')` 可关闭封顶。
