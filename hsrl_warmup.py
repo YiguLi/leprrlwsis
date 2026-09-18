@@ -282,6 +282,77 @@ def add_warmup_args(parser):
     return parser
 
 
+def check_residual_baseline(warmup_rule, sched, args, baseline_fn,
+                            soc_target_from_signal=None, n_cases=240, seed=12345):
+    """**残余动作**项目的启动自检: warmup 规则臂必须与策略期基线是**同一条规则**。
+
+    残余动作项目 (`pb_cmd = 规则基线 + Δ`, 见 `hsrl_soctarget.rule_action`) 的 warmup
+    规则臂写进 buffer 的是 `Δ ≡ 0`, 它的"命令"就是**基线本身**。所以:
+
+      * 若 `WarmupBessRule` 与 `baseline_fn` 的参数有漂移 (eta / time / rated_power /
+        soc_tol 不一致), warmup 期的 (s, Δ=0, r2=0, c2=0) 行就自相矛盾 —— 它在教网络
+        "Δ=0 是最优", 而 Δ=0 实际并不等于策略期的零成本动作。这类漂移**必须当期报错**,
+        所以本函数直接抛 AssertionError, 不做"提示后继续"。
+      * `--warmup_soc_target` 在残余动作下**不生效**: 基线跟随 H 信号给出的目标
+        (固定调度下信号维恒 0 ⇒ `soc_target_from_signal(0)` = 3.0), 这正是策略期基线
+        的做法, 也是 `Δ≡0` 语义自洽的前提。给了别的值就提示一句。
+      * 上层若走 `--warmup_sched random` 臂, 信号维不再恒 0 ⇒ 规则将跟踪**每块的随机
+        目标** (改造前的实现固定追 3.0)。这是行为变化, 提示一句。
+
+    Parameters
+    ----------
+    warmup_rule : WarmupBessRule or None   None ⇒ 对照臂 (`--warmup_bess random`)
+    sched       : WarmupSchedule
+    args        : argparse.Namespace (读 --warmup_soc_target / --warmup_sched)
+    baseline_fn : callable(target, E, lo, hi) -> float
+        策略期基线 (各 main 传 `lambda: hst.rule_action(..., eta_c=rbb_system.eta_c, ...)`)
+    soc_target_from_signal : callable or None  `a6 -> soc_target` (单一真源)
+
+    Returns
+    -------
+    dict(n_checked=int, target_at_signal0=float or None, sched_signal_fixed=bool, rule_arm=bool)
+    """
+    try:
+        from util import prYellow
+    except Exception:                                       # pragma: no cover
+        prYellow = print
+    sched_signal_fixed = bool(getattr(sched, 'enabled', True))
+    if warmup_rule is None:                # 对照臂: 绝对随机功率, 与基线无关
+        return dict(n_checked=0, target_at_signal0=None,
+                    sched_signal_fixed=sched_signal_fixed, rule_arm=False)
+
+    lo_hi = [(-3.0, 3.0), (-6.5, -0.4), (0.3, 2.5), (2.0, 1.0),
+             (-10.0, 10.0), (0.0, 0.0), (2.0, 1.0)]   # 含不可行窗口 (2>1) 与 0 窗口
+    rg = np.random.default_rng(seed)
+    n_checked = 0
+    for k in range(n_cases):
+        E = float(rg.uniform(0.2, 5.8))
+        tgt = E if k % 7 == 0 else float(rg.uniform(0.5, 5.5))   # 含 δ=0 死区样本
+        lo, hi = lo_hi[int(rg.integers(0, len(lo_hi)))]
+        a = float(warmup_rule.act(E, lo, hi, tgt))               # warmup 规则臂的命令
+        b = float(baseline_fn(tgt, E, lo, hi))                   # 策略期基线
+        assert abs(a - b) < 1e-12, (
+            'warmup 规则臂与残余基线不是同一条规则 (Δ≡0 将不再等于策略期零成本动作): '
+            'E={:.6f} target={:.6f} W=[{:.3f},{:.3f}] warmup_rule={:.9f} baseline={:.9f} '
+            '| 检查 eta_c/eta_d/time/rated_power/soc_tol 是否一致'.format(E, tgt, lo, hi, a, b))
+        n_checked += 1
+
+    tgt0 = None
+    if soc_target_from_signal is not None:
+        tgt0 = float(soc_target_from_signal(SIG_VALUE))
+        given = float(getattr(args, 'warmup_soc_target', tgt0))
+        if abs(given - tgt0) > 1e-12 and sched_signal_fixed:
+            prYellow('[warmup] 残余动作: 规则臂跟随 H 信号目标 (= {:.3f}), '
+                     '--warmup_soc_target={:.3f} 不生效 (策略期基线也这么做, Δ≡0 才自洽)'
+                     .format(tgt0, given))
+    if not sched_signal_fixed:
+        prYellow('[warmup] --warmup_sched random: 信号维不再恒 0 ⇒ 规则臂跟踪**每块的随机 '
+                 'SOC 目标** (改造前固定追 {:.1f}); 若要复现旧行为请用 --warmup_sched fixed'
+                 .format(float(getattr(warmup_rule, 'soc_target', 3.0))))
+    return dict(n_checked=n_checked, target_at_signal0=tgt0,
+                sched_signal_fixed=sched_signal_fixed, rule_arm=True)
+
+
 def build_from_args(args, agent_H, agent_L=None):
     """按 args 构造 (WarmupSchedule, WarmupBessRule, BessFillStats)。"""
     nb_t = int(getattr(agent_H, 'nb_turbine', 5))

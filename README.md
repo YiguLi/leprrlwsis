@@ -681,7 +681,8 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 | 层 | 旧 | 新 |
 |---|---|---|
 | 上层动作 | `random_action()`（wt ~ U(0,0.5)、信号 ~ U(−0.5,0.5)） | `WarmupSchedule`：wt 各维 0.33 起、每块 ±0.05、clip **[0.20,0.45]**（Cp 保持最优的 86%~100%，E[ΣCp]=2.82 ≈ 95% 最优）；信号维**恒 0**（SOC 目标语义 ⇒ `soc_target ≡ 3`；影子电价语义 ⇒ 中性 0）——两者都等于 actor 的 `init_wt_action_bias(..., sig_value=0.0)`，即 warmup 与策略起步**同分布** |
-| 下层 BESS（BESS-RL 的 6 个项目） | `agent_L.random_action()`（每步随机 pb） | `WarmupBessRule`：RBB 窗口内"一步填平"跟踪 SOC 目标（语义与各项目 `SocTracker.act` 逐位相同，有对照断言）；该步**真实的** (s_L, a_L=Δ=0、cmd_pb=规则命令, r2, c2, s_L′) 经 `fill_bess_transition()` 入池（"事后填入"，a_L 不再取 agent 抽的随机值；残余动作下 buffer 存 Δ, 命令由 `cmd_pb` 单独记录） |
+| 下层 BESS（TD3 全系列 3 个项目，**残余动作**） | `agent_L.random_action()`（每步随机 pb） | **规则臂 = 策略期基线本身**：`pb_rule = hst.rule_action(H 信号给出的目标, SOC, W, n_rem)`（与策略期用的是同一个 `rbb_system` 参数），写进 buffer 的动作是 **Δ ≡ 0**。启动自检 `hwarm.check_residual_baseline()` 逐位核对"warmup 规则行为体 = 策略期基线"（eta/time/rated_power/soc_tol 任一漂移即报错）；默认调度下与改造前的 `WarmupBessRule`(固定追 3.0) **逐位相同**（4400 组 max\|Δ\|=0，因固定调度信号维恒 0 ⇒ `soc_target_from_signal(0)=3.0=--warmup_soc_target`）。对照臂 `--warmup_bess random` 的环境行为**未变**（仍是绝对随机功率 `U(-10,10)` MW），只是 buffer 内改记为 Δ = cmd − rule |
+| 下层 BESS（其余 3 个 BESS-RL 项目: per / prrbb / prle） | `agent_L.random_action()`（每步随机 pb） | `WarmupBessRule`：RBB 窗口内"一步填平"跟踪 SOC 目标（语义与各项目 `SocTracker.act` 逐位相同，有对照断言）；该步**真实的** (s_L, a_L=规则的**绝对功率**命令, r2, c2, s_L′) 经 `fill_bess_transition()` 入池（"事后填入"，a_L 不再取 agent 抽的随机值） |
 | bias 触发 | `step == args.warmup`（不可达） | `hsrl_agent_init.BiasInitTracker`：warmup 期逐块收集，在 **warmup 之后第一个块末**一次性应用（`first_trigger_step(warmup)`），且排在 `step > warmup` 的首次更新之前 |
 
 **效果（同 day0 序列，离线干跑 5 seed）**：`r̄ = +70.4 元/块 ⇒ b_p ≈ +7042`（与 +9983 差 1.4×、同号），
@@ -690,8 +691,14 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 需要更贴近策略量级时可显式给 `--critic_bias_p 8000 --critic_bias_c 1000`。
 
 **开关**：`--warmup_sched {fixed,random}`、`--warmup_bess {rule,random}`、
-`--warmup_wt_start/_step/_lo/_hi`、`--warmup_soc_target`。
-**不变量测试**：`python agentutil/test_warmup_schedule.py` —— 触发点（warmup∈{199,200,201,204,500} 各恰好
+`--warmup_wt_start/_step/_lo/_hi`、`--warmup_soc_target`（**残余动作的 3 个 TD3 项目里不生效**：
+规则臂跟随 H 信号目标，固定调度下即 3.0；给了别的值会打印提示）。
+`--warmup_sched random` 在残余动作项目里是**行为变化**：信号维不再恒 0 ⇒ 规则臂跟踪每块随机目标
+（改造前固定追 3.0），启动时也会提示。
+**不变量测试**：`python agentutil/test_l_residual.py` 第 H 节 —— 规则行为体 ≡ `hst.rule_action`
+（同 target 逐位）、"改造前固定追 3.0" ≡ "改造后信号目标"（默认调度 4400 组逐位）、
+启动自检能抓住 eta_c/rated_power/soc_tol/time 漂移、对照臂随机动作口径未变。
+`python agentutil/test_warmup_schedule.py` —— 触发点（warmup∈{199,200,201,204,500} 各恰好
 触发一次且在首次更新前）、旧条件反例、调度边界/可复现/不吃全局 RNG、规则行为体与 `SocTracker.act`
 逐位一致（20000 组随机含 3080 组不可行窗口，max|Δ|=0）、transition 填入计数。
 

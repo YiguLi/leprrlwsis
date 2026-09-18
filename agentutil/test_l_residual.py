@@ -321,6 +321,9 @@ for proj, main_py in TD3_MAINS.items():
     # ⑥ 零初始化 + 探索半宽（默认 1.0 MW，旧式 ±0.05 比所需小 ~50 倍）
     assert 'zero_actor_output(agent_L' in f, proj
     assert re.search(r'--l_noise_amp.*?default=1\.0.*?type=float', f), proj
+    # warmup 规则臂必须与策略期基线**同一条规则** (启动自检), 且 Δ 恒 0
+    assert 'hwarm.check_residual_baseline(' in f, proj
+    assert "soc_target_from_signal=hst.soc_target_from_signal" in f, proj
     if proj == 'td3per':
         assert "agent_L.explore_amp = np.full(1, float(getattr(args, 'l_noise_amp', 1.0))" in f, proj
         assert "agent_L.explore_floor = np.zeros(1, dtype=np.float32)" in f, proj
@@ -429,6 +432,57 @@ _cp = flat(src('test_compare_projects.py'))
 assert 'residual' not in _cp and 'hst.rule_action' not in _cp, 'compare_projects 不在本次范围'
 print('  test_five_days: 3 个项目 residual=True (其余 6 个不标) + 规则基线补齐; ')
 print('  test_simple: residual_proj = TD3PER/TD3PRRBB/TD3PRLE; test_compare_projects 不在范围')
+
+# ------------------------------------------------------------------ H
+print('=' * 84)
+print('H. warmup 行为生成: 规则臂 = 策略期基线 (Δ≡0), 与改造前逐位同行为')
+print('=' * 84)
+# ① 默认调度的 warmup 目标不变: 信号维恒 0 ⇒ soc_target = 3.0 = SOC_TARGET = 改造前的 target
+_t0 = float(hst.soc_target_from_signal(hwarm.SIG_VALUE))
+assert abs(_t0 - 3.0) < 1e-15 and abs(hwarm.SOC_TARGET - _t0) < 1e-15, (_t0, hwarm.SOC_TARGET)
+_rule = hwarm.WarmupBessRule()                      # 默认: target=3.0, eta 0.98/0.98, dt 1/60, rated 10, soc_tol 0
+# ② 公式等价: warmup 规则行为体 ≡ 单一真源基线 (同 target)
+_w_same = max(abs(float(_rule.act(t, lo, hi, tgt))
+                  - float(hst.rule_action(tgt, t, lo, hi, nr)))
+              for (tgt, t, lo, hi, nr) in CASES)
+# ③ 行为等价: 改造前的调用 (_rule.act(E, lo, hi) 固定追 3.0) vs 改造后的基线 (信号目标)
+_w_old = max(abs(float(_rule.act(t, lo, hi))
+                 - float(hst.rule_action(hst.soc_target_from_signal(hwarm.SIG_VALUE), t, lo, hi, nr)))
+             for (tgt, t, lo, hi, nr) in CASES)
+assert _w_same == 0.0, _w_same
+assert _w_old == 0.0, _w_old
+print('  soc_target_from_signal(0) = {:.1f} = SOC_TARGET; 同 target 下 规则行为体 ≡ hst.rule_action:'
+      ' max|Δ|={:.1e}'.format(_t0, _w_same))
+print('  改造前规则 (固定追 3.0) vs 改造后基线 (信号目标): max|Δ|={:.1e} ({} 组, 默认调度 ⇒ 逐位相同)'
+      .format(_w_old, len(CASES)))
+# ④ 启动自检: 同一条规则 ⇒ 通过; 参数漂移 ⇒ 抛错; 对照臂 ⇒ rule_arm=False
+import argparse                                                 # noqa: E402
+_sched_fixed = hwarm.WarmupSchedule(nb_turbine=5, nb_actions=6, enabled=True)
+_sched_rand = hwarm.WarmupSchedule(nb_turbine=5, nb_actions=6, enabled=False)
+_args = argparse.Namespace(warmup_soc_target=3.0)
+_res = hwarm.check_residual_baseline(
+    _rule, _sched_fixed, _args,
+    lambda t, E, lo, hi: hst.rule_action(t, E, lo, hi, 5),
+    soc_target_from_signal=hst.soc_target_from_signal)
+assert _res['rule_arm'] and _res['n_checked'] > 0 and abs(_res['target_at_signal0'] - 3.0) < 1e-15, _res
+assert not hwarm.check_residual_baseline(None, _sched_fixed, _args, lambda t, E, lo, hi: 0.0)['rule_arm']
+for _kw in ({'eta_c': 0.90}, {'rated_power': 5.0}, {'soc_tol': 0.2}, {'time': 1.0 / 30}):
+    try:
+        hwarm.check_residual_baseline(
+            _rule, _sched_fixed, _args,
+            lambda t, E, lo, hi: hst.rule_action(t, E, lo, hi, 5, **_kw),
+            soc_target_from_signal=hst.soc_target_from_signal)
+        raise SystemExit('参数漂移 {} 未被自检抓住'.format(_kw))
+    except AssertionError:
+        pass
+print('  启动自检: 同规则通过 ({} 组); eta_c/rated_power/soc_tol/time 任一漂移 ⇒ AssertionError;'
+      ' 对照臂 ⇒ rule_arm=False'.format(_res['n_checked']))
+# ⑤ 对照臂 (--warmup_bess random) 的环境行为 = 改造前: 绝对随机功率 U(-rated, rated)
+_ddpg = src('td3per/td3per_ddpg.py')
+assert 'def random_action' in _ddpg and 'charge = 10.' in _ddpg \
+    and 'np.random.uniform(-charge, charge' in _ddpg, '对照臂随机动作口径变了'
+assert 'pb_cmd_L = float(delta_L[0])' in flat(src('td3per/td3per_main.py'))
+print('  对照臂: 环境侧仍是绝对随机功率 U(-10, 10) MW (random_action 未改), 仅 buffer 内改记为 Δ = cmd − rule')
 
 print('=' * 84)
 print('TEST OK')

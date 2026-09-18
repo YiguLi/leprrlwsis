@@ -228,6 +228,15 @@ def train(num_iterations_H,
     #                 (修 step == args.warmup 与块末 episode_steps%5==4 不同余导致永不触发的 bug;
     #                  触发点 = warmup 之后第一个块末, 仍在首次策略更新之前)
     warmup_sched, warmup_rule, bess_fill_stats = hwarm.build_from_args(args, agent_H, agent_L)
+    # 残余动作自检: warmup 规则臂写进 buffer 的是 Δ≡0 ⇒ 它的"命令"必须与策略期基线
+    # (同一个 hst.rule_action + 同一个 rbb_system 参数) **逐位相同**, 否则 warmup 行自相矛盾
+    hwarm.check_residual_baseline(
+        warmup_rule, warmup_sched, args,
+        lambda _tgt, _E, _lo, _hi: hst.rule_action(
+            _tgt, _E, _lo, _hi, 5,
+            eta_c=rbb_system.eta_c, eta_d=rbb_system.eta_d,
+            time=rbb_system.time, rated_power=rbb_system.rated_power),
+        soc_target_from_signal=hst.soc_target_from_signal)
     bias_init = hinit.BiasInitTracker.from_args(args)
     # 与 H agent 绑定同一 (γ, s): 估计口径 = critic 回归口径, 结构上不会分叉
     bias_init.value_scale = float(getattr(agent_H, 'value_scale', hc.value_scale()))
