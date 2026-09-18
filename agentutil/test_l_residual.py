@@ -192,9 +192,14 @@ def pen_of(tgt, prev, lo, hi, n_rem, pb_rule, d):
 
 
 worst_r2 = worst_c2 = 0.0
-n_point = n_interval = n_infeas = 0
-n_pt_ok = n_iv_ok = n_inf_ok = 0
+n_point = n_interval = n_infeas_skip = 0
+n_pt_ok = n_iv_ok = 0
 for (tgt, prev, lo, hi, n_rem) in CASES_REACH:
+    if lo > hi:
+        # 不可行窗口: 真 RBB **忽略命令**、改施加物理边界 ⇒ `rbb_applied = clip(cmd, ±rated)`
+        # 这个模型在这里是**错的**。真行为单列在 B4, 本断言组只覆盖可行窗口。
+        n_infeas_skip += 1
+        continue
     pb_rule = hst.rule_action(tgt, prev, lo, hi, n_rem)
     pb_app = rbb_applied(pb_rule, lo, hi)
     r2 = hst.lower_reward(abs(pb_rule - pb_app))          # RBB 的 clip_amount 口径
@@ -203,13 +208,7 @@ for (tgt, prev, lo, hi, n_rem) in CASES_REACH:
     worst_r2 = max(worst_r2, abs(r2))
     worst_c2 = max(worst_c2, abs(c2))
 
-    if info['infeasible_window']:
-        # 被迫吞吐: 整步不可归责 ⇒ 至少"减吞吐"方向完全免费; 但把命令推出 ±rated
-        # （执行器能力之外）的那一侧仍按两段 clip 计费 —— 这是物理事实, 不是罚项设计。
-        n_infeas += 1
-        n_inf_ok += int(min(pen_of(tgt, prev, lo, hi, n_rem, pb_rule, d)
-                            for d in (0.5, -0.5)) < 1e-9)
-    elif info['ref_is_point']:
+    if info['ref_is_point']:
         # F = ∅ ⇒ 只有"竭力值"免费 ⇒ **任何** Δ≠0 都在两个通道之一被计费
         n_point += 1
         n_pt_ok += int(min(pen_of(tgt, prev, lo, hi, n_rem, pb_rule, d)
@@ -229,20 +228,18 @@ assert worst_c2 < 1e-9, worst_c2
 n = len(CASES_REACH)
 print('  Δ≡0: max|r2|={:.3e}  max|c2|={:.3e}   (两通道同时归零, {} 组样本)'
       .format(worst_r2, worst_c2, n))
-print('  参考集合形态: 单点(F=∅) {:.1f}% / 区间 {:.1f}% / 窗口不可行 {:.1f}%'
-      .format(100.0 * n_point / n, 100.0 * n_interval / n, 100.0 * n_infeas / n))
-print('  残余自由度: 单点组"任何 Δ≠0 都被计费" {}/{}; 区间组"免费区间=F, 端点外必罚" {}/{};'
-      ' 不可行组"整步平坦" {}/{}'
-      .format(n_pt_ok, n_point, n_iv_ok, n_interval, n_inf_ok, n_infeas))
+print('  参考集合形态 (可行窗口 {} 组; 另有 {} 组虚构不可行窗口已剔除, 真 RBB 行为见 B4):\n       单点(F=∅) {:.1f}% / 区间 {:.1f}%'
+      .format(n, n_infeas_skip, 100.0 * n_point / n, 100.0 * n_interval / n))
+print('  残余自由度: 单点组"任何 Δ≠0 都被计费" {}/{}; 区间组"免费区间=F, 端点外必罚" {}/{}'
+      .format(n_pt_ok, n_point, n_iv_ok, n_interval))
 assert n_pt_ok == n_point, (n_pt_ok, n_point, 'F=∅ 时 Δ≠0 竟然免费')
 assert n_iv_ok == n_interval, (n_iv_ok, n_interval, '免费残余区间 ≠ 参考集合')
-assert n_inf_ok == n_infeas, (n_inf_ok, n_infeas, '不可行窗口步竟被计费')
 
 # B2 不可达窗口（W ⊄ ±rated，实机不会出现）: Δ=0 也不再免费，且**只能**因为参考点
 #    落在执行器能力之外（|ref| > rated）——把这条边界钉住，避免将来误当作 bug。
 n_unreach_bad = 0
 for (tgt, prev, lo, hi, n_rem) in CASES:
-    if lo >= -RATED and hi <= RATED:
+    if (lo >= -RATED and hi <= RATED) or lo > hi:
         continue
     pb_rule = hst.rule_action(tgt, prev, lo, hi, n_rem)
     pb_app = rbb_applied(pb_rule, lo, hi)
@@ -254,6 +251,49 @@ for (tgt, prev, lo, hi, n_rem) in CASES:
         assert abs(info['ref_lo']) > RATED + 1e-9, (tgt, prev, lo, hi, info['ref_lo'])
 print('  窗口越出 ±rated 的 {} 组（实机 RBB 不会产生）: Δ=0 也不再免费，'
       '且原因恒为 |ref|>rated'.format(n_unreach_bad))
+
+# B4 真 RBB 下的**不可行窗口**: RBB 忽略命令、改施加物理边界（可能反号）⇒
+#    c2 已按设计豁免（trackerr≡0），但 r2 = −min(|cmd − 物理边界|, 20) 仍**封顶计费**，
+#    而 Δ 对此几乎没有杠杆（±1 MW 最多换回 ~1 MW 罚）。本节把这条事实钉住。
+from rbb.rbb_rule_bess import RuleBasedBESS                     # noqa: E402
+_RB = RuleBasedBESS(max_E=6.0, min_E_factor=0.0, rated_power=RATED,
+                    eta_c=ETA_C, eta_d=ETA_D, time=DT, fluctuation_limit=3.0)
+_rg = np.random.default_rng(20260301)
+_n_inf = _n_disagree = _n_cap = 0
+_worst_inf_r2 = 0.0
+_max_leverage = 0.0
+for _ in range(20000):                 # episode 起点工况: SOC 随机 + 规则顶额定 + 阵风
+    _E = float(_rg.uniform(0.5, 5.5))
+    _ptur = float(_rg.uniform(0.0, 6.0))
+    _pg = _ptur - float(_rg.normal(0, 2.0)) - float(np.sign(_rg.normal()) * _rg.uniform(7.0, 10.0))
+    _, _i0 = _RB.compute_pbrule(0.0, _ptur, _pg, _E)
+    _lo, _hi = _i0['pbrulemin'], _i0['pbrulemax']
+    if not _lo > _hi:
+        continue
+    _n_inf += 1
+    _cmd = hst.rule_action(3.0, _E, _lo, _hi, 5)
+    _pb, _ = _RB.compute_pbrule(_cmd, _ptur, _pg, _E)
+    _r2 = hst.lower_reward(abs(_cmd - _pb))
+    _c2, _info = hst.lower_cost_soc_track(3.0, _E, soc_after(_E, _pb), _lo, _hi, 5,
+                                          return_info=True)
+    assert _info['infeasible_window'] and _c2 == 0.0, (_E, _lo, _hi, _c2)   # c2 已豁免
+    _worst_inf_r2 = min(_worst_inf_r2, _r2)
+    if abs(_cmd - _pb) > 1e-9:
+        _n_disagree += 1
+    if _r2 <= -20.0 + 1e-9:
+        _n_cap += 1
+    for _d in (1.0, -1.0):                                             # Δ 的杠杆
+        _pb2, _ = _RB.compute_pbrule(_cmd + _d, _ptur, _pg, _E)
+        _max_leverage = max(_max_leverage, abs(hst.lower_reward(abs(_cmd + _d - _pb2)) - _r2))
+assert _n_inf > 100, _n_inf
+assert _n_disagree / _n_inf > 0.30, (_n_disagree, _n_inf)
+assert _worst_inf_r2 <= -20.0 + 1e-9, _worst_inf_r2
+assert _max_leverage <= 1.0 + 1e-9, _max_leverage
+print('  不可行窗口 (真 RBB, {} 组): 命令 ≠ 施加值 {:.1f}%; r2 打到封顶 −20 的 {:.1f}%;'
+      ' 最坏 r2={:.1f}'.format(_n_inf, 100.0 * _n_disagree / _n_inf,
+                              100.0 * _n_cap / _n_inf, _worst_inf_r2))
+print('  ⇒ c2 已豁免但 r2 仍按 |cmd − 物理边界| 封顶计费, 而 Δ=±1 MW 的杠杆 ≤ {:.3f} MW'
+      ' (基本不可控; 是否像 c2 一样豁免 r2 是待定口径)'.format(_max_leverage))
 
 # ------------------------------------------------------------------ C
 print('=' * 84)
