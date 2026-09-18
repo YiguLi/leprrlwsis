@@ -84,8 +84,7 @@ engine = matlab.engine.start_matlab()
 RUN_TAG = 'td3per'
 
 
-def init_wt_action_bias(agent, lo=0.33, hi=0.33, sig_value=0.0, verbose=True):
-    # lo == hi == 0.33 ⇒ 5 维起始点都是同一个值 (Cp 最优点 a=1/3), 不再随机
+def init_wt_action_bias(agent, lo=0.25, hi=0.40, sig_value=0.0, verbose=True):
     """把 actor 输出层前 5 维 (WT 轴向诱导因子 a) 的 bias 初始化到 Cp 高效区。
 
     为什么必须做 (run160/初始策略诊断):
@@ -96,7 +95,7 @@ def init_wt_action_bias(agent, lo=0.33, hi=0.33, sig_value=0.0, verbose=True):
       于是初始策略 ≈ bias: 实测 5 个种子 → 死机 2~4 台、全场 ΣCp 仅 0.47~0.72
       (效率 16%~24%)。策略从"半停机"出发, 而 a<0 区被 CheckAction 裁掉后梯度为 0
       → 若没有恢复力就会长期停在停机态。
-    bias = 0.33 (lo=hi, 固定值) 对应 Cp = 0.593 (Betz 最优), 即从"正常工作点"出发。
+    bias∈[lo,hi]=[0.25,0.40] 对应 Cp≈0.56~0.59, 即从"正常工作点"出发。
     SOC 目标信号维 (第 6 维) 置 sig_value=0 → 初始 soc_target = 3.0 (SOC 带中点)。
 
     `model.py` 为多项目共享文件, 不修改; 这里构造后覆写 actor 与 actor_target 的 bias。
@@ -942,7 +941,7 @@ if __name__ == "__main__":
     # ---- 输出层 bias 初始化 (与 td3perrb 一致) ----
     parser.add_argument('--wt_bias_init', default=1, type=int, choices=[0, 1],
                         help='1: 把 actor 输出层 WT 5 维 bias 初始化到 Cp 高效区 '
-                             '0.33; 0: 用 PyTorch 默认')
+                             '[0.25,0.40]; 0: 用 PyTorch 默认')
 
     parser.add_argument('--value_scale', default=hc.VALUE_SCALE, type=float,
                         help='H 层 r1/c1 进入值函数回归空间的统一缩放 s '
@@ -1044,7 +1043,7 @@ if __name__ == "__main__":
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     if args.wt_bias_init:
-        init_wt_action_bias(agent_H, lo=0.33, hi=0.33, sig_value=0.0)
+        init_wt_action_bias(agent_H, lo=0.25, hi=0.40, sig_value=0.0)
 
     # 下层 L: 保留 td3per 自己的 RL BESS 操作
     #   * 观测 5 维蒸馏 = [pbrulemin/10, pbrulemax/10, soc_target/10, SOC/10, u/10]

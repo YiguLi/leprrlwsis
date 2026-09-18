@@ -112,36 +112,38 @@ engine = matlab.engine.start_matlab()
 
 
 # TD3PRLE: TD3 + PRLE 动态阈值分段奖励 + CL + LLM 元控制
-def init_wt_action_bias(agent, value=0.33, sig_value=0.0, n_wt=5, verbose=True):
-    """把 H 层 actor / actor_target 输出层 `fc4.bias` 的前 5 维(风机轴向诱导因子)置为
-    `value = 0.33` (单机 Cp 最优点, a=1/3), 第 6 维(SOC 目标/影子价信号)置 sig_value。
+def init_wt_action_bias(agent, lo=0.25, hi=0.40, sig_value=0.0, verbose=True):
+    """把 H 层 actor / actor_target 输出层 `fc4.bias` 的前 5 维(风机轴向诱导因子)初始化到
+    Cp 高效区 **U(0.25, 0.40)**(5 维各自独立随机), 第 6 维(信号)置 sig_value。
 
     动机(run160 诊断, 与 td3perrb/td3prrlrb 同): `model.py` 只把 `fc4.weight` 初始化到
-    ±3e-3, `fc4.bias` 仍是 PyTorch 默认 U(±1/√fan_in); 而 `Cp = 4a(1−a)²`:
-    a=0 → Cp=0 (停机), a=1/3 → 0.593 (最优), a=0.5 → 0.5。
-    初始策略 ≈ bias ⇒ 不设的话从"半停机"起步, 且 a<0 被 CheckAction 裁掉后梯度为 0。
-    0.33 同时是 warmup 调度(WarmupSchedule)的起点 ⇒ 策略接管时动作分布不跳变。
+    ±3e-3, `fc4.bias` 仍是 PyTorch 默认 U(±1/√fan_in); 而 `Cp = 4a(1−a)²`(见 WFSim_port.m):
+    a=0 → Cp=0(该机停机), a=1/3 → 0.593(Betz 最优), a=0.5 → 0.5。
+    初始策略 ≈ bias ⇒ 不设的话从"半停机"起步(实测死机 2~4 台、全场 ΣCp 仅 0.47~0.72),
+    且 a<0 区被 `CheckAction` 裁掉后梯度为 0 ⇒ 没有恢复力就会长期停在停机态。
+    U(0.25,0.40) 对应 Cp≈0.56~0.59; **5 维各自随机**另有打破机组间初始对称的作用。
 
     不改共享的 model.py; 构造后覆写 actor 与 actor_target。
     """
     if agent is None or not hasattr(agent, 'actor') or not hasattr(agent.actor, 'fc4'):
-        return None
+        return False
+    nb = agent.actor.fc4.bias.data.shape[0]
     with torch.no_grad():
-        b = agent.actor.fc4.bias
-        nb = int(b.numel())
-        k = min(int(n_wt), nb)
-        b[:k].fill_(float(value))
-        if nb > k:
-            b[k:].fill_(float(sig_value))
+        b = agent.actor.fc4.bias.data
+        n_wt = min(5, nb)
+        b[:n_wt] = torch.tensor(np.random.uniform(lo, hi, n_wt), dtype=b.dtype)
+        if nb > n_wt:
+            b[n_wt:] = float(sig_value)
         tgt = getattr(agent, 'actor_target', None)
         if tgt is not None and hasattr(tgt, 'fc4'):
-            tgt.fc4.bias.copy_(b)
+            tgt.fc4.bias.data.copy_(b)
     if verbose:
-        a = float(value)
-        prGreen('init_wt_action_bias: WT 起始 a = {:.3f} x{} (单机 Cp = {:.3f}, 合计 {:.3f}); '
-                'signal = {}'.format(a, k, 4 * a * (1 - a) ** 2, k * 4 * a * (1 - a) ** 2,
-                                     None if nb <= k else float(sig_value)))
-    return b.detach().cpu().numpy().copy()
+        a_mean = float(b[:n_wt].mean())
+        prGreen('init_wt_action_bias: WT bias = {} (mean a = {:.3f} -> Cp = {:.3f}); '
+                'signal = {}'.format(np.round(b[:n_wt].numpy(), 3), a_mean,
+                                     4 * a_mean * (1 - a_mean) ** 2,
+                                     float(b[n_wt]) if nb > n_wt else None))
+    return b[:n_wt].numpy().copy()
 
 
 def train(num_iterations_H,
@@ -1017,7 +1019,7 @@ if __name__ == "__main__":
                              '启动后由 LLM 元控制器在此基础上在线调整')
 
     parser.add_argument('--wt_bias_init', default=1, type=int, choices=[0, 1],
-                        help='风机输出层 bias 初始值 = 0.33 (Cp 最优点): 1=开(默认) 0=关')
+                        help='风机输出层 bias 初始值 = U(0.25,0.40) x5 (Cp 高效区): 1=开(默认) 0=关')
     parser.add_argument('--value_scale', default=hc.VALUE_SCALE, type=float,
                         help='H 层 r1/c1 进入值函数回归空间的统一缩放 s '
                              '(默认 1000: 把回归目标从 O(1e4) 压到 O(10); '
@@ -1130,9 +1132,9 @@ if __name__ == "__main__":
     # 值函数回归空间归一化 (s = hc.value_scale()): 只作用于 H 层 r1/c1 进入
     # critic 之前; buffer/对偶/日志/CSV 仍是原始口径 (见 hsrl_cost 末尾小节)。
     agent_H.value_scale = hc.value_scale()
-    # ---- 风机起始点: actor 输出层 bias = 0.33 (Cp 最优点; 策略接管时的起点) ----
+    # ---- 风机起始点: actor 输出层 bias = U(0.25,0.40) x5 (Cp 高效区; 策略接管时的起点) ----
     if args.wt_bias_init:
-        init_wt_action_bias(agent_H, value=0.33, sig_value=0.0)
+        init_wt_action_bias(agent_H, lo=0.25, hi=0.40, sig_value=0.0)
 
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
