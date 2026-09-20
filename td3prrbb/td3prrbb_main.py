@@ -155,9 +155,13 @@ def train(num_iterations_H,
     soc_tol_upper = float(getattr(args, "soc_tol", hc.SOC_TOL))   # 块末残差豁免
     if use_csv:
         df = pd.DataFrame()
+        df_written = 0
         df_episode = pd.DataFrame()
+        df_episode_written = 0
         df_test = pd.DataFrame()
+        df_test_written = 0
         df_update = pd.DataFrame()  # H 层更新数据（TD/Q/batch 统计）
+        df_update_written = 0
 
     # ---- 1440-step window counters for env metrics ----
     window_violation_count = 0   # steps where |P_F| > 3 MW
@@ -437,7 +441,9 @@ def train(num_iterations_H,
                     if use_csv:
                         df_update = pd.concat([df_update, pd.DataFrame(
                             [{'step': step, **_mean}])], ignore_index=True)
-                        df_update.to_csv('{}/update_stats_H.csv'.format(output))
+                        df_update_written = flush_csv_append(
+                            '{}/update_stats_H.csv'.format(output),
+                            df_update, df_update_written)
 
             # Test: 9-case segmented evaluation every 480 episode steps
             # (fixed scenario seed 42 -> same wind trajectory each test, so
@@ -467,7 +473,8 @@ def train(num_iterations_H,
                         'cvm': overall['cvm'],
                         'profit': overall['profit'],
                     }])], ignore_index=True)
-                    df_test.to_csv('{}/df_test9.csv'.format(output))
+                    df_test_written = flush_csv_append(
+                        '{}/df_test9.csv'.format(output), df_test, df_test_written)
                 if upload:
                     writer.add_scalar('test9/overall/r1', overall['r1'], step)
                     writer.add_scalar('test9/overall/c1', overall['c1'], step)
@@ -549,7 +556,8 @@ def train(num_iterations_H,
                 'bess_profit_net': reward_details['bess_profit'] - reward_details['degradation'],
             }])], ignore_index=True)
             if step % 50 == 0:
-                df.to_csv('{}/df_td3prrbb.csv'.format(output))
+                df_written = flush_csv_append(
+                    '{}/df_td3prrbb.csv'.format(output), df, df_written)
 
         # ---- Periodic checkpoint (every 2000 steps) ----
         if step > 0 and step % 2000 == 0:
@@ -682,7 +690,9 @@ def train(num_iterations_H,
                     'bess_profit': episode_bess_profit,
                     'wind_day': env.j,
                 }])], ignore_index=True)
-                df_episode.to_csv('{}/df_episode_td3prrbb.csv'.format(output))
+                df_episode_written = flush_csv_append(
+                    '{}/df_episode_td3prrbb.csv'.format(output),
+                    df_episode, df_episode_written)
 
             # end of episode
             # reset

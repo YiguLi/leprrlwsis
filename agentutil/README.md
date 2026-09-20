@@ -16,6 +16,7 @@
 | `test_critic_bias.py` | critic 输出层 bias（价值基线）初始化 | `python agentutil/test_critic_bias.py` |
 | `test_warmup_schedule.py` | warmup 调度 + bias 触发点（含旧 `step==warmup` 不可达 bug 回归） | `python agentutil/test_warmup_schedule.py` |
 | `test_value_scale.py` | H 层 `--value_scale` 归一化：覆盖性 + 两臂数值不变量 | `python agentutil/test_value_scale.py` |
+| `test_csv_incremental.py` | 日志表**增量落盘**回归：6 个 main 静态核查 + `flush_csv_append` 与全量写逐位一致/写盘量不随行数增长 | `python agentutil/test_csv_incremental.py` |
 | `test_l_lower_unit.py` | RL-BESS 下层口径：真源接线 + **命令值(两段 clip)** + λ2 兑换率/对偶律 + 预算守恒 | `python agentutil/test_l_lower_unit.py` |
 | `test_soctarget_uniform.py` | 下层 SOC 目标四项目（td3per/td3prrbb/prle/td3prle）逐位等价 | `python agentutil/test_soctarget_uniform.py` |
 | `test_l_residual.py` | 残余动作 `pb_cmd = 规则基线 + Δ` 的不变量（基线逐位 ≡ `SocTracker.act` / `Δ≡0 ⇒ r2≡0 ∧ c2≡0` / 零初始化输出层 / 三 main 接线 / 事后填入核对） | `python agentutil/test_l_residual.py` |

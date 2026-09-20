@@ -1,4 +1,6 @@
 import os
+
+import pandas as pd
 import torch
 from torch.autograd import Variable
 
@@ -113,3 +115,34 @@ def get_output_folder(parent_dir, env_name):
     parent_dir = parent_dir + '-run{}'.format(experiment_id)
     os.makedirs(parent_dir, exist_ok=True)
     return parent_dir
+
+
+def flush_csv_append(path, df, written):
+    """把 `df` 中第 `written` 行之后的**新增行**以【追加】方式写入 CSV（首次写表头）。
+
+    主循环里"只增不减"的日志表用::
+
+        df_written = 0
+        ...
+        df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+        if step % 50 == 0:
+            df_written = flush_csv_append(path, df, df_written)
+
+    为什么必须增量：全量 `df.to_csv(path)` 的单次写盘量 = O(累积行数) ⇒ 迭代数越大越卡
+    （实测某次 67k 步的 df 表 63 MB、每 50 步重写一次，这正是"50 整倍数步数卡顿随训练步数
+    增大而加剧"的根因）。只写增量后每次写盘量 = O(新增行) = 常数（整轮总写盘量 O(N)，
+    而非 O(N²/间隔)）。
+
+    index 语义不变：累积用 `ignore_index=True` ⇒ 全局 RangeIndex，切片追加后连续。
+    返回新的"已写行数"，调用方存回计数器。
+    """
+    if df is None or len(df) <= written:
+        return written
+    chunk = df.iloc[written:]
+    if written == 0:
+        if os.path.exists(path):
+            os.remove(path)                      # 覆盖旧 run 的同名表 (首次写表头)
+        chunk.to_csv(path, mode='w', index=True)
+    else:
+        chunk.to_csv(path, mode='a', header=False, index=True)
+    return len(df)

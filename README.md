@@ -348,6 +348,7 @@ python agentutil/test_c1_uniform.py        # H 层 c1 口径统一
 python agentutil/test_critic_bias.py       # critic bias 初始化
 python agentutil/test_warmup_schedule.py   # warmup 调度 + bias 触发点
 python agentutil/test_value_scale.py       # H 层 --value_scale 归一化
+python agentutil/test_csv_incremental.py   # 日志表增量落盘 (50 整数倍 step 卡顿回归)
 python agentutil/test_l_lower_unit.py      # RL-BESS 下层口径 ÷100 / SOC 目标接线
 python agentutil/test_soctarget_uniform.py # 下层 SOC 目标三项目逐位等价
 python agentutil/audit_coverage.py         # 九方法覆盖审计 (归一化/bias/η1)
