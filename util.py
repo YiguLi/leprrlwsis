@@ -117,10 +117,17 @@ def get_output_folder(parent_dir, env_name):
     return parent_dir
 
 
-def flush_csv_append(path, df, written):
-    """把 `df` 中第 `written` 行之后的**新增行**以【追加】方式写入 CSV（首次写表头）。
+def flush_csv_append(path, df, written, index=True, batch=False):
+    """全仓库**唯一**的增量落盘实现：把"尚未落盘的新增行"追加写入 CSV。
 
-    主循环里"只增不减"的日志表用::
+    为什么必须增量：全量 `df.to_csv(path)` 的单次写盘量 = O(累积行数) ⇒ 迭代数越大越卡
+    （实测某次 67k 步的 df 表 63 MB、每 50 步重写一次，这正是"50 整倍数步数卡顿随训练步数
+    增大而加剧"的根因）。只写增量后每次写盘量 = O(新增行) = 常数（整轮总写盘量 O(N)，
+    而非 O(N²/间隔)）。
+
+    调用方历史上分两派，`batch` 显式区分（禁止各处再写本地副本）：
+
+    **累积型**（`batch=False`，默认）—— `df` 是跨迭代只增不减的整表::
 
         df_written = 0
         ...
@@ -128,21 +135,51 @@ def flush_csv_append(path, df, written):
         if step % 50 == 0:
             df_written = flush_csv_append(path, df, df_written)
 
-    为什么必须增量：全量 `df.to_csv(path)` 的单次写盘量 = O(累积行数) ⇒ 迭代数越大越卡
-    （实测某次 67k 步的 df 表 63 MB、每 50 步重写一次，这正是"50 整倍数步数卡顿随训练步数
-    增大而加剧"的根因）。只写增量后每次写盘量 = O(新增行) = 常数（整轮总写盘量 O(N)，
-    而非 O(N²/间隔)）。
+      取 `iloc[written:]` 追加。`df` 可以是 DataFrame（`ignore_index=True` ⇒ 全局
+      RangeIndex）或 row dict 列表（`DataFrame(rows)` 的 RangeIndex 天然为 0..N-1,
+      故 `iloc[written:]` 的 index 标签同样是 written..N-1, 与前者逐位一致）。
 
-    index 语义不变：累积用 `ignore_index=True` ⇒ 全局 RangeIndex，切片追加后连续。
+    **新鲜批次型**（`batch=True`，见 `flush_csv_append_batch`）—— `rows` 只装本次新增,
+    调用方写完立刻清空::
+
+        df_rows.append(row)
+        if step % 50 == 0:
+            df_written = flush_csv_append_batch(path, df_rows, df_written)
+            df_rows = []
+
+      整批写出, index 标签从 `written` 续起以保持全局连续。**注意**：这种形态若误用累积
+      语义（默认 `batch=False`），当 `len(rows) <= written` 时会直接返回、一行都不写。
+
+    `index=False` 用于历史上不落 index 列的表（TD3PRLE 的 df / df_update）。
     返回新的"已写行数"，调用方存回计数器。
     """
-    if df is None or len(df) <= written:
+    if df is None or len(df) == 0:
         return written
-    chunk = df.iloc[written:]
+    if not isinstance(df, pd.DataFrame):
+        df = pd.DataFrame(df)
+    if batch:
+        n_new = len(df)
+        chunk = df.copy()
+        chunk.index = range(written, written + n_new)   # 续接全局行号
+    else:
+        if len(df) <= written:
+            return written
+        n_new = len(df) - written
+        chunk = df.iloc[written:]
     if written == 0:
         if os.path.exists(path):
             os.remove(path)                      # 覆盖旧 run 的同名表 (首次写表头)
-        chunk.to_csv(path, mode='w', index=True)
+        chunk.to_csv(path, mode='w', index=index)
     else:
-        chunk.to_csv(path, mode='a', header=False, index=True)
-    return len(df)
+        chunk.to_csv(path, mode='a', header=False, index=index)
+    return written + n_new
+
+
+def flush_csv_append_batch(path, rows, written, index=True):
+    """"新鲜批次"形态的增量落盘 —— `rows` 只有本次新增行, 调用方写完即清空。
+
+    与 `flush_csv_append` 共用同一实现, 只是把 `batch=True` 的语义约定显式命名:
+    4 个 main（td3per / td3prrb* / td3leprrlrb / td3prrlrb 的同族）的日志表历史上就是
+    "攒一批 → flush → 清空"的写法。命名区分可避免与"累积整表"形态相互误用。
+    """
+    return flush_csv_append(path, rows, written, index=index, batch=True)

@@ -111,24 +111,6 @@ def init_wt_action_bias(agent, lo=0.25, hi=0.40, sig_value=0.0, verbose=True):
     return True
 
 
-def _flush_csv(path, rows, written):
-    """把累积的 rows 以【追加】方式写入 CSV, 只写新增行 (首次写表头)。
-
-    避免"每 N 步整表重写"在高迭代数时产生的卡顿 (行数线性增长)。
-    """
-    if not rows:
-        return written
-    chunk = pd.DataFrame(rows)
-    chunk.index = range(written, written + len(rows))
-    if written == 0:
-        if os.path.exists(path):
-            os.remove(path)
-        chunk.to_csv(path, mode='w', index=True)
-    else:
-        chunk.to_csv(path, mode='a', header=False, index=True)
-    return written + len(rows)
-
-
 # TD3PRRLRB: TD3 + PRRBB 分段奖励 + 规则下层
 def train(num_iterations_H,
           agent_H,
@@ -374,7 +356,7 @@ def train(num_iterations_H,
                             writer.add_scalar('update/' + _k, _v, step)
                     if use_csv:
                         df_update_rows.append({'step': step, **_mean})
-                        df_update_written = _flush_csv(
+                        df_update_written = flush_csv_append_batch(
                             '{}/update_stats_H.csv'.format(output),
                             df_update_rows, df_update_written)
                         df_update_rows = []
@@ -408,7 +390,7 @@ def train(num_iterations_H,
                         'profit': overall['profit'],
                         'soc_track_err': overall['soc_track_err'],
                     })
-                    df_test_written = _flush_csv(
+                    df_test_written = flush_csv_append_batch(
                         '{}/df_test9.csv'.format(output),
                         df_test_rows, df_test_written)
                     df_test_rows = []
@@ -500,7 +482,7 @@ def train(num_iterations_H,
                 'bess_profit_net': reward_details['bess_profit'] - reward_details['degradation'],
             })
             if step % 50 == 0:
-                df_written = _flush_csv(
+                df_written = flush_csv_append_batch(
                     '{}/df_{}.csv'.format(output, RUN_TAG), df_rows, df_written)
                 df_rows = []
 
@@ -639,7 +621,7 @@ def train(num_iterations_H,
                     'deg_discharge': episode_deg_discharge,
                     'wind_day': env.j,
                 })
-                df_episode_written = _flush_csv(
+                df_episode_written = flush_csv_append_batch(
                     '{}/df_episode_{}.csv'.format(output, RUN_TAG),
                     df_episode_rows, df_episode_written)
                 df_episode_rows = []
@@ -655,11 +637,11 @@ def train(num_iterations_H,
 
     if use_csv:
         # 收尾 flush: 最后一次 flush 后新增的行在此补齐 (追加模式)
-        _flush_csv('{}/df_{}.csv'.format(output, RUN_TAG), df_rows, df_written)
-        _flush_csv('{}/df_episode_{}.csv'.format(output, RUN_TAG),
+        flush_csv_append_batch('{}/df_{}.csv'.format(output, RUN_TAG), df_rows, df_written)
+        flush_csv_append_batch('{}/df_episode_{}.csv'.format(output, RUN_TAG),
                    df_episode_rows, df_episode_written)
-        _flush_csv('{}/df_test9.csv'.format(output), df_test_rows, df_test_written)
-        _flush_csv('{}/update_stats_H.csv'.format(output),
+        flush_csv_append_batch('{}/df_test9.csv'.format(output), df_test_rows, df_test_written)
+        flush_csv_append_batch('{}/update_stats_H.csv'.format(output),
                    df_update_rows, df_update_written)
 
     # 相位自检结论 (应恒为 0; >0 说明 episode_steps 与 env 电价时钟失配)

@@ -98,24 +98,6 @@ engine = matlab.engine.start_matlab()
 RUN_TAG = 'td3leprrlrb'
 
 
-def _flush_csv(path, rows, written):
-    """把累积的 rows 以【追加】方式写入 CSV, 只写新增行 (首次写表头)。
-
-    避免"每 N 步整表重写"在高迭代数时产生的卡顿 (行数线性增长)。
-    """
-    if not rows:
-        return written
-    chunk = pd.DataFrame(rows)
-    chunk.index = range(written, written + len(rows))
-    if written == 0:
-        if os.path.exists(path):
-            os.remove(path)
-        chunk.to_csv(path, mode='w', index=True)
-    else:
-        chunk.to_csv(path, mode='a', header=False, index=True)
-    return written + len(rows)
-
-
 # =============================================================================
 # P0.1: 训练起始点 —— 把 H 层 actor 输出层 bias 覆写到 Cp 高效区
 # =============================================================================
@@ -532,7 +514,7 @@ def train(num_iterations_H,
                             writer.add_scalar('update/' + _k, _v, step)
                     if use_csv:
                         df_update_rows.append({'step': step, **_mean})
-                        df_update_written = _flush_csv(
+                        df_update_written = flush_csv_append_batch(
                             '{}/update_stats_H.csv'.format(output),
                             df_update_rows, df_update_written)
                         df_update_rows = []
@@ -577,7 +559,7 @@ def train(num_iterations_H,
                         'wind_high_min': overall['wind_high_min'],
                         'phase_minute': -1,
                     })
-                    df_test_written = _flush_csv(
+                    df_test_written = flush_csv_append_batch(
                         '{}/df_test9.csv'.format(output),
                         df_test_rows, df_test_written)
                     df_test_rows = []
@@ -668,7 +650,7 @@ def train(num_iterations_H,
                 **phase_log_fields(phase_minute),
             })
             if step % 50 == 0:
-                df_written = _flush_csv(
+                df_written = flush_csv_append_batch(
                     '{}/df_{}.csv'.format(output, RUN_TAG), df_rows, df_written)
                 df_rows = []
 
@@ -856,7 +838,7 @@ def train(num_iterations_H,
                             'gap_pen_per_block': summary['gap_pen_per_block'],
                             'soc_track_err_avg': summary['soc_track_err_avg'],
                         })
-                        df_llm_written = _flush_csv(
+                        df_llm_written = flush_csv_append_batch(
                             '{}/df_llm_adjust.csv'.format(output),
                             df_llm_rows, df_llm_written)
                         df_llm_rows = []
@@ -936,7 +918,7 @@ def train(num_iterations_H,
                     'wind_low_max': get_wind_thresholds()[0],
                     'wind_high_min': get_wind_thresholds()[1],
                 })
-                df_episode_written = _flush_csv(
+                df_episode_written = flush_csv_append_batch(
                     '{}/df_episode_{}.csv'.format(output, RUN_TAG),
                     df_episode_rows, df_episode_written)
                 df_episode_rows = []
@@ -952,13 +934,13 @@ def train(num_iterations_H,
 
     if use_csv:
         # 收尾 flush: 最后一次 flush 后新增的行在此补齐 (追加模式)
-        _flush_csv('{}/df_{}.csv'.format(output, RUN_TAG), df_rows, df_written)
-        _flush_csv('{}/df_episode_{}.csv'.format(output, RUN_TAG),
+        flush_csv_append_batch('{}/df_{}.csv'.format(output, RUN_TAG), df_rows, df_written)
+        flush_csv_append_batch('{}/df_episode_{}.csv'.format(output, RUN_TAG),
                    df_episode_rows, df_episode_written)
-        _flush_csv('{}/df_test9.csv'.format(output), df_test_rows, df_test_written)
-        _flush_csv('{}/update_stats_H.csv'.format(output),
+        flush_csv_append_batch('{}/df_test9.csv'.format(output), df_test_rows, df_test_written)
+        flush_csv_append_batch('{}/update_stats_H.csv'.format(output),
                    df_update_rows, df_update_written)
-        _flush_csv('{}/df_llm_adjust.csv'.format(output),
+        flush_csv_append_batch('{}/df_llm_adjust.csv'.format(output),
                    df_llm_rows, df_llm_written)
     if llm_relabel_count:
         prCyan('LEPRRLRB: 本 run 共发生 {} 次阈值调整与 relabel; '
