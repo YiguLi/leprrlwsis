@@ -695,7 +695,7 @@ if __name__ == "__main__":
     parser.add_argument('--bsize', default=64, type=int,
                         help='minibatch size')
     parser.add_argument('--rmsize',
-                        default=20000,
+                        default=40000,
                         type=int,
                         help='memory size')
     parser.add_argument('--window_length', default=1, type=int, help='')

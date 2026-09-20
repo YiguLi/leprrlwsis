@@ -476,7 +476,7 @@ if __name__ == "__main__":
                         help='time without training but only filling the replay memory')
     parser.add_argument('--discount', default=0.98, type=float, help='')
     parser.add_argument('--bsize', default=64, type=int, help='minibatch size')
-    parser.add_argument('--rmsize', default=20000, type=int, help='memory size')
+    parser.add_argument('--rmsize', default=40000, type=int, help='memory size')
     parser.add_argument('--window_length', default=1, type=int, help='')
     parser.add_argument('--tau', default=0.001, type=float,
                         help='moving average for target network')
