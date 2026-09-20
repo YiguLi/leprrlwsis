@@ -82,7 +82,7 @@ H 每块更新 2 次; H 层越界罚 penalty_NN_H 系数 100/上限 100 (CheckAc
 | `df_test9.csv` | 每 480 步的 9-case 测试：`r1/c1/gap_pen/cvm/pf_viol/profit/soc_track_err` |
 | `update_stats_H.csv` | H 层每块 2 批更新的 TD/Q/target/batch 统计均值 |
 
-CSV 采用**增量追加**落盘（`_flush_csv`），避免高迭代数时整表重写的卡顿。
+CSV 采用**增量追加**落盘（`util.flush_csv_append_batch`：本表按"攒一批 → flush → 清空"写），避免高迭代数时整表重写的卡顿。
 
 `d_cap_c = pbrulemax·η_c·dt·5`、`d_cap_d = |pbrulemin|·(dt/η_d)·5` 是本块规则的最大能力，
 即自由目标带宽 ≈ `SOC ± (cap + 0.1)`（典型值 ±0.25 MWh/块）。

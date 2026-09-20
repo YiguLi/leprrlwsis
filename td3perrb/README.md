@@ -107,7 +107,7 @@ H 每块更新 2 次; H 层越界罚 penalty_NN_H 系数 100/单位, 不封顶 (
 | `df_test9.csv` | 每 480 步的 9-case 测试：`r1/c1/gap_pen/cvm/pf_viol/profit/soc_track_err` |
 | `update_stats_H.csv` | H 层每块 2 批更新的 TD/Q/target/batch 统计均值 |
 
-CSV 采用**增量追加**落盘（`_flush_csv`）。
+CSV 采用**增量追加**落盘（`util.flush_csv_append_batch`：本表按"攒一批 → flush → 清空"写）。
 
 ## 6. 与 td3prrlrb 的差异（全部差异仅此一处）
 

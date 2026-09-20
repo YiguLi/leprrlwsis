@@ -223,7 +223,7 @@ TensorBoard 新增标量：`seg/wind_low_max`、`seg/wind_high_min`（逐步阈�
 `llm/*`（窗口边界上的阈值、增量、是否变更、窗口统计）、`test9/wind_low_max|high_min`、
 以及 **P0.3 的 `phase/*`**（`minute/sin/cos/seg_remain_frac/seg_remain_hours/next_price/n_states`）。
 
-> 注意：CSV 采用**增量追加**落盘（`_flush_csv`），其中 `df_llm_adjust.csv` 与
+> 注意：CSV 采用**增量追加**落盘（`util.flush_csv_append_batch`），其中 `df_llm_adjust.csv` 与
 > `update_stats_H.csv` 是"有事件才写"的表。
 
 ## 5. 与三个近亲项目的差异
