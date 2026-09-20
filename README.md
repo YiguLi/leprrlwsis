@@ -483,25 +483,43 @@ $env:DEEPSEEK_API_KEY = "sk-..."
 
 ---
 
-## 附：H 层值函数回归空间归一化（`--value_scale`，默认 `s = 1000`）
+## 附：H 层值函数回归空间归一化（**双尺度** `--value_scale` / `--cost_scale`）
 
 **问题**：`model.py` 的 `Critic` 输出层 `fc3(50→1)` 只把 weight 初始化到 ±3e-3，bias 保持
 PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益使回归目标达到 **O(10⁴)**
 （块收益均值 ~2.6e2 元 × `1/(1−γ)`，γ=0.99）——**初值与目标差 ~3e5 倍**。
 
 **做法**：让 H 层 critic 在**归一化空间**回归。`r1`/`c1` 只在**唯一一处**换算：各 agent
-`update_policy()` 采样之后 `profit_batch / s`、`cost_batch / s`；其余一切保持原始口径。
+`update_policy()` 采样之后 `profit_batch / s_p`、`cost_batch / s_c`；其余一切保持原始口径。
+
+**为什么拆成两个 scale（profit/cost 分开）**：`r1` 与 `c1` 的典型量级差 ~20 倍
+（r̄≈200 元/块 vs c̄≈10 MW·step/块），共用 `s=1000` 时 cost critic 的回归目标只有 O(0.4)、
+**可学变化**更只有 O(0.004) —— 恰好落在 `model.Critic` 输出层 `init_w=3e-3` 的尺度上，
+结果 **cost critic 塌成常数**（实测 run9：`Q_c ≡ 360`、`∂Q_c/∂a ≡ 0`，四张网全同；后果是
+`λ·Q_c` 对 actor 梯度恒 0 ⇒ λ 无论怎么调都不影响策略）。故拆为：
+
+| 项目组 | `s_p`（r1） | `s_c`（c1） | 块奖励 r1/s_p vs c1/s_c | 值 Q_p/s_p vs Q_c/s_c | λ_actor |
+|---|---|---|---|---|---|
+| **TD3 全系列（6 个）** | 1000 | **100**（`hc.COST_SCALE_TD3`） | 0.19 vs 0.11（同量级） | 5.0 vs 3.6（平衡） | **λ_raw×(s_c/s_p) = λ_raw/10** |
+| 其余 3 个（per/prrbb/prle） | 1000 | 1000（= s_p，旧行为） | 0.19 vs 0.011 | 5.0 vs **0.36（14× 失衡）** | λ_raw（不变） |
+
+**λ 随 scale 自动重标（不手改，杜绝"改了 scale 忘改 λ"的方向错误）**：actor 目标
+`−(q_p − λ·q_c)` 里 `q_p = Q_p/s_p`、`q_c = Q_c/s_c`，乘回 `s_p` 得
+`Q_p_raw − λ·(s_p/s_c)·Q_c_raw` ⇒ 有效物理价 = `λ·(s_p/s_c)`。要保持"λ 是元/MW·step 的
+物理价"（与 raw 对偶、`d_block_H = 15` 同口径）必须 `λ_actor = λ_raw·(s_c/s_p)` ——
+`hc.h_settings()` 用 `lam_scale()` 自动完成 ⇒ **物理价恒为 λ_raw**。
+实测 `s_c` 1000→100 时 λ 区间 `0.967~4.833 → 0.0967~0.4833`（即 ÷10）。
 
 | 对象 | 是否缩放 | 说明 |
 |---|---|---|
 | H 层 replay memory（warmup 填入 / 策略期写入 / `relabel_all()` 重写） | **不缩** | 三条路径都存原始口径 ⇒ 天然同口径，不存在混装；换算只发生在回归时 |
 | `critic_p/p2/c/c2` 四张网及其 target | **缩** | 共用同一个 `target_q_batch_{p,c}`，只有一处除法 |
-| actor loss `−(Q_p − λ·Q_c)` | 自动 | 两通道同除 s ⇒ 正因子，Adam 下等价，**λ 语义不变** |
-| `hsrl_agent_init.BiasInitTracker` | **缩** | 它读的是 main 里的**原始**块收益累加器 ⇒ 写入 `fc3.bias` 前 `/s`（含 `--critic_bias_p/_c` 覆盖值，按原始口径给出）。估计量对样本线性，故 SE/块数/触发点/γ 都不用重调 |
+| actor loss `−(Q_p − λ·Q_c)` | 自动 | 两通道各除自己的 s ⇒ 正因子（Adam 下等价）；**λ 必须按 `lam_scale()=s_c/s_p` 重标**才保持物理价（`h_settings()` 自动做） |
+| `hsrl_agent_init.BiasInitTracker` | **缩** | 读的是 main 里的**原始**块收益累加器 ⇒ 写 `fc3.bias` 前 `b_p /s_p`、`b_c /s_c`（含 `--critic_bias_p/_c` 覆盖值，按原始口径给出）。估计量对样本线性，故 SE/块数/触发点/γ 都不用重调 |
 | λ 区间、EMA 对偶（`ema_cost` vs `d_block_H`）、curriculum | **不缩** | 乘性对偶对 r1/c1 的换算一无所知 |
-| `update_stats_H.csv` / TensorBoard（`q_*` / `td_*` / `target_*`） | 还原 | agent 内部 `×s` 还原成原始口径 ⇒ 与历史 run、`agentutil/analyse_q_scale.py` 直接可比 |
+| `update_stats_H.csv` / TensorBoard（`q_*` / `td_*` / `target_*`） | 还原 | agent 内部**按通道**还原（profit `×s_p`、cost `×s_c`）⇒ 与历史 run、`agentutil/analyse_q_scale.py` 直接可比 |
 | PER 优先级 `|TD_p|/mean_p + |TD_c|/mean_c + ε` | 不缩 | 自归一化比值，对 s 免疫（`ε` 加在 O(1) 量上，占比不变） |
-| L 层 `r2`/`c2` | **不缩** | `value_scale` 默认 1.0；L 值函数尺度本就 O(1)（`d_block_L` = 20 / 2.5） |
+| L 层 `r2`/`c2` | **不缩** | `agent_L.value_scale = 1.0`（`cost_scale=None` ⇒ 跟随 `s_p=1.0`）；L 值函数尺度本就 O(1)（`d_block_L` = 20 / 2.5） |
 
 **实测（`agentutil/test_value_scale.py` B 段，真实 `SP_TD3` + 同一批数据，合成常数回归 R=5000）**
 
@@ -518,7 +536,17 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 
 **用法与测试**
 
+**实测（B2/D2 段）**：`s_c` 1000→100（λ ÷10）时 —— 首次更新两臂日志**恰好差 s_c 之比（10×）**
+（网络同一初值 ⇒ 证明按通道还原生效）；**收敛后原始口径 `Q_c` 收敛到同一目标**
+（19.998 vs 19.995，目标 20）⇒ **改 `s_c` 只改数值条件、不改物理量**；
+且有效物理权衡 `λ·Q_c/s_c` 两臂一致（0.01933 vs 0.01933）。
+⚠ 归一化把 loss/梯度同时缩小 ⇒ 固定的 `clip_grad_norm_(max_norm=2.0)` 语义随 scale 变
+（实测 s=1000 时范数只有门槛的 0.10×⇒**从不触发**；s=100 时约 1.0×⇒开始介入）——
+这是已知副作用，**动 scale 前先决定裁剪阈值策略**。
+
 * `--value_scale 1000`（默认）；`--value_scale 1`（或 0）关闭归一化，用作对照臂。
+* `--cost_scale 100`（TD3 六个 main 的默认）/ `1000`（= 关闭对 cost 的单独缩放）。
+  语义：`<=0` ⇒ 与 `s_p` 相同（旧行为）。λ 由 `hsrl_cost.lam_scale()` 自动跟随。
 * `python agentutil/test_value_scale.py` —— 覆盖性（8 个 agent + 9 个 main 的换算点齐全，且
   `sum_r1`/`sum_c1`/对偶/curriculum/relabel/warmup 填入**均未被缩放**）+ 上述数值不变量
   + `Σ₅ fluct_cost(3) = 15` 与 λ 语义正交。

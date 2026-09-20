@@ -136,15 +136,18 @@ for proj, spec in sorted(T.PROJECTS.items()):
 
     c = {}
     c['arg'] = main_t.count("parser.add_argument('--value_scale'") == 1
-    c['set'] = main_t.count('hc.set_value_scale(args.value_scale)') == 1
-    c['wire'] = main_t.count('agent_H.value_scale = hc.value_scale()') == 1
+    c['set'] = (main_t.count('hc.set_value_scale(args.value_scale)') == 1
+                and main_t.count('hc.set_cost_scale(args.cost_scale)') == 1)
+    c['wire'] = (main_t.count('agent_H.value_scale = hc.value_scale()') == 1
+                 and main_t.count('agent_H.cost_scale = hc.cost_scale()') == 1)
     # 该项目的 H agent 类里换算点是否齐全
     c['cls'] = (agent_t.count('self.value_scale = 1.0') == 1
-                and agent_t.count('/ _S') == 2
-                and agent_t.count('* _S - self.cost_limit') == 1)
-    c['TD'] = (re.search(r'TD_errors_p = abs\([^\n]*\) \* _S', agent_t) is not None
-               and re.search(r'TD_errors_c = abs\([^\n]*\) \* _S', agent_t) is not None)
-    c['log'] = agent_t.count('_d[_k] = float(_d[_k]) * _S') == 1
+                and agent_t.count('/ _SP') == 1 and agent_t.count('/ _SC') == 1
+                and agent_t.count('* _SC - self.cost_limit') == 1)
+    c['TD'] = (re.search(r'TD_errors_p = abs\([^\n]*\) \* _SP', agent_t) is not None
+               and re.search(r'TD_errors_c = abs\([^\n]*\) \* _SC', agent_t) is not None)
+    c['log'] = (agent_t.count('_d[_k] = float(_d[_k]) * _SP') == 1
+                and agent_t.count('_d[_k] = float(_d[_k]) * _SC') == 1)
     # bias 策略: 开关 + 估计器 + 应用点"在首次策略更新之前"
     c['bias'] = (main_t.count("parser.add_argument('--critic_bias_init'") == 1
                  and main_t.count('hinit.BiasInitTracker.from_args(args)') == 1
@@ -170,7 +173,7 @@ for proj, spec in sorted(T.PROJECTS.items()):
     for k, ok in c.items():
         need(ok, '[{}/{}]'.format(proj, k))
 
-print('\n  列含义: arg=--value_scale 存在; set=hc.set_value_scale 生效; wire=agent_H 接线;')
+print('\n  列含义: arg=--value_scale 存在; set=set_value_scale/set_cost_scale 生效; wire=agent_H 双尺度接线;')
 print('          cls=该项目的 H agent 类含 /s 换算; TD/日志=原始口径还原; bias=开关+估计器+应用;')
 print('          bfst=bias 应用在首次策略更新之前; L1.0=RL 下层显式不缩放/规则下层无 agent_L;')
 print('          γ/s=估计器的 γ 与 s 绑定到 H agent 本身(结构上不可能不一致)')

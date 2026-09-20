@@ -1118,6 +1118,10 @@ if __name__ == "__main__":
                         help='H 层 r1/c1 进入值函数回归空间的统一缩放 s '
                              '(默认 1000: 把回归目标从 O(1e4) 压到 O(10); '
                              '1 = 关闭归一化, 只影响 critic 回归空间)')
+    parser.add_argument('--cost_scale', default=hc.COST_SCALE_TD3, type=float,
+                        help='H 层 c1 进入值函数回归空间的缩放 s_c（与 s_p 组成双尺度; '
+                             'λ 由 hsrl_cost.lam_scale()=s_c/s_p 自动重标 ⇒ 物理价不变; '
+                             '<=0 ⇒ 与 s_p 相同 = 旧行为）')
     parser.add_argument('--c1-mode', default='uniform',
                         choices=['uniform', 'legacy'],
                         help='H 层 c1 口径: uniform=波动当量(默认, hsrl_cost 单一真源); '
@@ -1136,6 +1140,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     hc.set_mode(args.c1_mode)
     hc.set_value_scale(args.value_scale)   # 值函数回归空间归一化 (单一真源)
+    hc.set_cost_scale(args.cost_scale)   # cost 通道缩放 (λ 自动跟随)
     _HCFG = hc.h_settings()
     prCyan(hc.summary())
     args.output = get_output_folder(args.output, args.env)
@@ -1279,6 +1284,7 @@ if __name__ == "__main__":
     # 值函数回归空间归一化 (s = hc.value_scale()): 只作用于 H 层 r1/c1 进入
     # critic 之前; buffer/对偶/日志/CSV 仍是原始口径 (见 hsrl_cost 末尾小节)。
     agent_H.value_scale = hc.value_scale()
+    agent_H.cost_scale = hc.cost_scale()
 
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长

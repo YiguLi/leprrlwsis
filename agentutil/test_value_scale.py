@@ -47,6 +47,10 @@ AGENT_FILES = ['PER_ddpg.py', 'prle/prle_ddpg.py', 'td3per/td3per_ddpg.py',
                'td3prrbb/td3prrbb_ddpg.py', 'td3prle/td3prle_ddpg.py',
                'td3prrlrb/td3prrlrb_ddpg.py', 'td3perrb/td3perrb_ddpg.py',
                'td3leprrlrb/td3leprrlrb_ddpg.py']
+# TD3 全系列 (6 个): 采用双尺度 s_p=1000 / s_c=100 (λ 自动 ÷10)
+TD3_MAIN_FILES = ['td3per/td3per_main.py', 'td3prrbb/td3prrbb_main.py',
+                  'td3prle/td3prle_main.py', 'td3prrlrb/td3prrlrb_main.py',
+                  'td3perrb/td3perrb_main.py', 'td3leprrlrb/td3leprrlrb_main.py']
 MAIN_FILES = ['PER_main0.py', 'prrbb/prrbb_main.py', 'prle/prle_main.py',
               'td3per/td3per_main.py', 'td3prrbb/td3prrbb_main.py',
               'td3prle/td3prle_main.py', 'td3prrlrb/td3prrlrb_main.py',
@@ -67,16 +71,18 @@ print('=' * 78)
 for p in AGENT_FILES:
     t = _read(p)
     assert 'self.value_scale = 1.0' in t, p
-    # r1/c1 进 critic 的唯一一次除法, 且恰好两次(利润/成本)
-    assert t.count('/ _S') == 2, (p, 'reward/cost 通道的 /s 次数', t.count('/ _S'))
-    assert 'profit_batch = profit_batch / _S' in t and 'cost_batch = cost_batch / _S' in t, p
-    # TD 误差 ×s 还原 (PER/日志原始口径)
-    assert re.search(r"TD_errors_p = abs\([^\n]*\) \* _S", t), (p, 'TD_p 未还原')
-    assert re.search(r"TD_errors_c = abs\([^\n]*\) \* _S", t), (p, 'TD_c 未还原')
-    # 非 EMA 对偶分支还原
-    assert t.count('* _S - self.cost_limit') == 1, p
-    # 统计字段还原
-    assert t.count('_d[_k] = float(_d[_k]) * _S') == 1, p
+    assert 'self.cost_scale = None' in t, (p, 'cost_scale 默认须为 None (= s_p, 旧行为)')
+    # r1/c1 进 critic 的唯一一次除法, 各一次: profit / s_p, cost / s_c
+    assert 'profit_batch = profit_batch / _SP' in t and t.count('/ _SP') == 1, (p, 'profit 通道未 / s_p')
+    assert 'cost_batch = cost_batch / _SC' in t and t.count('/ _SC') == 1, (p, 'cost 通道未 / s_c')
+    # TD 误差**按通道各自**还原 (PER/日志保持原始口径)
+    assert re.search(r"TD_errors_p = abs\([^\n]*\) \* _SP", t), (p, 'TD_p 未按 s_p 还原')
+    assert re.search(r"TD_errors_c = abs\([^\n]*\) \* _SC", t), (p, 'TD_c 未按 s_c 还原')
+    # 非 EMA 对偶分支还原 (cost 通道 ⇒ s_c)
+    assert t.count('* _SC - self.cost_limit') == 1, p
+    # 统计字段还原: profit 用 s_p, cost 用 s_c
+    assert t.count('_d[_k] = float(_d[_k]) * _SP') == 1, p
+    assert t.count('_d[_k] = float(_d[_k]) * _SC') == 1, p
     # 绝不能出现的"串台": 去缩 sum/EMA/d_block/γ
     for bad in ('ema_cost /', 'ema_cost/', 'd_block /', 'discount / _S',
                 'lam / _S', 'lam *= 1.0 / _S', 'PER_epsilon / _S'):
@@ -88,8 +94,16 @@ print('  8/8 agent 换算点齐全, 且只作用于 r1/c1 两个通道')
 for p in MAIN_FILES:
     t = _read(p)
     assert t.count("parser.add_argument('--value_scale'") == 1, p
+    assert t.count("parser.add_argument('--cost_scale'") == 1, p
     assert t.count('hc.set_value_scale(args.value_scale)') == 1, p
+    assert t.count('hc.set_cost_scale(args.cost_scale)') == 1, p
     assert t.count('agent_H.value_scale = hc.value_scale()') == 1, p
+    assert t.count('agent_H.cost_scale = hc.cost_scale()') == 1, p
+    # TD3 六个用 s_c=100; 其余三个保持 = s_p (旧行为)
+    if p in TD3_MAIN_FILES:
+        assert 'default=hc.COST_SCALE_TD3' in t, (p, 'TD3 系列应用 COST_SCALE_TD3')
+    else:
+        assert 'default=hc.COST_SCALE,' in t, (p, '非 TD3 应保持 COST_SCALE (= s_p)')
     for bad in ('sum_r1 /', 'sum_c1 /', 'sum_r1/', 'sum_c1/',
                 'v_scale(sum_r1', 'v_scale(sum_c1', 'hc.v_scale('):
         assert bad not in t, (p, bad)
@@ -104,8 +118,8 @@ print('  9/9 main 接线齐全; sum_r1/sum_c1/对偶/curriculum 未被缩放; L 
 for p in ['prle/prle_buffer.py', 'td3prle/td3prle_buffer.py',
           'td3leprrlrb/td3leprrlrb_buffer.py', 'hsrl_warmup.py']:
     t = _read(p)
-    assert 'value_scale' not in t, (p, '存储/填入路径不应感知 s')
-    assert not re.search(r'[*/]\s*_S\b', t), (p, '存储/填入路径不应缩放 r/c')
+    assert 'value_scale' not in t and 'cost_scale' not in t, (p, '存储/填入路径不应感知 s')
+    assert not re.search(r'[*/]\s*_S[PC]?\b', t), (p, '存储/填入路径不应缩放 r/c')
 print('  3 个 relabel buffer + hsrl_warmup: 均按原始口径存取 (天然同口径)')
 
 # =============================================================================
@@ -262,6 +276,71 @@ assert h2_mean < h1_mean / 10.0, (h1_mean, h2_mean)
 print('    ⇒ 同一目标, s=1000 用 O(1) 内部尺度做到 (s=1 需把 h5 放大 {:.0f} 倍)'
       .format(h1_mean / max(h2_mean, 1e-9)))
 
+# ---------------------------------------------------------------------------
+# B2. 双尺度代价通道 (TD3 全系列: s_p=1000 固定, s_c 1000→100 且 λ ÷10)
+#     不变式: **改 s_c 只改 critic 的数值条件, 不改它学到的物理量**
+#       * 首次更新: 网络同一初值 ⇒ 还原后日志恰好差 s_c 之比 (10×)
+#       * 收敛后: 原始口径 Q_c 收敛到**同一个目标** R_C
+#       * profit 通道完全不受 s_c 影响
+#       * actor 的有效物理权衡 λ·(Q_c/s_c) 两臂相同
+# ---------------------------------------------------------------------------
+def build2(sc, lam):
+    torch.manual_seed(0)
+    agent = SP_TD3(nb_states=NB, nb_actions=NA, args=make_args(),
+                   lam_max=hc.LAM_MAX * (sc / 1000.0), lam_min=hc.LAM_MIN * (sc / 1000.0),
+                   ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.02,
+                   policy_delay=2, policy_noise=0.1, noise_clip=0.3,
+                   cost_critic_mode='max', record_update_stats=True)
+    agent.value_scale = 1000.0
+    agent.cost_scale = sc
+    agent.lam = lam
+    st, ac = make_data()
+    for i in range(NFILL):
+        agent.memory.append(st[i], ac[i], R_P, R_C, st[(i + 1) % NFILL], 1.0)
+    return agent
+
+
+def run2(sc, lam):
+    agent = build2(sc, lam)
+    random.seed(1234)
+    np.random.seed(1234)
+    torch.manual_seed(1234)
+    agent.update_policy()
+    first = dict(agent.update_stats[0])
+    n = 1
+    for t in STEPS:
+        while n < t:
+            agent.update_policy()
+            n += 1
+    return agent, first, dict(agent.update_stats[-1])
+
+
+LAM_RAW = hc.LAM_INIT
+_agA, fA, lA = run2(1000.0, LAM_RAW)                      # 旧: s_c = s_p
+_agB, fB, lB = run2(hc.COST_SCALE_TD3, LAM_RAW / 10.0)    # 新: 双尺度 (λ = λ_raw/10)
+# ① 首次更新 (同一网络初值): 还原后 cost 日志恰好差 s_c 之比
+assert abs(fA['q_c_mean'] - 10.0 * fB['q_c_mean']) < 1e-6, (fA['q_c_mean'], fB['q_c_mean'])
+assert abs(fA['q_p_mean'] - fB['q_p_mean']) < 1e-6, (fA['q_p_mean'], fB['q_p_mean'])
+# ② 收敛后: 原始口径 cost 值收敛到同一目标
+eA = abs(lA['q_c_mean'] - R_C) / R_C
+eB = abs(lB['q_c_mean'] - R_C) / R_C
+assert eA < 0.05 and eB < 0.05, (lA['q_c_mean'], lB['q_c_mean'], R_C)
+# ③ profit 通道不受 s_c 影响
+assert abs(lA['q_p_mean'] - lB['q_p_mean']) / R_P < 0.02, (lA['q_p_mean'], lB['q_p_mean'])
+# ④ 有效物理权衡 λ·(Q_c_raw/s_c) 两臂一致 (λ 的自动重标生效)
+_tA = LAM_RAW * lA['q_c_mean'] / 1000.0
+_tB = (LAM_RAW / 10.0) * lB['q_c_mean'] / hc.COST_SCALE_TD3
+assert abs(_tA - _tB) / max(abs(_tA), 1e-12) < 0.05, (_tA, _tB)
+print()
+print('  B2. 双尺度代价通道 (s_p=1000 固定; s_c 1000→100, λ {:.3f}→{:.4f}):'.format(
+    LAM_RAW, LAM_RAW / 10.0))
+print('    首次更新 cost 日志还原: s_c=1000 → {:.4f} | s_c=100 → {:.4f} (比值 {:.1f}× = s_c 之比)'
+      .format(fA['q_c_mean'], fB['q_c_mean'], fA['q_c_mean'] / fB['q_c_mean'] if abs(fB['q_c_mean']) > 1e-12 else float('nan')))
+print('    收敛后原始口径 Q_c: 目标 {:.1f} | s_c=1000 → {:.3f} ({:.2%}) | s_c=100 → {:.3f} ({:.2%})'
+      .format(R_C, lA['q_c_mean'], eA, lB['q_c_mean'], eB))
+print('    profit 通道: {:.1f} vs {:.1f} (不受 s_c 影响) | 物理权衡 λ·Q_c/s_c: {:.5f} vs {:.5f}'
+      .format(lA['q_p_mean'], lB['q_p_mean'], _tA, _tB))
+
 # =============================================================================
 # C. warmup 路径
 # =============================================================================
@@ -357,5 +436,29 @@ assert hc.value_scale() == 1.0
 hc.set_value_scale(old_scale)
 print('  Σ₅ fluct_cost(3) = {:.0f} = D_BLOCK; λ 区间/初值/d_block 不受 s 影响'.format(sum5))
 print('  v_scale(2e4)=20.0, v_unscale(20.0)=2e4, --value_scale 0 ⇒ 关闭归一化')
+
+# ---- D2: 双尺度 s_p/s_c 与 λ 的自动重标 (λ_actor = λ_raw·s_c/s_p) ----
+old_sc = hc.cost_scale()
+hc.set_value_scale(1000.0)
+hc.set_cost_scale(hc.COST_SCALE_TD3)
+assert abs(hc.cost_scale() - 100.0) < 1e-12
+assert abs(hc.lam_scale() - hc.cost_scale() / hc.value_scale()) < 1e-12
+_h2 = hc.h_settings()
+assert abs(_h2['lam_min'] - hc.LAM_MIN * hc.lam_scale()) < 1e-12
+assert abs(_h2['lam_max'] - hc.LAM_MAX * hc.lam_scale()) < 1e-12
+assert abs(_h2['lam_init'] - hc.LAM_INIT * hc.lam_scale()) < 1e-12
+assert abs(_h2['lam_min'] - hc.LAM_MIN / 10) < 1e-12, 'TD3 双尺度下 λ 必须 ÷10'
+# **物理价不变**: λ_actor·(s_p/s_c) ≡ λ_raw ⇒ 改 scale 不会静默改变约束松紧
+for _k in ('lam_min', 'lam_max', 'lam_init'):
+    _raw = {'lam_min': hc.LAM_MIN, 'lam_max': hc.LAM_MAX, 'lam_init': hc.LAM_INIT}[_k]
+    assert abs(_h2[_k] * hc.value_scale() / hc.cost_scale() - _raw) < 1e-12, (_k, '物理价漂移')
+# bias 初始化同步按通道 /s
+_bp, _bc = hinit.bias_from_block_samples([(200.0, 10.0)] * 10, 0.98,
+                                         scale=hc.value_scale(), cost_scale=hc.cost_scale())
+assert abs(_bp - 200.0 * 50 / 1000.0) < 1e-9 and abs(_bc - 10.0 * 50 / 100.0) < 1e-9, (_bp, _bc)
+hc.set_cost_scale(0)                                   # <=0 ⇒ 与 s_p 相同 (旧行为)
+assert hc.cost_scale() == hc.value_scale() and abs(hc.lam_scale() - 1.0) < 1e-12
+hc.set_cost_scale(old_sc)
+print('  D2: s_c=100 ⇒ λ_actor=λ_raw/10 (物理价 λ_raw 不变); bias 按 s_p/s_c 各自 /s; s_c<=0 ⇒ = s_p')
 print('=' * 78)
 print('TEST OK')
