@@ -197,9 +197,10 @@ class BiasInitTracker:
     * 触发点 = `first_trigger_step(warmup)`；该块**计入**估计样本
       （它的块首动作仍是 warmup 动作），因此样本数 = 触发点之前的全部块末数。
     * `b_p/b_c > 0` 时覆盖自动估计值（`--critic_bias_p/_c`，**原始口径**）。
-    * 样本与覆盖值都是**原始口径**，写入 fc3.bias 前统一 `/s`
-      （`value_scale`；None = 1.0，保持旧行为）。这不是调参：
-      估计量对样本线性 ⇒ 除 s 后偏差/方差/SE 同比例缩小，块数/触发点/γ 都不用动；
+    * 样本与覆盖值都是**原始口径**，写入 fc3.bias 前**按通道各除一次**：
+      profit → `/ s_p`（`value_scale`）、cost → `/ s_c`（`cost_scale`）；
+      None = 1.0，保持旧行为。这不是调参：估计量对样本线性 ⇒
+      除尺度后偏差/方差/SE 同比例缩小，块数/触发点/γ 都不用动；
       唯一要求是 bias 与 critic 的 TD 目标同量纲。
     """
 
@@ -278,13 +279,14 @@ class BiasInitTracker:
         if self.verbose:
             prCyan('BiasInitTracker: 触发于 step={} (warmup={}, 首块末={})，'
                    '用 {} 个 warmup 块估计 r̄={:.2f} c̄={:.2f} → 原始口径 b_p={:.1f} '
-                   'b_c={:.3f}，除以 s={:g} 后写入 fc3.bias: b_p={:.4f} b_c={:.5f} (s_p={:g} s_c={:g})'
+                   'b_c={:.3f}，除以 (s_p={:g}, s_c={:g}) 后写入 fc3.bias: '
+                   'b_p={:.4f} b_c={:.5f}'
                    .format(self.info['step'], self.warmup, self.trigger_step,
                            len(self.blocks), self.info['mean_r1'],
                            self.info['mean_c1'],
                            -1.0 if b_p_raw is None else float(b_p_raw),
                            -1.0 if b_c_raw is None else float(b_c_raw),
-                           s,
+                           sp, sc,
                            -1.0 if b_p is None else float(b_p),
-                           -1.0 if b_c is None else float(b_c), sp, sc))
+                           -1.0 if b_c is None else float(b_c)))
         return self.info

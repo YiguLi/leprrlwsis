@@ -125,6 +125,66 @@ for step in range(900):
 assert abs(float(agent.critic_p.fc3.bias.item()) - 8.0) < 1e-9      # 覆盖值 8000/1000
 print('s=1000: b_p_raw=-8200 → fc3.bias=-8.2; 覆盖值 8000 → 8.0 ✓')
 
+# verbose=True 必须与 verbose=False 数值一致, 且打印分支不得抛异常。
+# 回归背景: 双尺度改造把 on_block_end 里的单尺度局部变量 s 拆成 sp/sc, 漏改了
+# `if self.verbose:` 分支里的格式占位符 ⇒ NameError: name 's' is not defined。
+# 而 from_args **不传 verbose** ⇒ 取类默认 verbose=True ⇒ 生产每次都在触发块崩;
+# 既有测试全部用 verbose=False, 所以这条分支零覆盖、CI 全绿却线上必炸。
+import contextlib
+import io as _io
+
+_num = ('b_p', 'b_c', 'b_p_raw', 'b_c_raw', 'step', 'trigger_step', 'scale', 'scale_c')
+
+
+def _run_verbose(verbose, b_p=-1.0, b_c=-1.0):
+    buf = _io.StringIO()
+    tr = hinit.BiasInitTracker(mode='estimate', warmup=200, discount=0.99,
+                               verbose=verbose, value_scale=1000.0, cost_scale=100.0,
+                               b_p=b_p, b_c=b_c)
+    ag = _CriticStub()
+    info = None
+    with contextlib.redirect_stdout(buf):
+        for step in range(900):
+            if step % 5 == 4:
+                info = tr.on_block_end(step, -82.0, 19.8, ag) or info
+    return info, ag, buf.getvalue()
+
+
+info_v, ag_v, out_v = _run_verbose(True)
+info_q, ag_q, out_q = _run_verbose(False)
+assert info_v is not None and info_q is not None
+for k in _num:
+    assert info_v[k] == info_q[k], (k, info_v[k], info_q[k])
+assert abs(float(ag_v.critic_p.fc3.bias.item()) - info_v['b_p']) < 1e-6   # float32 张量
+assert 'BiasInitTracker: 触发于' in out_v, out_v[:200]
+assert 's_p=1000' in out_v and 's_c=100' in out_v, out_v[:400]
+assert out_q == '', 'verbose=False 不应打印任何东西'
+# 覆盖值分支 (b_p_raw/b_c_raw 为 None) 也要走一遍 verbose 打印
+_, ag_o, out_o = _run_verbose(True, b_p=8000.0, b_c=300.0)
+assert abs(float(ag_o.critic_p.fc3.bias.item()) - 8.0) < 1e-9
+assert abs(float(ag_o.critic_c.fc3.bias.item()) - 3.0) < 1e-9
+assert 'BiasInitTracker: 触发于' in out_o
+print('verbose=True 打印分支可执行且数值与 verbose=False 逐项一致 '
+      '(双尺度 s_p=1000/s_c=100; 覆盖值分支亦覆盖) ✓')
+
+# 原样复刻生产链路 (traceback 的入口): main 里是 from_args(args) -> on_block_end(...),
+# 而 from_args **不传 verbose** ⇒ 取类默认 True ⇒ 生产走的就是上面那个打印分支。
+import types as _types
+
+ns = _types.SimpleNamespace(critic_bias_init='estimate', warmup=200, discount=0.99,
+                            critic_bias_p=-1.0, critic_bias_c=-1.0,
+                            value_scale=1000.0, cost_scale=100.0)
+tr_p = hinit.BiasInitTracker.from_args(ns)
+assert tr_p.verbose is True, 'from_args 未显式传 verbose ⇒ 应为类默认 True (生产分支)'
+buf_p = _io.StringIO()
+ag_p = _CriticStub()
+with contextlib.redirect_stdout(buf_p):
+    for step in range(900):
+        if step % 5 == 4:
+            tr_p.on_block_end(step, -82.0, 19.8, ag_p)
+assert 'BiasInitTracker: 触发于' in buf_p.getvalue(), buf_p.getvalue()[:200]
+print('生产链路 from_args(args) → on_block_end (verbose 默认 True) 无异常 ✓')
+
 # ---------------------------------------------------------------- 2) warmup 调度
 print('--- 2) warmup 上层调度 ---')
 sched = hw.WarmupSchedule(nb_turbine=5, nb_actions=6, seed=7)

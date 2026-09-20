@@ -250,7 +250,8 @@ def summary(pr=None):
 # ----------------------------------
 #   1. s=1 与 s=1000 的**非值函数**量逐位一致：sum_r1/sum_c1/λ/d_block/PER 优先级；
 #   2. s=1000 下 critic 收敛到同一目标：Q_p(s=1000)·1000 ≈ Q_p(s=1)（训练足够久）；
-#   3. warmup 路径：`BiasInitTracker` 得到的 fc3.bias = 原始估计 / s；
+#   3. warmup 路径：`BiasInitTracker` 得到的 fc3.bias = 原始估计 / 对应通道尺度
+#      （profit ÷ s_p、cost ÷ s_c，各自独立）；
 #   4. `Σ₅ fluct_cost(3) = 15 = d_block`、λ 语义与 `--c1-mode` 完全不受影响；
 #   5. **双尺度不变式**（`test_value_scale.py` B2/D2）：改 s_c 只改 critic 的数值条件，
 #      不改物理量 —— 两臂的**原始口径 Q_c 收敛到同一目标**（实测 19.998 vs 19.995，目标 20），
