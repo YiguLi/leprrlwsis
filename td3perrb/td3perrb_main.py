@@ -696,7 +696,7 @@ if __name__ == "__main__":
     # 0.99: γ 以【块(5 min)】为单位生效 (observe_jump 聚合 5 步后 discount 只用一次)
     #       ⇒ 半衰期 69 块 ≈ 5.8 h, 覆盖 4~7 h 的低价充/高价放周期
     #       (0.98 时半衰期仅 34 块 ≈ 2.8 h, 跨 4 h 的套利收益权重只剩 0.38)
-    parser.add_argument('--bsize', default=32, type=int,
+    parser.add_argument('--bsize', default=64, type=int,
                         help='minibatch size')
     parser.add_argument('--rmsize',
                         default=20000,

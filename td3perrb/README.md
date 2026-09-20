@@ -71,7 +71,7 @@ H 每块更新 2 次; H 层越界罚 penalty_NN_H 系数 100/单位, 不封顶 (
 | `--rate` / `--prate` | 0.01 / 0.0001 | critic / actor 学习率 |
 | `--discount` | **0.99** | 以块(5 min)为单位生效；半衰期 69 块≈5.8 h（td3per 为 0.98） |
 | `--tau` | 0.001 | 目标网络软更新 |
-| `--bsize` / `--rmsize` | 32 / 20000 | 批量 / 缓冲容量 |
+| `--bsize` / `--rmsize` | 64 / 20000 | 批量 / 缓冲容量 |
 | `--warmup` | 200 | 纯随机填充步数 |
 | PER | `α=0.6, β=0.4→1, ε=0.01`, 退火增量 `3e-5` | 与 td3per 一致 |
 | TD3 | `policy_delay=2, policy_noise=0.1, noise_clip=0.3, cost_critic_mode=max` | |

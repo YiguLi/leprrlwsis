@@ -774,7 +774,7 @@ if __name__ == "__main__":
                         help='L 层(BESS)折扣: **步级**语义 (H 为块级); L episode=5 步块, 默认 0.98')
     parser.add_argument('--l_epsilon', default=50000,
                         help='L 层探索衰减步数 (与 H 的 --epsilon 解耦), 默认 50000')
-    parser.add_argument('--bsize', default=32, type=int, help='minibatch size')
+    parser.add_argument('--bsize', default=64, type=int, help='minibatch size')
     parser.add_argument('--rmsize', default=20000, type=int, help='memory size')
     parser.add_argument('--window_length', default=1, type=int, help='')
     parser.add_argument('--tau', default=0.001, type=float,
