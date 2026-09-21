@@ -461,6 +461,10 @@ def train(num_iterations_H,
                         'reward': m['r'], 'cost': m['c'],
                         'cvm': m['cvm'],
                         'profit': m['profit'],
+                        # 动作列 (aH_*/aL_*): 列名单一真源 = myfunc.action_col_names,
+                        # 这里按前缀转发 ⇒ 改动作维数也不会 KeyError。
+                        # 用途: 固定场景下 max|Δa| 跨 test9 事件 ≈ 0 是比 profit 更锐利的收敛判据。
+                        **{k: v for k, v in m.items() if k.startswith(('aH_', 'aL_'))},
                     } for m in case_metrics])], ignore_index=True)
                     # 附加一行 OVERALL：45 步 profit 之和等整体指标
                     df_test = pd.concat([df_test, pd.DataFrame([{
@@ -472,6 +476,7 @@ def train(num_iterations_H,
                         'reward': overall['r'], 'cost': overall['c'],
                         'cvm': overall['cvm'],
                         'profit': overall['profit'],
+                        **{k: v for k, v in overall.items() if k.startswith(('aH_', 'aL_'))},
                     }])], ignore_index=True)
                     df_test_written = flush_csv_append(
                         '{}/df_test9.csv'.format(output), df_test, df_test_written)
