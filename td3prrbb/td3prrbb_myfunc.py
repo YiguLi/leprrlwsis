@@ -615,22 +615,6 @@ except ImportError:
     from test_scenario import build_9case_scenario
 
 
-def action_col_names(n_H, n_L):
-    """test9 日志里**动作列名**的单一真源（列名只在这里生成）。
-
-    `n_H` = H 动作维数（每 case 一个，块内恒定）；`n_L` = 该 case 内 L 动作展开后的长度
-    （步级动作悉数记录，`n_L = 维数 × 每 case 步数`）。
-
-    **为什么要有动作列**：固定场景下"相邻两次 test9 的动作是否不再变化"
-    （`max|Δa| ≈ 0`）是比 `profit` 更锐利的收敛判据 —— `profit` 是 45 步的标量聚合，
-    可能饱和而对策略变化不敏感；动作是策略的直接输出。
-
-    下游（main 的行字典）按前缀 `('aH_', 'aL_')` 转发，不硬编码列名 ⇒
-    改维数时不会因键名不匹配而 KeyError。
-    """
-    return ['aH_%d' % i for i in range(n_H)] + ['aL_%d' % j for j in range(n_L)]
-
-
 def nine_case_test(agent_H, agent_L, env_test, rbb_system,
                    scenario=None, test_csv=False, output=None, seed=None):
     """
@@ -665,8 +649,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
     n_per_case = num_iterations // len(blocks)
 
     per_case = {i: {'r1': 0.0, 'c1': 0.0, 'r2': 0.0, 'c2': 0.0,
-                    'r': 0.0, 'c': 0.0, 'cvm': 0, 'profit': 0.0,
-                    'a_H': None, 'a_L': []}          # 动作记录 (见 action_col_names)
+                    'r': 0.0, 'c': 0.0, 'cvm': 0, 'profit': 0.0}
                 for i in range(len(blocks))}
     df = pd.DataFrame()
 
@@ -674,7 +657,6 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         if step % 5 == 0:
             action_H = agent_H.select_action(norm_obs)
             action_H, penalty_NN_H = CheckAction(action_H)
-            cur_a_H = np.asarray(action_H, dtype=float).ravel().copy()   # 本块 H 动作
             pw_tru = env_test.PowerOutput(obs[1], action_H)
 
         # L 层观测蒸馏 (5维): [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
@@ -714,8 +696,6 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
 
         bi = step // 5
         pc = per_case[bi]
-        pc['a_H'] = cur_a_H                      # 块内恒定
-        pc['a_L'].append(np.asarray(action_L, dtype=float).ravel())      # 步级
         pc['r1'] += r1
         pc['c1'] += c1
         pc['r2'] += r2
@@ -756,20 +736,9 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
     if test_csv and output:
         df.to_csv(f'{output}/test_s_prrbb_9case.csv', index=False)
 
-    # 动作列: 单一真源 action_col_names; 下游 main 按前缀 ('aH_', 'aL_') 转发
-    n_H = int(np.asarray(per_case[0]['a_H']).size)
-    _aL0 = np.concatenate(per_case[0]['a_L']) if per_case[0]['a_L'] else np.zeros(0)
-    n_L = int(_aL0.size)
-
     case_metrics = []
     for i, b in enumerate(blocks):
         pc = per_case[i]
-        acts = {}
-        for k, v in zip(action_col_names(n_H, 0), np.asarray(pc['a_H']).ravel()):
-            acts[k] = float(v)
-        _aL = np.concatenate(pc['a_L']) if pc['a_L'] else np.zeros(0)
-        for k, v in zip(action_col_names(0, n_L), _aL):
-            acts[k] = float(v)
         case_metrics.append({
             'wind_level': b['wind_level'],
             'price_level': b['price_level'],
@@ -781,7 +750,6 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             'c': pc['c'] / n_per_case,
             'cvm': pc['cvm'],
             'profit': pc['profit'],  # 该 case 5 步 profit 之和
-            **acts,
         })
 
     overall = {
@@ -794,7 +762,4 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         'cvm': int(sum(m['cvm'] for m in case_metrics)),
         'profit': float(sum(m['profit'] for m in case_metrics)),  # 45 步 profit 之和
     }
-    # 9 个 case 的逐列动作均值 —— 便于直接在 OVERALL 行上算 max|Δa| 判收敛
-    for k in action_col_names(n_H, n_L):
-        overall[k] = float(np.mean([m[k] for m in case_metrics]))
     return case_metrics, overall
