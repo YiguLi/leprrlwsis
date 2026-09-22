@@ -615,6 +615,15 @@ except ImportError:
     from test_scenario import build_9case_scenario
 
 
+# test9 存货结算参考价 —— **外生常数**（= 名义电价 hc.PR_REF, MED=580, 避免裸数字）。
+# 为什么必须外生: 若取"当时电价", 每步的充放收益逐项抵消 (ΔSOC·(pr_ref − pr) ≡ 0)
+#   ⇒ 电池对目标的贡献恒为 0 ⇒ 套利激励归零 (退化成没有电池)。
+# 为什么取 580: 把效率算进去后, 充电闸门 = η_c·pr_ref = 568.4, 放电闸门 = pr_ref/η_d = 591.8,
+#   而场景三价是 LOW 300 / MED 580 / HIGH 980 ⇒ **MED 恰好落在中性带 [568.4, 591.8] 内**
+#   ⇒ 该充电时充电、该放电时放电、平价时段不动作, 与物理一致。
+SOC_SETTLE_PR = float(hc.PR_REF)
+
+
 def nine_case_test(agent_H, agent_L, env_test, rbb_system,
                    scenario=None, test_csv=False, output=None, seed=None):
     """
@@ -649,7 +658,8 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
     n_per_case = num_iterations // len(blocks)
 
     per_case = {i: {'r1': 0.0, 'c1': 0.0, 'r2': 0.0, 'c2': 0.0,
-                    'r': 0.0, 'c': 0.0, 'cvm': 0, 'profit': 0.0}
+                    'r': 0.0, 'c': 0.0, 'cvm': 0, 'profit': 0.0,
+                    'soc_start': None, 'soc_end': None}   # 存货结算用 (见 SOC_SETTLE_PR)
                 for i in range(len(blocks))}
     df = pd.DataFrame()
 
@@ -696,6 +706,9 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
 
         bi = step // 5
         pc = per_case[bi]
+        if step % 5 == 0:
+            pc['soc_start'] = float(obs[2])      # 本块决策时刻的储存电量
+        pc['soc_end'] = float(obs2[2])           # 末次写入 = 本块末的储存电量
         pc['r1'] += r1
         pc['c1'] += c1
         pc['r2'] += r2
@@ -739,6 +752,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
     case_metrics = []
     for i, b in enumerate(blocks):
         pc = per_case[i]
+        _dsoc = float(pc['soc_end']) - float(pc['soc_start'])
         case_metrics.append({
             'wind_level': b['wind_level'],
             'price_level': b['price_level'],
@@ -749,9 +763,22 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             'r': pc['r'] / n_per_case,
             'c': pc['c'] / n_per_case,
             'cvm': pc['cvm'],
-            'profit': pc['profit'],  # 该 case 5 步 profit 之和
+            'profit': pc['profit'],  # 该 case 5 步 profit 之和（**现金流口径**）
+            # ---- 存货结算（口径修正，不改训练）----
+            # profit 只记现金流；储存在电池里的电其成本已扣（充电时 P_G 减少、收入减少），
+            # 价值却未认回 ⇒ ΔSOC>0（净充电）时 profit 低估、ΔSOC<0（净放电）时高估
+            # （把期初存量卖掉记成了利润）。按外生账面价 SOC_SETTLE_PR 结算。
+            'soc_start': float(pc['soc_start']),
+            'soc_end': float(pc['soc_end']),
+            'dsoc': _dsoc,
+            'profit_econ': float(pc['profit']) + _dsoc * SOC_SETTLE_PR,
         })
 
+    # 45 步总量口径（与下面 profit 是"9 个 case 之和"一致；逐 case 的 dsoc 望远镜求和
+    # 恰等于首末 SOC 之差，故这里直接取首 case 的起点与末 case 的终点）
+    _soc0 = float(case_metrics[0]['soc_start'])
+    _socN = float(case_metrics[-1]['soc_end'])
+    _profit_tot = float(sum(m['profit'] for m in case_metrics))
     overall = {
         'r1': float(np.mean([m['r1'] for m in case_metrics])),
         'c1': float(np.mean([m['c1'] for m in case_metrics])),
@@ -760,6 +787,10 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         'r': float(np.mean([m['r'] for m in case_metrics])),
         'c': float(np.mean([m['c'] for m in case_metrics])),
         'cvm': int(sum(m['cvm'] for m in case_metrics)),
-        'profit': float(sum(m['profit'] for m in case_metrics)),  # 45 步 profit 之和
+        'profit': _profit_tot,  # 45 步 profit 之和（现金流口径）
+        'soc_start': _soc0,
+        'soc_end': _socN,
+        'dsoc': _socN - _soc0,
+        'profit_econ': _profit_tot + (_socN - _soc0) * SOC_SETTLE_PR,
     }
     return case_metrics, overall
