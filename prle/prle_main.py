@@ -436,6 +436,10 @@ def train_prle(num_iterations_H,
                         'reward': m['r'], 'cost': m['c'],
                         'cvm': m['cvm'],
                         'profit': m['profit'],
+                        # 存货结算 (口径修正, 不改训练路径): profit 只记现金流, 不含储存电量变动;
+                        # 按外生账面价 SOC_SETTLE_PR (= hc.PR_REF = 580) 结算 ΔSOC。
+                        'soc_start': m['soc_start'], 'soc_end': m['soc_end'],
+                        'dsoc': m['dsoc'], 'profit_econ': m['profit_econ'],
                         'project_wind_levels': ','.join(m['project_wind_levels']),
                         'wind_low_max': overall['wind_low_max'],
                         'wind_high_min': overall['wind_high_min'],
@@ -450,6 +454,8 @@ def train_prle(num_iterations_H,
                         'reward': overall['r'], 'cost': overall['c'],
                         'cvm': overall['cvm'],
                         'profit': overall['profit'],
+                        'soc_start': overall['soc_start'], 'soc_end': overall['soc_end'],
+                        'dsoc': overall['dsoc'], 'profit_econ': overall['profit_econ'],
                         'project_wind_levels': '',
                         'wind_low_max': overall['wind_low_max'],
                         'wind_high_min': overall['wind_high_min'],
@@ -465,6 +471,9 @@ def train_prle(num_iterations_H,
                     writer.add_scalar('test9/overall/c', overall['c'], step)
                     writer.add_scalar('test9/overall/cvm', overall['cvm'], step)
                     writer.add_scalar('test9/overall/profit', overall['profit'], step)
+                    writer.add_scalar('test9/overall/profit_econ', overall['profit_econ'], step)
+                    writer.add_scalar('test9/overall/dsoc', overall['dsoc'], step)
+                    writer.add_scalar('test9/overall/soc_end', overall['soc_end'], step)
                     writer.add_scalar('test9/wind_low_max', overall['wind_low_max'], step)
                     writer.add_scalar('test9/wind_high_min', overall['wind_high_min'], step)
                     for m in case_metrics:

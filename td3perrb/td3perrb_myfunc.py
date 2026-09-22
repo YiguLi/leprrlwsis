@@ -470,6 +470,12 @@ except ImportError:
     from test_scenario import build_9case_scenario
 
 
+# test9 存货结算参考价 —— **外生常数** (= 名义电价 hc.PR_REF, MED=580, 避免裸数字)。
+# 为什么必须外生: 若取"当时电价", 每步的充放收益逐项抵消 (ΔSOC·(pr_ref − pr) ≡ 0)
+#   ⇒ 电池对目标的贡献恒为 0 ⇒ 套利激励归零 (退化成没有电池)。
+# 为什么取 580: 算上效率后充电闸门 = η_c·pr_ref = 568.4、放电闸门 = pr_ref/η_d = 591.8,
+#   场景三价 LOW 300 / MED 580 / HIGH 980 ⇒ MED 恰落在中性带 [568.4, 591.8] 内。
+SOC_SETTLE_PR = float(hc.PR_REF)
 def nine_case_test(agent_H, tracker, env_test, rbb_system,
                    scenario=None, test_csv=False, output=None, seed=None,
                    phase_mode=0, phase_table=None):
@@ -504,6 +510,7 @@ def nine_case_test(agent_H, tracker, env_test, rbb_system,
     num_iterations = len(wind_seq)
     n_per_case = num_iterations // len(blocks)
 
+    _soc0_of, _soc1_of = {}, {}     # bi -> 块首/块末储存电量 [MWh]
     per_case = {i: {'r1': 0.0, 'c1': 0.0, 'cvm': 0, 'pf_viol': 0, 'profit': 0.0,
                     'gap_pen': 0.0, 'soc_track_err': 0.0}
                 for i in range(len(blocks))}
@@ -560,6 +567,9 @@ def nine_case_test(agent_H, tracker, env_test, rbb_system,
         c1 = c1_step + gap_pen
 
         bi = step // 5
+        if step % 5 == 0:
+            _soc0_of[bi] = float(obs[2])        # 本块决策时刻的储存电量
+        _soc1_of[bi] = float(obs2[2])             # 末次写入 = 本块末储存电量
         pc = per_case[bi]
         pc['r1'] += r1
         pc['c1'] += c1
@@ -619,6 +629,12 @@ def nine_case_test(agent_H, tracker, env_test, rbb_system,
             'soc_track_err': pc['soc_track_err'],
         })
 
+    # ---- 存货结算: 逐 case 追加 (profit 是现金流口径, 不含储存电量变动) ----
+    for _i, _m in enumerate(case_metrics):
+        _s0, _s1 = _soc0_of[_i], _soc1_of[_i]
+        _m['soc_start'], _m['soc_end'] = _s0, _s1
+        _m['dsoc'] = _s1 - _s0
+        _m['profit_econ'] = float(_m['profit']) + (_s1 - _s0) * SOC_SETTLE_PR
     overall = {
         'r1': float(np.mean([m['r1'] for m in case_metrics])),
         'c1': float(np.mean([m['c1'] for m in case_metrics])),
@@ -628,4 +644,9 @@ def nine_case_test(agent_H, tracker, env_test, rbb_system,
         'profit': float(sum(m['profit'] for m in case_metrics)),
         'soc_track_err': float(np.mean([m['soc_track_err'] for m in case_metrics])),
     }
+    # ---- 存货结算: 45 步总量口径 (逐 case 的 dsoc 望远镜求和 = 首末之差) ----
+    _b0, _bN = min(_soc0_of), max(_soc1_of)
+    overall['soc_start'], overall['soc_end'] = _soc0_of[_b0], _soc1_of[_bN]
+    overall['dsoc'] = _soc1_of[_bN] - _soc0_of[_b0]
+    overall['profit_econ'] = float(overall['profit']) + overall['dsoc'] * SOC_SETTLE_PR
     return case_metrics, overall

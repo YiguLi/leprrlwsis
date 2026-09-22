@@ -381,6 +381,10 @@ def train(num_iterations_H,
                             'cvm': m['cvm'],
                             'pf_viol': m['pf_viol'],
                             'profit': m['profit'],
+                            # 存货结算 (口径修正, 不改训练路径): profit 只记现金流, 不含储存电量变动;
+                            # 按外生账面价 SOC_SETTLE_PR (= hc.PR_REF = 580) 结算 ΔSOC。
+                            'soc_start': m['soc_start'], 'soc_end': m['soc_end'],
+                            'dsoc': m['dsoc'], 'profit_econ': m['profit_econ'],
                             'soc_track_err': m['soc_track_err'],
                         })
                     df_test_rows.append({
@@ -392,6 +396,8 @@ def train(num_iterations_H,
                         'cvm': overall['cvm'],
                         'pf_viol': overall['pf_viol'],
                         'profit': overall['profit'],
+                        'soc_start': overall['soc_start'], 'soc_end': overall['soc_end'],
+                        'dsoc': overall['dsoc'], 'profit_econ': overall['profit_econ'],
                         'soc_track_err': overall['soc_track_err'],
                     })
                     df_test_written = flush_csv_append_batch(
@@ -405,6 +411,9 @@ def train(num_iterations_H,
                     writer.add_scalar('test9/overall/cvm', overall['cvm'], step)
                     writer.add_scalar('test9/overall/pf_viol', overall['pf_viol'], step)
                     writer.add_scalar('test9/overall/profit', overall['profit'], step)
+                    writer.add_scalar('test9/overall/profit_econ', overall['profit_econ'], step)
+                    writer.add_scalar('test9/overall/dsoc', overall['dsoc'], step)
+                    writer.add_scalar('test9/overall/soc_end', overall['soc_end'], step)
                     writer.add_scalar('test9/overall/soc_track_err',
                                       overall['soc_track_err'], step)
                     for m in case_metrics:

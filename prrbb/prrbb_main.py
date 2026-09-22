@@ -363,6 +363,10 @@ def train_prrbb(num_iterations_H,
                         'reward': m['r'], 'cost': m['c'],
                         'cvm': m['cvm'],
                         'profit': m['profit'],
+                        # 存货结算 (口径修正, 不改训练路径): profit 只记现金流, 不含储存电量变动;
+                        # 按外生账面价 SOC_SETTLE_PR (= hc.PR_REF = 580) 结算 ΔSOC。
+                        'soc_start': m['soc_start'], 'soc_end': m['soc_end'],
+                        'dsoc': m['dsoc'], 'profit_econ': m['profit_econ'],
                     } for m in case_metrics])], ignore_index=True)
                     # 附加一行 OVERALL：45 步 profit 之和等整体指标
                     df_test = pd.concat([df_test, pd.DataFrame([{
@@ -374,6 +378,8 @@ def train_prrbb(num_iterations_H,
                         'reward': overall['r'], 'cost': overall['c'],
                         'cvm': overall['cvm'],
                         'profit': overall['profit'],
+                        'soc_start': overall['soc_start'], 'soc_end': overall['soc_end'],
+                        'dsoc': overall['dsoc'], 'profit_econ': overall['profit_econ'],
                     }])], ignore_index=True)
                     df_test.to_csv('{}/df_test9.csv'.format(output))
 
@@ -386,6 +392,9 @@ def train_prrbb(num_iterations_H,
                     writer.add_scalar('test9/overall/c', overall['c'], step)
                     writer.add_scalar('test9/overall/cvm', overall['cvm'], step)
                     writer.add_scalar('test9/overall/profit', overall['profit'], step)
+                    writer.add_scalar('test9/overall/profit_econ', overall['profit_econ'], step)
+                    writer.add_scalar('test9/overall/dsoc', overall['dsoc'], step)
+                    writer.add_scalar('test9/overall/soc_end', overall['soc_end'], step)
                     for m in case_metrics:
                         tag = 'test9/{}_{}'.format(m['wind_level'], m['price_level'])
                         writer.add_scalar(tag + '/r1', m['r1'], step)
