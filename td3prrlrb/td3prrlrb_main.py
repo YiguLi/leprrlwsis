@@ -697,8 +697,8 @@ if __name__ == "__main__":
                         default=200,
                         type=int,
                         help='time without training but only filling the replay memory')
-    parser.add_argument('--discount', default=0.99, type=float, help='')
-    # 0.99: γ 以【块(5 min)】为单位生效 (observe_jump 聚合 5 步后 discount 只用一次)
+    parser.add_argument('--discount', default=0.98, type=float, help='')
+    # 0.98: γ 以【块(5 min)】为单位生效 (observe_jump 聚合 5 步后 discount 只用一次)
     #       ⇒ 半衰期 69 块 ≈ 5.8 h, 覆盖 4~7 h 的低价充/高价放周期
     #       (0.98 时半衰期仅 34 块 ≈ 2.8 h, 跨 4 h 的套利收益权重只剩 0.38)
     parser.add_argument('--bsize', default=64, type=int,

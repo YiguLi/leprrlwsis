@@ -537,8 +537,9 @@ BOUND_PEN_COEF_L = 200.0   # L 每维越界惩罚系数 (不变)
 def CheckAction(action, charge=10.):
     """Clip actions to feasible ranges. WT: [0,0.5], Signal: [-0.5,0.5], Bat: [-charge,charge].
 
-    penalty_NN_H (H 动作分支, len 5/6): 每维越界量 × BOUND_PEN_COEF_H(=100),
-    总和再封顶 PENALTY_NN_H_CAP(=50)。L 动作 (len 1) 系数不变。
+    penalty_NN_H (H 动作分支, len 5/6): 每维越界量 × 200, **不封顶**
+    (【六方法统一口径】与其余 5 个 TD3 方法一致; 原为 ×BOUND_PEN_COEF_H(=100)
+    且总和封顶 PENALTY_NN_H_CAP(=50), 已随本次统一取消)。
     """
     penalty = 0
     SIGNAL_MIN, SIGNAL_MAX = -0.5, 0.5
@@ -546,13 +547,13 @@ def CheckAction(action, charge=10.):
     if len(action) == 7:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += BOUND_PEN_COEF_H * ((ma - 0.5) + (0. - mi))
+            penalty += 200 * ((ma - 0.5) + (0. - mi))
         sig = action[5]
-        if sig > SIGNAL_MAX:    penalty += BOUND_PEN_COEF_H * (sig - SIGNAL_MAX)
-        elif sig < SIGNAL_MIN:  penalty += BOUND_PEN_COEF_H * (SIGNAL_MIN - sig)
+        if sig > SIGNAL_MAX:    penalty += 200 * (sig - SIGNAL_MAX)
+        elif sig < SIGNAL_MIN:  penalty += 200 * (SIGNAL_MIN - sig)
         for j in action[6:]:
             ma, mi = max(charge, j), min(-charge, j)
-            penalty += BOUND_PEN_COEF_L * ((ma - charge) + (-charge - mi))
+            penalty += 200 * ((ma - charge) + (-charge - mi))
         a_H = np.append(np.clip(action[:5], 0., 0.5),
                         np.clip(action[5], SIGNAL_MIN, SIGNAL_MAX))
         a_L = np.clip(action[6:], -charge, charge)
@@ -561,26 +562,26 @@ def CheckAction(action, charge=10.):
     elif len(action) == 6:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += BOUND_PEN_COEF_H * ((ma - 0.5) + (0. - mi))
+            penalty += 200 * ((ma - 0.5) + (0. - mi))
         sig = action[5]
-        if sig > SIGNAL_MAX:    penalty += BOUND_PEN_COEF_H * (sig - SIGNAL_MAX)
-        elif sig < SIGNAL_MIN:  penalty += BOUND_PEN_COEF_H * (SIGNAL_MIN - sig)
+        if sig > SIGNAL_MAX:    penalty += 200 * (sig - SIGNAL_MAX)
+        elif sig < SIGNAL_MIN:  penalty += 200 * (SIGNAL_MIN - sig)
         applied = np.append(np.clip(action[:5], 0., 0.5),
                             np.clip(action[5], SIGNAL_MIN, SIGNAL_MAX))
         # penalty_NN_H 总封顶
-        return applied, min(penalty, PENALTY_NN_H_CAP)
+        return applied, penalty
 
     elif len(action) == 5:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += BOUND_PEN_COEF_H * ((ma - 0.5) + (0. - mi))
+            penalty += 200 * ((ma - 0.5) + (0. - mi))
         # penalty_NN_H 总封顶
-        return np.clip(action[:5], 0., 0.5), min(penalty, PENALTY_NN_H_CAP)
+        return np.clip(action[:5], 0., 0.5), penalty
 
     elif len(action) == 1:
         for j in action:
             ma, mi = max(charge, j), min(-charge, j)
-            penalty += BOUND_PEN_COEF_L * ((ma - charge) + (-charge - mi))
+            penalty += 200 * ((ma - charge) + (-charge - mi))
         return np.clip(action, -charge, charge), penalty
 
     return action, penalty

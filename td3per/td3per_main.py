@@ -865,9 +865,9 @@ if __name__ == "__main__":
                         default=200,
                         type=int,
                         help='time without training but only filling the replay memory')
-    # 0.99: H 层 γ 以【块(5 min)】为单位生效 (observe_jump 聚合 5 步后 discount 只用一次)
+    # 0.98: H 层 γ 以【块(5 min)】为单位生效 (observe_jump 聚合 5 步后 discount 只用一次)
     #       ⇒ 半衰期 69 块 ≈ 5.8 h, 覆盖 4~7 h 的低价充/高价放周期 (td3perrb 口径)
-    parser.add_argument('--discount', default=0.99, type=float, help='')
+    parser.add_argument('--discount', default=0.98, type=float, help='')
     parser.add_argument('--bsize', default=64, type=int,
                         help='minibatch size')
     parser.add_argument('--rmsize',
@@ -950,7 +950,7 @@ if __name__ == "__main__":
                         help='L 层 target smoothing noise std (动作幅度比例): 0.01≈关闭 / 0.1=TD3默认')
     # L 层折扣 (步级语义) 与 H 层解耦: L episode = 5 步块 (done_L=True), 视野 ≤5 步
     parser.add_argument('--l_discount', default=0.98, type=float,
-                        help='L 层(BESS)折扣: 步级语义; 默认 0.98 (td3per 原口径; H 为块级 0.99)')
+                        help='L 层(BESS)折扣: 步级语义; 默认 0.98 (td3per 原口径; H 为块级 0.98)')
     parser.add_argument('--l_noise_amp', default=1.0, type=float,
                         help='L 层探索噪声半宽 [MW] (残余动作量级; 旧式 ±0.05 比所需小 ~50 倍)')
     parser.add_argument('--cost_critic_mode', default='max', type=str,

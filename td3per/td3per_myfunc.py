@@ -359,12 +359,12 @@ def CheckAction(action, charge=10.):
     if len(action) == 6:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 100 * ((ma - 0.5) + (0. - mi))
+            penalty += 200 * ((ma - 0.5) + (0. - mi))
         sig = action[5]
         if sig > SIGNAL_MAX:
-            penalty += 100 * (sig - SIGNAL_MAX)
+            penalty += 200 * (sig - SIGNAL_MAX)
         elif sig < SIGNAL_MIN:
-            penalty += 100 * (SIGNAL_MIN - sig)
+            penalty += 200 * (SIGNAL_MIN - sig)
         applied = np.append(np.clip(action[:5], 0., 0.5),
                             np.clip(action[5], SIGNAL_MIN, SIGNAL_MAX))
         # 不封顶: 保持恒定恢复力 (见 docstring)
@@ -373,13 +373,13 @@ def CheckAction(action, charge=10.):
     elif len(action) == 5:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 100 * ((ma - 0.5) + (0. - mi))
+            penalty += 200 * ((ma - 0.5) + (0. - mi))
         return np.clip(action[:5], 0., 0.5), penalty
 
     elif len(action) == 1:
         for j in action:
             ma, mi = max(charge, j), min(-charge, j)
-            penalty += 500 * ((ma - charge) + (-charge - mi))
+            penalty += 200 * ((ma - charge) + (-charge - mi))
         return np.clip(action, -charge, charge), penalty
 
     return action, penalty
