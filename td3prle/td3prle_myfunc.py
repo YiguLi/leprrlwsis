@@ -783,6 +783,76 @@ except ImportError:
 # 为什么取 580: 算上效率后充电闸门 = η_c·pr_ref = 568.4、放电闸门 = pr_ref/η_d = 591.8,
 #   场景三价 LOW 300 / MED 580 / HIGH 980 ⇒ MED 恰落在中性带 [568.4, 591.8] 内。
 SOC_SETTLE_PR = float(hc.PR_REF)
+# =============================================================================
+# 24h 相位特征 (自 td3per/td3perrb/td3prrlrb 逐字复制, 六方法统一口径)
+#   --phase_feat 0/1/2 -> 追加 0/2/5 维; 训练侧与 test9 侧必须用同一构造。
+# =============================================================================
+PHASE_DIM = {0: 0, 1: 2, 2: 5}
+DAY_MINUTES = 1440
+
+_PHASE_TABLE_CACHE = {}
+
+
+def day_price_schedule():
+    """与 env.CalPrice 一致的 1440 分钟电价日程表 (LOW 300 / MED 580 / HIGH 980)。"""
+    m = np.arange(DAY_MINUTES)
+    p = np.full(DAY_MINUTES, 980.0)
+    p[(m < 7 * 60) | (m >= 23 * 60)] = 300.0
+    p[((m >= 11 * 60) & (m < 17 * 60)) | ((m >= 21 * 60) & (m < 23 * 60))] = 580.0
+    return p
+
+
+def phase_daily_table():
+    """日程表逐分钟的 [段内剩余比例, 剩余小时/8, 下一段电价/1000] (循环日程)。"""
+    key = 'daily'
+    if key in _PHASE_TABLE_CACHE:
+        return _PHASE_TABLE_CACHE[key]
+    pr = day_price_schedule()
+    n = DAY_MINUTES
+    t = np.zeros((n, 3))
+    for i in range(n):
+        j = i
+        while (j - i) < n - 1 and pr[(j + 1) % n] == pr[i]:
+            j += 1
+        k = i
+        while (i - k) < n - 1 and pr[(k - 1) % n] == pr[i]:
+            k -= 1
+        steps = (j - i) + 1               # 本段剩余步数 (含当前步)
+        seg_len = (j - k) + 1
+        t[i] = [steps / seg_len, min(steps, 480) / 480.0, pr[(j + 1) % n] / 1000.0]
+    _PHASE_TABLE_CACHE[key] = t
+    return t
+
+
+def phase_features(minute, mode=1, table=None):
+    """相位特征向量; mode<=0 返回空数组。minute 为一天中的第几分钟 (0..1439)。"""
+    if mode <= 0:
+        return np.zeros(0)
+    m = int(minute) % DAY_MINUTES
+    ang = 2.0 * np.pi * m / DAY_MINUTES
+    feats = [np.sin(ang), np.cos(ang)]
+    if mode >= 2:
+        t = phase_daily_table() if table is None else table
+        feats.extend([t[m, 0], t[m, 1], t[m, 2]])
+    return np.asarray(feats, dtype=np.float64)
+
+
+def phase_minute_of_day(episode_steps):
+    return int(episode_steps) % DAY_MINUTES
+
+
+def Normalize_H(obs, minute=0, mode=1, table=None):
+    """H 层观测归一化: 4 维基础观测 + 相位特征 (mode 0 时即原 Normalize)。"""
+    base = Normalize(obs)
+    if mode <= 0:
+        return base
+    return np.concatenate([base, phase_features(minute, mode, table)])
+
+
+# 9-case 测试用: 把 case 的电价档映射到该档"代表性时刻"(取该段中点),
+# 这样测试时的相位与训练同分布 (场景电价每 5 步就变, 直接用 wall-clock 相位会 OOD)。
+
+
 def nine_case_test(agent_H, agent_L, env_test, rbb_system,
                    scenario=None, test_csv=False, output=None, seed=None):
     """
