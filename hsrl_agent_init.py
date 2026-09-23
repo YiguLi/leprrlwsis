@@ -6,7 +6,10 @@ HSRL 智能体初始化助手（多项目共享）
 动机（实测）
 ------------
 `model.py` 的 `Critic` 结构为 fc1→fc4→(cat a)→fc2→fc5→**fc3(50→1, 输出层)**，
-其中只有 fc1/fc2 被 `fanin_init` 覆写，**fc3 保持 PyTorch 默认 U(±1/√50)=±0.1414**。
+其 `init_weights` 只写 3 个**权重**：fc1/fc2 用 fan_out 口径（`fanout_init`，历史
+误名 `fanin_init`）、`fc3.weight = ±init_w = ±3e-3`，`fc4/fc5` 的权重未被覆写；
+**所有 bias 一律不碰** ⇒ 保持 PyTorch 默认 U(±1/√fan_in)，其中
+`fc3.bias = U(±1/√50) = ±0.1414` 就是初始输出的主要来源。
 于是 critic 初始化时输出 Q≈O(0.1)，而回归目标是 O(10³)（如 TD3LEPRRLRB 实测
 |Q_p|≈1.0e3~2.2e3，γ=0.98）——**差了约 4 个数量级**。
 
