@@ -991,10 +991,10 @@ if __name__ == "__main__":
                         type=int,
                         help='time without training but only filling the replay memory')
     parser.add_argument('--discount', default=0.98, type=float, help='')
-    parser.add_argument('--bsize', default=64, type=int,
+    parser.add_argument('--bsize', default=128, type=int,
                         help='minibatch size')
     parser.add_argument('--rmsize',
-                        default=40000,
+                        default=80000,
                         type=int,
                         help='memory size')
     parser.add_argument('--window_length', default=1, type=int, help='')

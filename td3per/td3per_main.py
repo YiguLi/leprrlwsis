@@ -868,10 +868,10 @@ if __name__ == "__main__":
     # 0.98: H 层 γ 以【块(5 min)】为单位生效 (observe_jump 聚合 5 步后 discount 只用一次)
     #       ⇒ 半衰期 69 块 ≈ 5.8 h, 覆盖 4~7 h 的低价充/高价放周期 (td3perrb 口径)
     parser.add_argument('--discount', default=0.98, type=float, help='')
-    parser.add_argument('--bsize', default=64, type=int,
+    parser.add_argument('--bsize', default=128, type=int,
                         help='minibatch size')
     parser.add_argument('--rmsize',
-                        default=40000,
+                        default=80000,
                         type=int,
                         help='memory size')
     parser.add_argument('--window_length', default=1, type=int, help='')
