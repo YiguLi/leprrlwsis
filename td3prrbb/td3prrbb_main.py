@@ -57,11 +57,12 @@ from env import WindBattery
 from td3prrbb.td3prrbb_ddpg import SP_TD3
 from util import *
 from td3prrbb.td3prrbb_myfunc import (
-    CheckAction, Normalize, Original,
+    CheckAction, Normalize, Normalize_H, Original,
     Cal_Rew_PRRBB, nine_case_test,
     build_L_obs_distilled,
     get_price_level,
     get_wind_thresholds, set_wind_thresholds,
+    PHASE_DIM, day_price_schedule, phase_daily_table, phase_minute_of_day,
 )
 from td3prrbb.td3prrbb_rule_bess import RuleBasedBESS
 
@@ -187,6 +188,14 @@ def train(num_iterations_H,
     # 与 H agent 绑定同一 (γ, s): 估计口径 = critic 回归口径, 结构上不会分叉
     bias_init.value_scale = float(getattr(agent_H, 'value_scale', hc.value_scale()))
     bias_init.discount = float(agent_H.discount)
+
+    # ---- 24h 相位特征 (--phase_feat) ----
+    phase_mode = int(getattr(args, 'phase_feat', 0))
+    phase_table = phase_daily_table() if phase_mode >= 2 else None
+    phase_sched = day_price_schedule()
+    phase_mismatch = 0
+    phase_checked = 0
+
     while step < num_iterations_H:
         # start of episode 重置环境
         prYellow('########### step:{} ###########'.format(step))
@@ -196,8 +205,16 @@ def train(num_iterations_H,
             # 此处覆盖为 [0.5, 5.5] 均匀随机起点 (每个 episode 一致)
             env.E = np.random.uniform(soc_reset_low, soc_reset_high)
             observation[2] = env.E
-            norm_observation = Normalize(observation)
+            norm_observation = Normalize_H(observation, phase_minute_of_day(0),
+                                           phase_mode, phase_table)
             agent_H.reset(norm_observation)
+
+        # 相位自检: env 的电价必须与 day_price_schedule() 在 episode_steps%1440 处一致
+        pm_now = phase_minute_of_day(episode_steps)
+        if phase_mode > 0:
+            if abs(float(observation[0]) - phase_sched[pm_now]) > 1e-6:
+                phase_mismatch += 1
+            phase_checked += 1
 
         # agent pick action 上层选择动作
         if episode_steps % 5 == 0:
@@ -293,7 +310,9 @@ def train(num_iterations_H,
             env.step(action_rbb[:6], action_rbb[6:], pw_tru)
         action_rbb[6:] = action_L
         prGreen('Applied action = {}.'.format(round_list(action_rbb, 3)))
-        norm_observation2 = Normalize(observation2)
+        norm_observation2 = Normalize_H(observation2,
+                                        phase_minute_of_day(episode_steps + 1),
+                                        phase_mode, phase_table)
         # 下一状态 L 观测: 用下一状态重算可行域 (pb 无关)
         _, rbb_info_obs2 = rbb_system.compute_pbrule(
             pb_original=0.0, ptur=float(pw_tru2),
@@ -450,7 +469,8 @@ def train(num_iterations_H,
             # consecutive test9 events are point-comparable and smooth)
             if episode_steps % 480 == 0:
                 case_metrics, overall = nine_case_test(
-                    agent_H, agent_L, env_test, rbb_system, seed=42)
+                    agent_H, agent_L, env_test, rbb_system, seed=42,
+                    phase_mode=phase_mode, phase_table=phase_table)
                 if use_csv:
                     df_test = pd.concat([df_test, pd.DataFrame([{
                         'step': step,
@@ -751,6 +771,10 @@ if __name__ == "__main__":
                         type=int,
                         help='time without training but only filling the replay memory')
     parser.add_argument('--discount', default=0.98, type=float, help='')
+    # ---- 24h 相位特征 (--phase_feat) ----
+    parser.add_argument('--phase_feat', default=1, type=int, choices=[0, 1, 2],
+                        help='H 层观测的 24h 相位特征: 0=关(4维); 1=sin/cos(6维, 默认); '
+                             '2=1+[段内剩余比例, 剩余小时/8, 下一段电价/1000](9维)')
     # 0.99
     parser.add_argument('--bsize', default=128, type=int,
                         help='minibatch size')  #64
@@ -943,7 +967,11 @@ if __name__ == "__main__":
 
     # H 层对偶改 EMA 实际成本更新 —— lam1 不再读 critic (Q_c)；
     #     lam1 ∈ [3, 50] 初始 5.0 (与 PRRBB H 层同配置, c1 公式同量级)
-    agent_H = SP_TD3(nb_states = 4, nb_actions = 6, args = args,
+    # H 观测维 = 4 (基础) + 相位维 (--phase_feat; 与其余五个 TD3 方法统一口径)
+    nb_states_H = 4 + PHASE_DIM[int(getattr(args, 'phase_feat', 0))]
+    print('H nb_states = {} (4 base + {} phase dims, --phase_feat={})'.format(
+        nb_states_H, PHASE_DIM[int(getattr(args, 'phase_feat', 0))], args.phase_feat))
+    agent_H = SP_TD3(nb_states = nb_states_H, nb_actions = 6, args = args,
                      lam_max=(_HCFG['lam_max'] if _HCFG else 50.0), lam_min=(_HCFG['lam_min'] if _HCFG else 3.0),
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                      record_update_stats=True,

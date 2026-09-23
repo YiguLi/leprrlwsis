@@ -470,6 +470,10 @@ def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info, n_rem
 # 9. Test Function
 # =============================================================================
 
+# ⚠ 历史遗留: `prrbb_S_test` 当前**无任何调用者**（评测走 test_five_days.py 的 run_day，
+#   训练内测试走 nine_case_test）。它只会构造 4 维 H 观测：若将来要启用，必须像
+#   nine_case_test 那样补上相位（`Normalize_H(obs, phase_minute_of_day(step), phase_mode,
+#   phase_table)`）并给它加 phase_mode/phase_table 参数，否则与 6 维 H 网络形状不符。
 def prrbb_S_test(agent_H, agent_L, env_test, rbb_system,
                   num_iterations=5, test_csv=False, output=None, day=0):
     """PRRBB test with per-step detail recording."""
@@ -692,10 +696,30 @@ def Normalize_H(obs, minute=0, mode=1, table=None):
 
 # 9-case 测试用: 把 case 的电价档映射到该档"代表性时刻"(取该段中点),
 # 这样测试时的相位与训练同分布 (场景电价每 5 步就变, 直接用 wall-clock 相位会 OOD)。
+REP_MINUTE = {'LOW': 210, 'MEDIUM': 840, 'HIGH': 540}
+
+
+def rep_minute_for_price_level(level):
+    """电价档 → 该档的"代表性时刻"(分钟)。同时接受档位名('LOW')与数值电价(300/580/980)。
+
+    ⚠️ 历史 bug: 9-case 场景的 price_seq 是**数值**电价
+    (test_scenario.build_9case_scenario 返回 int), 而早期实现只按档位名查表
+    ⇒ str(300)='300' 查不到 ⇒ 45 步全部回退 210 (LOW)
+    ⇒ MEDIUM/HIGH 的 case 用"凌晨 3:30 的相位"评估, 相位与电价自相矛盾 (OOD)。
+    这里先按档位名查, 查不到再按数值电价分档 (get_price_level), 两种调用都正确。
+    """
+    key = str(level).strip().upper()
+    if key not in REP_MINUTE:
+        try:
+            key = get_price_level(float(level))
+        except (TypeError, ValueError):
+            pass
+    return REP_MINUTE.get(key, 210)
 
 
 def nine_case_test(agent_H, agent_L, env_test, rbb_system,
-                   scenario=None, test_csv=False, output=None, seed=None):
+                   scenario=None, test_csv=False, output=None, seed=None,
+                   phase_mode=0, phase_table=None):
     """
     PRRBB 45-step 9-case in-training test.
 
@@ -719,7 +743,11 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         wind_seq, price_seq, case_ids, blocks = scenario
 
     obs = env_test.ScenarioReset(wind_seq, price_seq)
-    norm_obs = Normalize(obs)
+    # 相位: 场景电价每 5 步就变一次, 直接用 wall-clock 相位会 OOD;
+    # 这里按 case 的电价档映射到该档"代表性时刻"(段中点), 使测试与训练同分布,
+    # 且跨 run 可比 (相同 case 相同相位)。phase_mode=0 时 Normalize_H 退化为 4 维。
+    _pminute = {i: rep_minute_for_price_level(price_seq[i]) for i in range(len(price_seq))}
+    norm_obs = Normalize_H(obs, _pminute[0], phase_mode, phase_table)
     time = 1.0 / 60
     agent_H.is_training = False
     agent_L.is_training = False
@@ -766,7 +794,8 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             env_test.ScenarioStep(action_rbb[:6], action_rbb[6:], pw_tru)
 
         action_rbb[6:] = action_L_env
-        norm_obs2 = Normalize(obs2)
+        norm_obs2 = Normalize_H(obs2, _pminute[min(step + 1, num_iterations - 1)],
+                                phase_mode, phase_table)
 
         r1, c1, r2, c2, details = Cal_Rew_PRRBB(
             obs, obs2, action_rbb, rbb_info,
