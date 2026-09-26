@@ -868,6 +868,18 @@ if __name__ == "__main__":
     # 0.98: H 层 γ 以【块(5 min)】为单位生效 (observe_jump 聚合 5 步后 discount 只用一次)
     #       ⇒ 半衰期 69 块 ≈ 5.8 h, 覆盖 4~7 h 的低价充/高价放周期 (td3perrb 口径)
     parser.add_argument('--discount', default=0.98, type=float, help='')
+    # ---- H 层 n 步回报 / twin-target 聚合 (默认关: 与历史 run 逐位一致) ----
+    #   冻结批离线验证 (agentutil/test_nstep_h.py 的动机, 见 2026-09 记录):
+    #   1-step + min-target 在 40k 次更新后只到 MC 真值的 34 %;
+    #   n=10 + mean-target 在 20k 次就到 90 % (n=10 + min 为 76 %)。
+    #   实现: H 层 observation 侧把连续 n 个块折叠成一条转移 (reward=Σγ^k r_k),
+    #   每条转移自带 bootstrap 系数 γ^n ⇒ 需要自助传播的深度从 1/(1−γ)=50 降到 50/n。
+    parser.add_argument('--nstep', default=1, type=int,
+                        help='H 层 n 步回报 (1 = 历史 1-step 口径; 建议 5~10)')
+    parser.add_argument('--target_agg', default='min', type=str,
+                        choices=['min', 'mean'],
+                        help='H 层 twin profit-critic 的 target 聚合 '
+                             '(min = TD3 原口径; mean = 去掉悲观偏差)')
     parser.add_argument('--bsize', default=128, type=int,
                         help='minibatch size')
     parser.add_argument('--rmsize',
@@ -1082,7 +1094,11 @@ if __name__ == "__main__":
                      cost_critic_mode=args.cost_critic_mode,
                      wt_noise=args.wt_noise,
                      sig_noise_max=args.sig_noise_max,
-                     sig_noise_min=args.sig_noise_min)
+                     sig_noise_min=args.sig_noise_min,
+                     nstep=args.nstep, target_agg=args.target_agg)
+    print('[H] nstep={} target_agg={} (nstep>1 = n 步回报: 自助传播深度 50->{:.1f};'
+          ' 默认 nstep=1 与历史 run 逐位一致)'.format(
+              args.nstep, args.target_agg, 50.0 / max(1, args.nstep)))
     agent_H.lam = _HCFG['lam_init'] if _HCFG else 5.0
     # 值函数回归空间归一化 (s = hc.value_scale()): 只作用于 H 层 r1/c1 进入
     # critic 之前; buffer/对偶/日志/CSV 仍是原始口径 (见 hsrl_cost 末尾小节)。
