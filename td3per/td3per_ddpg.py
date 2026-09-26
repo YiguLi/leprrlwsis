@@ -116,7 +116,7 @@ class SP_TD3(object):
         self.nstep = max(1, int(nstep))
         self.target_agg = str(target_agg)
         assert self.target_agg in ('min', 'mean'), self.target_agg
-        self._pending = []        # nstep>1 时尚未成型的块级转移 (窗口不足 n)
+        self._pending = []        # nstep>1 时的滑窗队列: 最近 n-1 个块 (等待后继块结算)
         # 每条转移自带的 bootstrap 系数 (γ^n; episode 截断处为 0), 按 memory 下标存。
         # nstep>1 的 update_policy 用它替代全局 discount; nstep==1 时完全不读。
         self._boot = (np.full(int(args.rmsize), float(self.discount), dtype=np.float32)
@@ -495,6 +495,9 @@ class SP_TD3(object):
 
         reward = Σ_{k<n} γ^k·r_k (成本通道同式); next_state = 第 n 个后继状态;
         boot = γ^n, 但窗口内出现 done 就截断且 boot=0 (由 done 表达终止)。
+
+        注意: 正常路径 (滑窗) 每次只有 start=0, n_used=nstep —— 每来一个块结算一条;
+        start>0 只出现在 episode 末的尾部结算 (逐条截断)。
         """
         seg = self._pending[start:start + n_used]
         gam = float(self.discount)
@@ -518,9 +521,17 @@ class SP_TD3(object):
             self.memory.append(s_t, a_t, r_t, c_t, s_t1, done)
             return
         self._pending.append((s_t, a_t, r_t, c_t, s_t1, done))
+        # ---- 滑窗 (stride-1): 每来一个新块就结算**队首**那一条, 队列长度稳定在 n-1 ----
+        #   为什么必须滑窗而不是"攒满 n 个清空": 分块版每条转移的起点是 b1,b(1+n),...
+        #   ⇒ 只有 1/n 的块状态成为**训练输入**, 其余只作为 bootstrap 的后继 (target 侧)
+        #   出现, 网络从未以它们为输入拟合过。滑窗版每个块都是某条转移的起点 ⇒
+        #   **状态覆盖 = 块数**, 同时每条仍带 n 步目标 (标准做法: Rainbow/Ape-X 的
+        #   n_step wrapper 即 stride-1)。
+        #   代价: 条目数 ×n (rmsize 口径变回"≈块数"), 且相邻两条共享 n-1 个奖励
+        #   ⇒ 批内相关、PER 优先级在同一奖励段上扩散 (看 weight_mean)。
         while len(self._pending) >= self.nstep:
             self._emit_nstep(0, self.nstep)
-            del self._pending[:self.nstep]
+            self._pending.pop(0)
         if done:
             # episode 末: 尾部 (不足 n 步) 逐条按截断结算, 防止跨 episode 混算
             k = len(self._pending)

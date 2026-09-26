@@ -872,10 +872,11 @@ if __name__ == "__main__":
     #   冻结批离线验证 (agentutil/test_nstep_h.py 的动机, 见 2026-09 记录):
     #   1-step + min-target 在 40k 次更新后只到 MC 真值的 34 %;
     #   n=10 + mean-target 在 20k 次就到 90 % (n=10 + min 为 76 %)。
-    #   实现: H 层 observation 侧把连续 n 个块折叠成一条转移 (reward=Σγ^k r_k),
-    #   每条转移自带 bootstrap 系数 γ^n ⇒ 需要自助传播的深度从 1/(1−γ)=50 降到 50/n。
+    #   实现: H 层把连续 n 个块折叠成一条转移 (reward=Σγ^k r_k, 滑窗 stride-1:
+    #   每个块都是某条转移的起点 ⇒ 状态覆盖 = 块数, 条目数 ≈ 块数), 每条转移自带
+    #   bootstrap 系数 γ^n ⇒ 需要自助传播的深度从 1/(1−γ)=50 降到 50/n。
     parser.add_argument('--nstep', default=1, type=int,
-                        help='H 层 n 步回报 (1 = 历史 1-step 口径; 建议 5~10)')
+                        help='H 层 n 步回报, 滑窗 stride-1 (1 = 历史 1-step 口径; 建议 5~10)')
     parser.add_argument('--target_agg', default='min', type=str,
                         choices=['min', 'mean'],
                         help='H 层 twin profit-critic 的 target 聚合 '

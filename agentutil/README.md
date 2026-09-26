@@ -23,7 +23,7 @@
 | `test_l_residual.py` | 残余动作 `pb_cmd = 规则基线 + Δ` 的不变量（基线逐位 ≡ `SocTracker.act` / `Δ≡0 ⇒ r2≡0 ∧ c2≡0` / 零初始化输出层 / 三 main 接线 / 事后填入核对） | `python agentutil/test_l_residual.py` |
 | `test_l_track_range.py` | 下层 r2/c2 两区间分治不变量（F=∅ ⇒ 单点竭力值 / `n_rem` 时间表 / 单位符号） | `python agentutil/test_l_track_range.py` |
 | `test_phase_uniform.py` | 24h 相位口径统一回归：五统一模块的 `Normalize_H`/`phase_daily_table`/`day_price_schedule` 逐位相同 + `rep_minute_for_price_level` 两种调用约定（档位名/数值电价）+ `td3leprrlrb` 旧口径**语义等价** + 六方法接线契约（`--phase_feat`、`nb_states_H`、`--bsize 128`、两个接收方的 `nine_case_test` 与 main、`test_five_days.py` 的 `h_obs`） | `python agentutil/test_phase_uniform.py` |
-| `test_nstep_h.py` | H 层 **n 步回报**（`--nstep`）与 twin-target 聚合（`--target_agg`）实现契约：`nstep=1` 默认路径与输入逐位相同 + `n` 步折叠（`Σγ^k r_k`/第 n 后继/`γ^n`/done 截断/episode 尾结算）+ target 公式（`r+γv` vs `Σγ^k r_k+γ^n v`、min 与 mean 聚合） | `python agentutil/test_nstep_h.py` |
+| `test_nstep_h.py` | H 层 **n 步回报**（`--nstep`，**滑窗 stride-1**）与 twin-target 聚合（`--target_agg`）实现契约：`nstep=1` 默认路径与输入逐位相同 + 滑窗条数 `=块数−n+1`、起点逐块覆盖、`Σγ^k r_k`/第 n 后继/`γ^n`/done 截断/episode 尾结算 + 一整集条数 == 块数（不丢状态覆盖）+ target 公式（`r+γv` vs `Σγ^k r_k+γ^n v`、min 与 mean 聚合） | `python agentutil/test_nstep_h.py` |
 | `analyse_q_scale.py` | 从 `update_stats_H.csv` 量化 Q 尺度瞬态与相对 TD 误差 | `python agentutil/analyse_q_scale.py [csv|通配 ...]` |
 | `ab_critic_bias.py` | 同 seed 短程 A/B 驱动（bias 初始化 / 值函数尺度） | `python agentutil/ab_critic_bias.py --project td3perrb --seed 101 --steps 20000 [--dry-run]` |
 | `probe_action_symmetry.py` | 已训练 critic 的 ∂Q/∂a 动作对称性探针 | `python agentutil/probe_action_symmetry.py output/<run1> [run2 ...]` |
