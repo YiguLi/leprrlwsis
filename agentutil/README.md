@@ -28,6 +28,7 @@
 | `test_nstep_h.py` | H 层 **n 步回报**（`--nstep`，**滑窗 stride-1**，CLI 默认 5）与 twin-target 聚合（`--target_agg`）实现契约：**显式 `nstep=1`（复现 run1~run10 的历史口径）**与输入逐位相同 + 滑窗条数 `=块数−n+1`、起点逐块覆盖、`Σγ^k r_k`/第 n 后继/`γ^n`/done 截断/episode 尾结算 + 一整集条数 == 块数（不丢状态覆盖）+ target 公式（`r+γv` vs `Σγ^k r_k+γ^n v`、min 与 mean 聚合） | `python agentutil/test_nstep_h.py` |
 | `analyse_q_scale.py` | 从 `update_stats_H.csv` 量化 Q 尺度瞬态与相对 TD 误差 | `python agentutil/analyse_q_scale.py [csv|通配 ...]` |
 | `ab_critic_bias.py` | 同 seed 短程 A/B 驱动（bias 初始化 / 值函数尺度） | `python agentutil/ab_critic_bias.py --project td3perrb --seed 101 --steps 20000 [--dry-run]` |
+| `probe_q_profile_boundary.py` | **逐维动作边界剖面**：固定其它维、只扫一维得到 `Q(a_j)` 面板均值切片 → 峰位、界内/界外签名斜率、"反差 = 越界深度 × \|界外斜率\|" vs critic TD 误差。**区分两类越界**：(A) 角点最优 + 平滑策略 → 峰在界内但界外回正力不足；(B) critic 偏好在界外 → **Q 峰落在界外或界外斜率符号错**。训练/评估路径不 import `*_myfunc`（不启 MATLAB） | `python agentutil/probe_q_profile_boundary.py run13 [--steps 34000 40000] [--dims 4 5] [--td-error 644] [--which p\|c] [--grid -1 1 0.05]` |
 | `probe_action_symmetry.py` | 已训练 critic 的 ∂Q/∂a 动作对称性探针 | `python agentutil/probe_action_symmetry.py output/<run1> [run2 ...]` |
 | `probe_value_scale.py` | 归一化两臂的学习曲线/隐层激活量级诊断 | `python agentutil/probe_value_scale.py` |
 | `probe_l_fempty_point.py` | 用真实 run 数据验证 `F=∅` 参考集合是零宽单点（只有竭力值免费） | `python agentutil/probe_l_fempty_point.py [csv]` |
