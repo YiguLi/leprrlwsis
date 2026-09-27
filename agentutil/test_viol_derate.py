@@ -32,6 +32,7 @@ import numpy as np
 from td3per.td3per_myfunc import (
     violation_amount, violation_derate, Cal_r1_continuous, Cal_Rew_RB,
     VIOL_DERATE_COEF, VIOL_DERATE_DIMS,
+    PENALTY_NN_H_COEF, PENALTY_NN_L_COEF,
 )
 from td3per import td3per_myfunc as M
 
@@ -63,6 +64,20 @@ check(VIOL_DERATE_DIMS == 5, 'VIOL_DERATE_DIMS == 5')
 # 恰好落在边界上不算越界
 check(violation_amount([0.5, 0.5, 0.5, 0.5, 0.5, 0.5]) == 0.0, '恰好在上界 (0.5) 不算越界')
 check(violation_amount([0.0, 0.0, 0.0, 0.0, 0.0, -0.5]) == 0.0, '恰好在下界 (0.0) 不算越界')
+
+# ---------------------------------------------------------------------------
+section('1b. H 层动作越界罚系数 (PENALTY_NN_H_COEF) 与下层 (PENALTY_NN_L_COEF)')
+# ---------------------------------------------------------------------------
+from td3per.td3per_myfunc import CheckAction
+check(PENALTY_NN_H_COEF == 400.0, 'H 层越界罚 = 400 元/单位 (原 200, 本轮加倍; 实得 %s)' % PENALTY_NN_H_COEF)
+check(PENALTY_NN_L_COEF == 200.0, '下层越界罚 = 200 元/单位 (不变; 实得 %s)' % PENALTY_NN_L_COEF)
+_app, _pen = CheckAction(np.array([0.7, 0.3, 0.3, 0.3, 0.3, 0.0]))
+check(abs(_pen - 400.0 * 0.2) < 1e-9, 'H 6 维: dim0 越界 0.2 ⇒ 罚 80 (实得 %.4f)' % _pen)
+_app, _pen = CheckAction(np.array([0.3] * 5 + [0.8]))
+check(abs(_pen - 400.0 * 0.3) < 1e-9, 'H 6 维: 信号越界 0.3 ⇒ 罚 120 (实得 %.4f)' % _pen)
+_app, _pen = CheckAction(np.array([20.0]))
+check(abs(_pen - 200.0 * 10.0) < 1e-9, 'L 1 维: 越界 10 ⇒ 罚 2000 (不变; 实得 %.4f)' % _pen)
+check(len(_app) == 1 and abs(float(_app[0]) - 10.0) < 1e-9, 'clip 后动作落到边界 10.0')
 
 # ---------------------------------------------------------------------------
 section('2. violation_derate: 关闭/无越界时恰为 1.0')

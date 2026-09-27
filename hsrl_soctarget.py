@@ -93,6 +93,7 @@ MWh 口径）。本轮**把 c2 也换成 MW 口径**（与 r2 一致），于是
 | `L_EMA_LAM_LR` | 1.0（加性，MWh 口径） | **0.02（乘性对数步长）** | 对偶改为看无量纲比值 `EMA_c2/d_block`；与 H 层 `hc.ETA_LAM` 同刻度 |
 | `L_LAM_MIN/MAX` | 10 / 500（价格口径） | **0.5 / 2** | λ2 = "1 MW c2 值多少 MW r2"的无量纲**兑换率**：至多 2 倍、至少 1/2（对数对称，MAX·MIN = 1），初值 1.0 |
 | `L_CURRICULUM_BLOCKS` | 100 次检查（λ 计数） | **50 块** | 预算减半所需"连续满足块数" = EMA 时间常数 1/α |
+| `L_DEG_COEF` | —（无） | **0.15** | **放电退化成本罚**：`c2 += L_DEG_COEF·max(0, −pbrule)` [MW·min 口径：P_D 单位 MW、一步 = 1 min]。**设计约束**：必须比 SOC 跟踪信号 `L_TRACK_COEF`(=1.0) **小 5~10 倍**（每 MW·min）⇒ 系数 ∈ [0.1, 0.2]，取 0.15 = 1/6.67。与跟踪项**同处 c2 通道** ⇒ 比值与 λ2 无关（λ2 同时乘两项），5~10 倍在 λ2∈[0.5,2] 全域成立。只对**放电**计费；`pbrule=None`（默认）不加该项 ⇒ 历史口径逐位不变 |
 
 ⇒ `L_D_BLOCK / L_TRACK_COEF / L_CLIP_COEF` 三者在同一量纲上，λ2 是无量纲兑换率
 （`agentutil/test_l_track_range.py` / `test_soctarget_uniform.py` 断言这些不变量）。
@@ -115,6 +116,11 @@ L_CLIP_CAP = 20.0        # r2 封顶 [MW]：clip_amount = |命令 − pbrule| �
                          #   注意: 封顶只压幅值不改变最优动作 —— 越界方向仍有梯度（0~10 MW 斜率 1）。
 L_TRACK_COEF = 1.0       # c2 = +L_TRACK_COEF · trackerr           [MW]
 L_SOC_COEF = L_TRACK_COEF   # 兼容旧名（旧口径里它是 MWh→代价的系数）
+L_DEG_COEF = 0.15        # 放电退化成本系数: c2 += L_DEG_COEF · max(0, −pbrule)
+#   [MW·min 口径] P_D 单位 MW、一步 = 1 min ⇒ 与 trackerr 同口径, 可直接比。
+#   **设计约束**: 必须比 SOC 跟踪信号 (L_TRACK_COEF = 1.0) 小 5~10 倍 (每 MW·min)
+#   ⇒ L_DEG_COEF ∈ [0.1, 0.2], 取 0.15 (= 1/6.67)。同处 c2 通道 ⇒ 比值与 λ2 无关
+#   (λ2 同时乘两项), 5~10 倍在 λ2 ∈ [0.5, 2] 全域都成立。
 L_D_BLOCK = 1.2          # 每块 sum_c2 预算（= 允许搁置 0.02 MWh 的可达量）
 L_D_BLOCK_MIN = 0.15     # curriculum 地板
 L_COST_LIMIT = 0.6       # agent_L.cost_limit（仅 non-EMA 分支用）
@@ -327,10 +333,13 @@ def lower_reward(clip_amount, coef=None, cap=None):
 
 
 def lower_cost_soc_track(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n_rem,
-                         coef=None, return_info=False, **kw):
-    """下层 c2 = +coef · trackerr（两区间分治；单位 MW，与 r2 一致）。
+                         coef=None, return_info=False,
+                         pbrule=None, deg_coef=None, **kw):
+    """下层 c2 = +coef · trackerr (+ L_DEG_COEF·P_D)（两区间分治；单位 MW，与 r2 一致）。
 
     `coef=None` ⇒ 取 `L_TRACK_COEF`（=1.0）。
+    `pbrule=None` ⇒ **不加放电退化项**（历史口径逐位不变）；给了则加
+    `L_DEG_COEF·max(0, −pbrule)` —— 设计上比跟踪项小 5~10 倍（每 MW·min）。
     `n_rem` = 含当前步的块内剩余步数（主循环 `5 - episode_steps % 5`）——**必填**，
     以免在块中段静默地按"整块 5 步"摊还。
     """
@@ -338,7 +347,17 @@ def lower_cost_soc_track(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n
                                      pbrulemin, pbrulemax, n_rem, **kw)
     c = L_TRACK_COEF if coef is None else float(coef)
     cost = c * trackerr
+    deg = 0.0
+    if pbrule is not None:
+        # 放电退化: 只对放电 (pbrule<0) 计费, 单位 MW·min (一步 = 1 min)
+        cd = L_DEG_COEF if deg_coef is None else float(deg_coef)
+        deg = cd * max(0.0, -float(pbrule))
+        cost += deg
     if return_info:
+        info = dict(info)
+        info['c2_track'] = c * trackerr
+        info['c2_deg'] = deg
+        info['deg_coef'] = (L_DEG_COEF if deg_coef is None else float(deg_coef))
         return cost, info
     return cost
 

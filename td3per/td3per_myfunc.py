@@ -403,6 +403,13 @@ def lower_cost_soc_track(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n
 # 7. Action checking
 # =============================================================================
 
+PENALTY_NN_H_COEF = 400.0  # [元/单位] H 层动作越界罚 (机组限功率 [0,0.5]×5 + 信号 [±0.5])
+                         #   原 200 -> 400: 越界仍未压住, 先整体加倍。
+                         #   ⚠ s_p=1000 ⇒ critic 空间 0.4/单位, 而框内经济斜率实测 0.27~4.5
+                         #   ⇒ 仍然同量级, 不改变"边界位置落在 critic 噪声里"的结论。
+PENALTY_NN_L_COEF = 200.0  # [元/单位] 下层 1 维动作罚 —— **保持 200 不变** (仅诊断, 不进 r2 公式)
+
+
 def CheckAction(action, charge=10.):
     """Clip actions to feasible ranges. WT: [0,0.5], Signal: [-0.5,0.5], Bat: [-charge,charge].
 
@@ -417,12 +424,12 @@ def CheckAction(action, charge=10.):
     if len(action) == 6:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 200 * ((ma - 0.5) + (0. - mi))
+            penalty += PENALTY_NN_H_COEF * ((ma - 0.5) + (0. - mi))
         sig = action[5]
         if sig > SIGNAL_MAX:
-            penalty += 200 * (sig - SIGNAL_MAX)
+            penalty += PENALTY_NN_H_COEF * (sig - SIGNAL_MAX)
         elif sig < SIGNAL_MIN:
-            penalty += 200 * (SIGNAL_MIN - sig)
+            penalty += PENALTY_NN_H_COEF * (SIGNAL_MIN - sig)
         applied = np.append(np.clip(action[:5], 0., 0.5),
                             np.clip(action[5], SIGNAL_MIN, SIGNAL_MAX))
         # 不封顶: 保持恒定恢复力 (见 docstring)
@@ -431,13 +438,13 @@ def CheckAction(action, charge=10.):
     elif len(action) == 5:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 200 * ((ma - 0.5) + (0. - mi))
+            penalty += PENALTY_NN_H_COEF * ((ma - 0.5) + (0. - mi))
         return np.clip(action[:5], 0., 0.5), penalty
 
     elif len(action) == 1:
         for j in action:
             ma, mi = max(charge, j), min(-charge, j)
-            penalty += 200 * ((ma - charge) + (-charge - mi))
+            penalty += PENALTY_NN_L_COEF * ((ma - charge) + (-charge - mi))
         return np.clip(action, -charge, charge), penalty
 
     return action, penalty
@@ -678,6 +685,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             soc_target, E_current, float(obs2[2]),
             rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
             5 - (step % 5),
+            pbrule=float(rbb_info['pbrule']),   # 放电退化罚 (L_DEG_COEF)
             return_info=True)
 
         bi = step // 5

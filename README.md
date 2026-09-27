@@ -102,10 +102,15 @@ PRRBB ──(加 LLM)──→ PRLE          TD3PRRBB ──(加 LLM)──→ T
   非分段奖励、块末 gap 罚、相位观测、逐维探索噪声、`lam1∈[0.967,4.833]`、每块 2 次更新）；
   下层仍是 TD3+PER 的 RL BESS，但信号与追踪目标同为 SOC 目标
   （5 维观测 `[pg(t−1), ptur, SOC, soc_target, n_rem]`、`r2 = −1·min(clip_amount, 20)`、
-  `c2 = +1·trackerr [MW]`（到**参考集合** = Soctrack范围 ∩ 平抑窗口 的距离）：
+  `c2 = +1·trackerr + 0.15·max(0, −pbrule) [MW]`（到**参考集合** = Soctrack范围 ∩ 平抑窗口 的距离；
+  第二项是**放电退化成本罚** `L_DEG_COEF = 0.15`，设计上比跟踪信号**小 6.67 倍**（每 MW·min，
+  要求 5~10 倍），与跟踪项同处 c2 通道 ⇒ 比值与 λ2 无关；只对放电计费，已接线
+  td3per / td3prrbb / td3prle / prle 四个有 RL 下层的项目；`hsrl_soctarget` 的常量表有完整说明）：
   `F ≠ ∅` 时零成本集合是该区间；`F = ∅` 时**不存在范围, 只有纯粹一个竭力值 `r*`**
   （窗口里离 Soctrack 范围最近的端点）, 顶到它才不罚；
   块首够不着的目标跳变由 r1 块末 gap 罚承接）。
+  H 层动作越界罚（`penalty_NN_H`）现为 **400 元/单位**（`PENALTY_NN_H_COEF`，本轮由 200 加倍；
+  下层 `PENALTY_NN_L_COEF = 200` 不变；⚠ `s_p=1000` ⇒ critic 空间 0.4/单位，与经济斜率仍同量级）。
   ⚠️ 改造前的 `output/TD3PER-run*` 权重（4 维 H 观测 + 影子电价下层）与新代码不兼容。
 - `td3leprrlrb` ← `td3prrlrb`：增加 **LLM 在线微调风速分段阈值**（±1 m/s 硬约束）+ 回放池 relabel
 - `td3prle` ← `td3prrbb`：增加 LLM 元控制器；`prle` ← `prrbb` 同理

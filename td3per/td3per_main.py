@@ -387,6 +387,7 @@ def train(num_iterations_H,
             soc_target, E_current, float(observation2[2]),
             rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
             5 - (episode_steps % 5),
+            pbrule=float(rbb_info['pbrule']),   # 放电退化罚 (L_DEG_COEF)
             return_info=True)
         c2_slack = c2_info['slack']   # 新口径: trackerr 的 MWh 等价 (= trackerr·g, 因 ΔSOC = g·pb)
         sum_c2 += c2

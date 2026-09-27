@@ -48,6 +48,12 @@ print('=' * 84)
 print('1. 单一真源口径 (r2/c2 同为 MW, 两区间分治)')
 print('=' * 84)
 assert hst.L_CLIP_COEF == 1.0 and hst.L_TRACK_COEF == 1.0
+# 放电退化罚的设计约束 (用户指定): 必须比 SOC 跟踪信号**小 5~10 倍 (每 MW·min)**
+#   两项同处 c2 通道 ⇒ 比值 = L_DEG_COEF/L_TRACK_COEF 与 λ2 无关 (λ2 同时乘两项)。
+assert 0.1 <= hst.L_DEG_COEF <= 0.2, hst.L_DEG_COEF
+assert 5.0 <= hst.L_TRACK_COEF / hst.L_DEG_COEF <= 10.0, hst.L_TRACK_COEF / hst.L_DEG_COEF
+print('  放电退化罚 L_DEG_COEF = {} ⇒ 比跟踪信号小 {:.2f} 倍 (设计区间 5~10 倍)'
+      .format(hst.L_DEG_COEF, hst.L_TRACK_COEF / hst.L_DEG_COEF))
 assert hst.L_SOC_COEF == hst.L_TRACK_COEF          # 兼容别名
 assert hst.L_CLIP_CAP == 20.0                      # r2 封顶 (真实窗内容量 ≤20 ⇒ 只截断病态饱和)
 assert abs(hst.lower_reward(1e6) + hst.L_CLIP_CAP) < 1e-12
@@ -89,13 +95,16 @@ def project_r2_c2(p, obs, obs2, act, rbb, ptur=20.0, n_rem=N_REM):
         r2 = hst.lower_reward(rbb['clip_amount'])
         c2, info = hst.lower_cost_soc_track(
             d['soc_target'], float(obs[2]), float(obs2[2]),
-            rbb['pbrulemin'], rbb['pbrulemax'], n_rem, return_info=True)
+            rbb['pbrulemin'], rbb['pbrulemax'], n_rem, return_info=True,
+            pbrule=float(rbb['pbrule']))          # 与 td3per_main 一致: 含放电退化罚
         return r2, c2, d['soc_target'], info['trackerr']
     _r1, _c1, r2, c2, d = fn(obs, obs2, act, rbb, penalty_NN_H=0.0,
                              time=1.0 / 60, ptur=ptur, n_rem=n_rem)
     trackerr, info = hst.soc_track_range(d['soc_target'], float(obs[2]), float(obs2[2]),
                                          rbb['pbrulemin'], rbb['pbrulemax'], n_rem)
-    assert abs(c2 - hst.L_TRACK_COEF * trackerr) < 1e-12, (p, c2, trackerr)
+    # c2 = L_TRACK_COEF·trackerr + L_DEG_COEF·max(0, −pbrule) —— 放电退化罚只对放电计费
+    _deg = hst.L_DEG_COEF * max(0.0, -float(rbb['pbrule']))
+    assert abs(c2 - (hst.L_TRACK_COEF * trackerr + _deg)) < 1e-12, (p, c2, trackerr, _deg)
     return r2, c2, d['soc_target'], trackerr
 
 
@@ -120,7 +129,9 @@ for k in range(60):
         r2, c2, tgt, trackerr = project_r2_c2(p, obs, obs2, act, rbb)
         vals[p] = (r2, c2, tgt, trackerr)
         assert abs(r2 - hst.lower_reward(clip)) < 1e-12, (p, r2, clip)
-        assert abs(c2 - hst.L_TRACK_COEF * trackerr) < 1e-12, (p, c2, trackerr)
+        # c2 = L_TRACK_COEF·trackerr + L_DEG_COEF·max(0, −pbrule) —— 放电退化罚只对放电计费
+        _deg = hst.L_DEG_COEF * max(0.0, -float(rbb['pbrule']))
+        assert abs(c2 - (hst.L_TRACK_COEF * trackerr + _deg)) < 1e-12, (p, c2, trackerr, _deg)
         assert c2 >= -1e-12 and r2 <= 1e-12                     # 符号约定: c2 ≥ 0, r2 ≤ 0
     ref = vals['td3per']
     for p, v in vals.items():

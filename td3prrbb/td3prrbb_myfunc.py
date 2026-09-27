@@ -396,7 +396,9 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     r2 = hst.lower_reward(clip_amount)
     c2, c2_info = hst.lower_cost_soc_track(
         soc_target, float(observation[2]), SOC_new,
-        rbb_info['pbrulemin'], rbb_info['pbrulemax'], n_rem, return_info=True)
+        rbb_info['pbrulemin'], rbb_info['pbrulemax'], n_rem,
+        pbrule=float(rbb_info['pbrule']),   # 放电退化罚 (L_DEG_COEF)
+        return_info=True)
     slack = c2_info['slack']
 
     # ==== Details ====
@@ -441,6 +443,13 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 # 7. Action Checking (PER convention, unchanged)
 # =============================================================================
 
+PENALTY_NN_H_COEF = 400.0  # [元/单位] H 层动作越界罚 (机组限功率 [0,0.5]×5 + 信号 [±0.5])
+                         #   原 200 -> 400: 越界仍未压住, 先整体加倍。
+                         #   ⚠ s_p=1000 ⇒ critic 空间 0.4/单位, 而框内经济斜率实测 0.27~4.5
+                         #   ⇒ 仍然同量级, 不改变"边界位置落在 critic 噪声里"的结论。
+PENALTY_NN_L_COEF = 200.0  # [元/单位] 下层 1 维动作罚 —— **保持 200 不变** (仅诊断, 不进 r2 公式)
+
+
 def CheckAction(action, charge=10.):
     """Clip actions to feasible ranges. WT: [0,0.5], Signal: [-0.5,0.5], Bat: [-charge,charge]."""
     penalty = 0
@@ -449,13 +458,13 @@ def CheckAction(action, charge=10.):
     if len(action) == 7:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 200 *((ma - 0.5) + (0. - mi))
+            penalty += PENALTY_NN_H_COEF *((ma - 0.5) + (0. - mi))
         sig = action[5]
-        if sig > SIGNAL_MAX:    penalty += 200 *(sig - SIGNAL_MAX)
-        elif sig < SIGNAL_MIN:  penalty += 200 *(SIGNAL_MIN - sig)
+        if sig > SIGNAL_MAX:    penalty += PENALTY_NN_H_COEF *(sig - SIGNAL_MAX)
+        elif sig < SIGNAL_MIN:  penalty += PENALTY_NN_H_COEF *(SIGNAL_MIN - sig)
         for j in action[6:]:
             ma, mi = max(charge, j), min(-charge, j)
-            penalty += 200 *((ma - charge) + (-charge - mi))
+            penalty += PENALTY_NN_L_COEF *((ma - charge) + (-charge - mi))
         a_H = np.append(np.clip(action[:5], 0., 0.5),
                         np.clip(action[5], SIGNAL_MIN, SIGNAL_MAX))
         a_L = np.clip(action[6:], -charge, charge)
@@ -464,10 +473,10 @@ def CheckAction(action, charge=10.):
     elif len(action) == 6:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 200 *((ma - 0.5) + (0. - mi))
+            penalty += PENALTY_NN_H_COEF *((ma - 0.5) + (0. - mi))
         sig = action[5]
-        if sig > SIGNAL_MAX:    penalty += 200 *(sig - SIGNAL_MAX)
-        elif sig < SIGNAL_MIN:  penalty += 200 *(SIGNAL_MIN - sig)
+        if sig > SIGNAL_MAX:    penalty += PENALTY_NN_H_COEF *(sig - SIGNAL_MAX)
+        elif sig < SIGNAL_MIN:  penalty += PENALTY_NN_H_COEF *(SIGNAL_MIN - sig)
         applied = np.append(np.clip(action[:5], 0., 0.5),
                             np.clip(action[5], SIGNAL_MIN, SIGNAL_MAX))
         return applied, penalty
@@ -475,13 +484,13 @@ def CheckAction(action, charge=10.):
     elif len(action) == 5:
         for j in action[:5]:
             ma, mi = max(0.5, j), min(0, j)
-            penalty += 200 *((ma - 0.5) + (0. - mi))
+            penalty += PENALTY_NN_H_COEF *((ma - 0.5) + (0. - mi))
         return np.clip(action[:5], 0., 0.5), penalty
 
     elif len(action) == 1:
         for j in action:
             ma, mi = max(charge, j), min(-charge, j)
-            penalty += 200 *((ma - charge) + (-charge - mi))
+            penalty += PENALTY_NN_L_COEF *((ma - charge) + (-charge - mi))
         return np.clip(action, -charge, charge), penalty
 
     return action, penalty

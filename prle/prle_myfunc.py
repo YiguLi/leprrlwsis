@@ -397,7 +397,9 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     r2 = hst.lower_reward(clip_amount)
     c2, c2_info = hst.lower_cost_soc_track(
         soc_target, float(observation[2]), SOC_new,
-        rbb_info['pbrulemin'], rbb_info['pbrulemax'], n_rem, return_info=True)
+        rbb_info['pbrulemin'], rbb_info['pbrulemax'], n_rem,
+        pbrule=float(rbb_info['pbrule']),   # 放电退化罚 (L_DEG_COEF)
+        return_info=True)
     slack = c2_info['slack']
 
     # ==== Details ====
