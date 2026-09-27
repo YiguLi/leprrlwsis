@@ -868,15 +868,22 @@ if __name__ == "__main__":
     # 0.98: H 层 γ 以【块(5 min)】为单位生效 (observe_jump 聚合 5 步后 discount 只用一次)
     #       ⇒ 半衰期 69 块 ≈ 5.8 h, 覆盖 4~7 h 的低价充/高价放周期 (td3perrb 口径)
     parser.add_argument('--discount', default=0.98, type=float, help='')
-    # ---- H 层 n 步回报 / twin-target 聚合 (默认关: 与历史 run 逐位一致) ----
+    # ---- H 层 n 步回报 / twin-target 聚合 ----
     #   冻结批离线验证 (agentutil/test_nstep_h.py 的动机, 见 2026-09 记录):
     #   1-step + min-target 在 40k 次更新后只到 MC 真值的 34 %;
     #   n=10 + mean-target 在 20k 次就到 90 % (n=10 + min 为 76 %)。
-    #   实现: H 层把连续 n 个块折叠成一条转移 (reward=Σγ^k r_k, 滑窗 stride-1:
+    #   实现: H 层把连续 n 个块折算进一条转移 (reward=Σγ^k r_k, 滑窗 stride-1:
     #   每个块都是某条转移的起点 ⇒ 状态覆盖 = 块数, 条目数 ≈ 块数), 每条转移自带
     #   bootstrap 系数 γ^n ⇒ 需要自助传播的深度从 1/(1−γ)=50 降到 50/n。
-    parser.add_argument('--nstep', default=1, type=int,
-                        help='H 层 n 步回报, 滑窗 stride-1 (1 = 历史 1-step 口径; 建议 5~10)')
+    #   ---- 默认值 = 5 (生产口径) ----
+    #   依据: run12/run13 的 **2v2 观测** (非受控 A/B; 尚无同代码的 --nstep 1 对照臂):
+    #     |dQp/da| @20k  n=5: 7.9 / 5.4  vs  n=1: 1.02 / 1.29 (5~8x, 且 n=5 不衰减)
+    #     0-20k 块奖励   n=5: 181 / 160  vs  n=1: 55.5 / 90.7 (元)
+    #     自洽比 @30k    n=5: 0.59/0.60  vs  n=1: 0.34 / 0.47
+    #   **复现历史 run1~run10 请显式传 --nstep 1** (那条路径逐位不变)。
+    parser.add_argument('--nstep', default=5, type=int,
+                        help='H 层 n 步回报, 滑窗 stride-1 (默认 5 = 生产口径; '
+                             '1 = 复现 run1~run10 的 1-step 历史口径; 建议 5~10)')
     parser.add_argument('--target_agg', default='min', type=str,
                         choices=['min', 'mean'],
                         help='H 层 twin profit-critic 的 target 聚合 '
@@ -1097,8 +1104,8 @@ if __name__ == "__main__":
                      sig_noise_max=args.sig_noise_max,
                      sig_noise_min=args.sig_noise_min,
                      nstep=args.nstep, target_agg=args.target_agg)
-    print('[H] nstep={} target_agg={} (nstep>1 = n 步回报: 自助传播深度 50->{:.1f};'
-          ' 默认 nstep=1 与历史 run 逐位一致)'.format(
+    print('[H] nstep={} target_agg={} (n 步回报: 自助传播深度 50->{:.1f}; '
+          '复现历史 run1~run10 请传 --nstep 1)'.format(
               args.nstep, args.target_agg, 50.0 / max(1, args.nstep)))
     agent_H.lam = _HCFG['lam_init'] if _HCFG else 5.0
     # 值函数回归空间归一化 (s = hc.value_scale()): 只作用于 H 层 r1/c1 进入

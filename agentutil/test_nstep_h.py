@@ -14,7 +14,8 @@
 代价是条目数 ×n 且相邻转移共享 n-1 个奖励 (批内相关)。
 
 本测试不依赖 MATLAB, 只验证**实现契约**:
-  A. nstep=1 路径: memory 内容与输入逐位相同, _boot 为 None (默认路径不变)
+  A. 显式 nstep=1 (历史口径): memory 内容与输入逐位相同, _boot 为 None
+     —— 这是"复现 run1~run10"的路径; CLI 默认值现为 5, 故此处必须显式传 1
   B. nstep=n 滑窗: 条数=B-n+1、reward/起点/next_state/boot/截断语义 (含 done 与尾)
   B2. 一整集条数 == 块数 (滑窗不丢状态覆盖; 与 nstep=1 相同)
   C. target 公式: nstep=1 为 r+γv, nstep=n 为 Σγ^k r_k + γ^n v; mean 聚合正确
@@ -81,7 +82,7 @@ def row(mem, i):
 
 
 # ---------------------------------------------------------------- A
-def test_default_path_unchanged():
+def test_nstep1_path_unchanged():
     ag = make_agent(nstep=1)
     assert ag.nstep == 1 and ag._boot is None, (ag.nstep, ag._boot)
     seq = [(st(i), act(i), 1.0 * i, 0.5 * i, st(i + 1), 0.0) for i in range(5)]
@@ -92,7 +93,7 @@ def test_default_path_unchanged():
         g = row(ag.memory, i)
         assert np.array_equal(g[0], s) and np.array_equal(g[1], a)
         assert g[2] == r and g[3] == c and np.array_equal(g[4], s2) and g[5] == d
-    print('  A. nstep=1 默认路径: 5 条转移与输入逐位相同, _boot=None  ✓')
+    print('  A. 显式 nstep=1 (复现历史 run1~run10): 5 条转移与输入逐位相同, _boot=None  ✓')
 
 
 # ---------------------------------------------------------------- B
@@ -237,7 +238,7 @@ if __name__ == '__main__':
     print('=' * 84)
     print('H 层 n 步回报 (--nstep) 与 target 聚合 (--target_agg) 回归')
     print('=' * 84)
-    test_default_path_unchanged()
+    test_nstep1_path_unchanged()
     test_nstep_folding()
     test_state_coverage_full_episode()
     test_target_formula()
