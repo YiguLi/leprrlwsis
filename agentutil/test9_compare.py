@@ -76,7 +76,7 @@ def load(path):
     scenarios[step] = [(wind, price, profit, profit_econ, dsoc, soc_err), ...]
     overall[step]   = (profit_econ, profit, dsoc, soc_err)
     """
-    with open(path, newline='') as f:
+    with open(path, newline='', encoding='utf-8-sig') as f:
         rd = csv.reader(f)
         head = next(rd)
         rows = list(rd)
@@ -87,8 +87,12 @@ def load(path):
         raise SystemExit('%s 缺列: %s' % (path, miss))
 
     def g(r, c):
+        """取数值列; 列不存在 (历史 CSV) 时返回 nan (供 [6] 的可选分解列使用)。"""
+        i = ix.get(c)
+        if i is None:
+            return float('nan')
         try:
-            return float(r[ix[c]])
+            return float(r[i])
         except (ValueError, IndexError):
             return float('nan')
 
@@ -102,8 +106,11 @@ def load(path):
             continue
         w, p = r[ix['wind_level']], r[ix['price_level']]
         if w == OVERALL:
+            # 索引 5: r1; 6/7/8: r1 分解三项 (可选列, 新 run 才有; 旧 CSV -> nan)
+            #   6 = turbine_profit (未打折, N 步之和), 7 = derate_loss, 8 = penalty_NN_H
             ov[st] = (g(r, 'profit_econ'), g(r, 'profit'), g(r, 'dsoc'), g(r, 'soc_track_err'),
-                      g(r, 'r1'))
+                      g(r, 'r1'), g(r, 'turbine_profit'), g(r, 'derate_loss'),
+                      g(r, 'penalty_NN_H'))
         else:
             sc.setdefault(st, []).append((w, p, g(r, 'profit'), g(r, 'profit_econ'),
                                           g(r, 'dsoc'), g(r, 'soc_track_err')))
@@ -155,8 +162,10 @@ def main():
         # 自洽校验: profit_econ 应当等于 profit + settle*dsoc
         err = max(abs(ov[s][0] - (ov[s][1] + args.settle * ov[s][2])) for s in ov)
         flag = '' if err < 0.5 else '  <== 与 --settle 不符, 请核对 SOC 结算价!'
+        # 只有 OVERALL 行的 CSV (如手工汇总/裁剪过) 也允许 (sc 为空)
+        n_case = len(sc[max(sc)]) if sc else 0
         print('=== %s : %d 次评测, step %s..%s, 每次 %d 场景 + OVERALL   [结算自洽 max 偏差 %.3f]%s'
-              % (name, len(ov), min(ov), max(ov), len(sc[max(sc)]), err, flag))
+              % (name, len(ov), min(ov), max(ov), n_case, err, flag))
 
     # ---- 1) 同 step 对齐 ----
     common = sorted(set.intersection(*[set(ov) for _, _, ov in data]))
@@ -236,13 +245,17 @@ def main():
 
     # ---- 6) r1 与 profit 的分解 ----
     print('\n[6] r1 vs profit 分解 —— 二者是同一笔钱的不同包装:')
-    print('    r1     = revenue - degradation - penalty_NN_H   (每步量, 见 td3per_myfunc.Cal_r1_continuous)')
+    print('    r1     = turbine_profit·f + bess_profit - degradation - penalty_NN_H   (每步量)')
+    print('             f = exp(-c·x) 是 --viol_derate 的乘性越界系数 (c=0 时 f≡1)')
     print('    profit = 45 步现金流总和 ;  profit_econ = profit + settle*dsoc')
-    print('    => profit/45 - r1 = penalty_NN_H 的每步均值 >= 0  (动作越界罚, 不进钱包)')
-    print('    含义: r1 抖而 profit/econ 稳 ==> 抖的是越界罚, 经济结果稳定。')
+    print('    => profit/45 - r1 = (penalty_NN_H + derate_loss)/45 >= 0')
+    print('       其中 derate_loss = turbine_profit·(1-f) —— **这是 r1 专属的, 不进 wallet**')
+    print('    含义: r1 抖而 profit/econ 稳 ==> 抖的是越界罚+乘性削减, 经济结果稳定。')
     print('    判经济用 profit/profit_econ; 判 RL 奖励用 r1; 不要混用。')
-    print('  %-12s %8s %9s %9s %9s %11s %11s' % ('run', 'n', 'r1 cv%', 'profit cv%', 'econ cv%',
-                                                '罚/步 均值', '罚/步 max'))
+    print('    分开报需要 CSV 有 turbine_profit/derate_loss/penalty_NN_H 三列 (新 run 才写);')
+    print('    历史 run 无此列 => 只报合计, 标注"未分离"(c=0 的历史 run 里合计即纯罚)。')
+    print('  %-12s %5s %8s %9s %9s %10s %10s %10s %8s'
+          % ('run', 'n', 'r1 cv%', 'profit cv%', 'econ cv%', '合计/步', '罚/步', '削减/步', 'f均值'))
     for name, _, ov in data:
         steps = sorted(ov)
         if args.window:
@@ -254,12 +267,26 @@ def main():
             print('  %-12s (无数据)' % name)
             continue
         pe, pr, r1 = arr(ov, steps, 0), arr(ov, steps, 1), arr(ov, steps, 4)
-        pen = pr / 45.0 - r1
+        tp, dl, pn = arr(ov, steps, 5), arr(ov, steps, 6), arr(ov, steps, 7)
         cv = lambda v: 100 * np.nanstd(v) / abs(np.nanmean(v)) if np.nanmean(v) else float('nan')
-        bad = int(np.nansum(pen < -1e-6))
-        print('  %-12s %8d %9.2f %9.2f %9.2f %11.3f %11.3f%s'
-              % (name, len(steps), cv(r1), cv(pr), cv(pe), np.nanmean(pen), np.nanmax(pen),
-                 '   <== 出现负残差, 恒等式不成立!' if bad else ''))
+        resid = pr / 45.0 - r1                     # 合计 = (罚 + 削减)/45
+        bad = int(np.nansum(resid < -1e-6))
+        have = bool(np.isfinite(pn).all() and np.isfinite(dl).all())
+        if have:
+            pen, dls = pn / 45.0, dl / 45.0
+            # 恒等式自校验: 合计 == 罚 + 削减
+            id_err = float(np.nanmax(np.abs(resid - (pen + dls))))
+            f_mean = 1.0 - np.nanmean(dl) / np.nanmean(tp) if np.nanmean(tp) else float('nan')
+            tail = '' if id_err < 1e-6 else '  <== 分解恒等式不成立(偏差 %.2e)!' % id_err
+            print('  %-12s %5d %8.2f %9.2f %9.2f %10.3f %10.3f %10.3f %8.4f%s'
+                  % (name, len(steps), cv(r1), cv(pr), cv(pe), np.nanmean(resid),
+                     np.nanmean(pen), np.nanmean(dls), f_mean, tail))
+        else:
+            print('  %-12s %5d %8.2f %9.2f %9.2f %10.3f %10s %10s %8s   (未分离: 无分解列)'
+                  % (name, len(steps), cv(r1), cv(pr), cv(pe), np.nanmean(resid), '-', '-', '-'))
+        if bad:
+            print('  %-12s 出现负残差 %d 个 => 恒等式不成立 (profit/45 应 >= r1 + 0)!'
+                  % ('', bad))
 
 
 if __name__ == '__main__':

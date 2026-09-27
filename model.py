@@ -41,6 +41,8 @@ class Actor(nn.Module):
         self.fc3 = nn.Linear(hidden2, hidden1)
         self.fc4 = nn.Linear(hidden1, nb_actions)
         self.relu = nn.ReLU()
+        # 注意: H 层 (Actor) **不使用** tanh/sigmoid 做输出压缩 —— 见 forward() 里的
+        # "⚠ 上层 (H) 的输出故意不做有界压缩" 注释 (最优解在边界上 ⇒ 饱和区学习信号为 0)。
         self.tanh = nn.Tanh()
         self.sigmoid = nn.Sigmoid()
         self.init_weights(init_w)
@@ -66,6 +68,28 @@ class Actor(nn.Module):
         out = self.fc3(out)
         out = self.relu(out)
         out = self.fc4(out)
+        # =====================================================================
+        # ⚠ 上层 (H) 的输出**故意不做有界压缩** (下面这行 sigmoid / 上面的 tanh 都不要恢复)。
+        #    tanh (以及任何饱和型 squash) 在本任务是**有害**的, 实测依据:
+        #      (1) **最优解恰好在约束边界上**。一维 Q(a_j) 剖面实测 (run13 ckpt40000,
+        #          agentutil/probe_q_profile_boundary.py): dim4 峰 a4=+0.05, dim5 峰 a5=-0.60,
+        #          即峰值贴着/越过边界 [0,0.5] / [-0.5,0.5]。tanh 在饱和区导数→0,
+        #          而最优处正是饱和区 ⇒ 学习信号在**最需要它的地方**退化 (实测导数仅
+        #          0.04~0.1, 等于把边界附近的学习率砍掉 10~25 倍), 收敛停滞。
+        #      (2) **边界不可达**。tanh 只能渐近趋近 0.5 / 0, 永远到不了; 而最优就在边界上
+        #          ⇒ 系统性偏移 (限功率不够 / 信号不够), 白丢收益。
+        #      (3) **单边区间 [0,0.5] 的重标定陷阱**。本层 fc4 初始化为 ±3e-3 (输出≈0,
+        #          "残余动作≈0 起点")。若用 0.5·sigmoid(pre), 初始 pre≈0 ⇒ 动作=0.25,
+        #          即**每台风机一上来就 25% 限功率**, 初始化直接坏掉; 单边 squash 必须把
+        #          输出层 bias 重新初始化到很负 (如 -6) 才等价, 否则"tanh 效果差"里
+        #          有很大一部分其实是初始化坏掉的锅。
+        #    ⇒ 越界改由**环境侧 clip (CheckAction 之后才进 env) + 奖励侧乘性罚**
+        #      (--viol_derate: r1 的风机收益 × exp(-c·Σ越界量)) 处理。这样 actor 保持
+        #      线性输出, 边界外仍有**强回正梯度** (实测界外斜率 ~1.25 critic 单位, 而
+        #      tanh 饱和区 ~0), 边界处的学习信号不退化。
+        #    注意: 下层 Actor_L (class Actor_L) 用 tanh 是**另一回事** —— 它的残差动作
+        #      对称、最优点在内部, 不存在上述"边界即最优"的问题, 不要类比着一起改。
+        # =====================================================================
         # out = self.sigmoid(out)
         return out
 

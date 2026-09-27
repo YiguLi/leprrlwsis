@@ -139,7 +139,106 @@ check(r1_off2 == r1_off and d_off2['revenue'] == d_off['revenue'],
       'turbine_derate=1.0 路径与"关闭系数"路径逐位一致')
 
 # ---------------------------------------------------------------------------
-section('5. 静态接线: main 与 nine_case_test')
+section('6. nine_case_test 端到端: 分解三列 + 记录列不变 (桩 env, 不需 MATLAB)')
+# ---------------------------------------------------------------------------
+from td3per.td3per_myfunc import nine_case_test
+from rbb.rbb_rule_bess import RuleBasedBESS
+
+
+class _StubAgent:
+    def __init__(self, a, nb_states=6):
+        self.a = np.asarray(a, dtype=float).ravel().copy()
+        self.is_training = True
+        self.nb_states = nb_states
+        self.nb_actions = self.a.size
+
+    def select_action(self, obs, *a, **k):
+        return self.a.copy()
+
+    def reset(self, obs=None, *a, **k):
+        self.s_t = obs
+        return None
+
+
+class _StubEnv:
+    """只实现 nine_case_test 需要的三个方法 (PowerOutput 用确定性公式代替 MATLAB)。"""
+
+    def __init__(self, n_turbine=5):
+        self.num_turbine = n_turbine
+        self.max_E, self.eta, self.time, self.E = 6.0, 0.98, 1.0 / 60, 5.0
+        self._i, self._wind, self._price = 0, [], []
+
+    def PowerOutput(self, u, act_wind):
+        a = np.clip(np.asarray(act_wind, dtype=float).ravel()[:self.num_turbine], 0.0, 0.5)
+        return float(a.sum() * 10.0 * min(max(float(u), 0.0), 12.0) / 12.0)
+
+    def ScenarioReset(self, wind_seq, price_seq):
+        self._wind, self._price, self._i = list(wind_seq), list(price_seq), 0
+        self.E = 5.0
+        pw = self.PowerOutput(self._wind[0], np.ones(self.num_turbine) * 0.3333)
+        return np.array([float(self._price[0]), float(self._wind[0]), self.E, pw])
+
+    def ScenarioStep(self, applied_action_H, act_bat, pw_tru):
+        self._i = min(self._i + 1, len(self._wind) - 1)
+        u, pr = float(self._wind[self._i]), float(self._price[self._i])
+        pw2 = self.PowerOutput(u, applied_action_H)
+        cmd = float(np.asarray(act_bat, dtype=float).ravel()[0])
+        P_C, P_D = max(0.0, cmd), abs(min(cmd, 0.0))
+        E_t = self.E + (P_C * self.eta - P_D / self.eta) * self.time
+        if E_t > self.max_E:
+            P_C = (self.max_E - self.E) / self.eta / self.time
+            self.E = self.max_E
+        elif E_t < 0.0:
+            P_D = self.E * self.eta / self.time
+            self.E = 0.0
+        else:
+            self.E = E_t
+        P_G = float(pw_tru) - P_C + P_D
+        return (pw2, np.array([pr, u, self.E, P_G]), np.array([P_C - P_D]),
+                0.0, False, False, {'P_F': 0.0, 'pbrule': P_C - P_D, 'P_G': P_G})
+
+
+def _run_h(coef, a_H):
+    """用越界的上层动作真跑一次 45 步 9-case 测试。"""
+    return nine_case_test(_StubAgent(a_H), _StubAgent([0.0]), _StubEnv(),
+                          RuleBasedBESS(), seed=42, viol_derate_coef=coef)
+
+
+A_H_VIOL = [0.70, 0.55, -0.10, 0.30, 0.30, 0.05]      # x = 0.20+0.05+0.10 = 0.35
+cm0, ov0 = _run_h(0.0, A_H_VIOL)
+cm5, ov5 = _run_h(5.0, A_H_VIOL)
+cmN, ovN = _run_h(None, A_H_VIOL)                       # None = 用模块默认 (5.0)
+
+for k in ('turbine_profit', 'derate_loss', 'penalty_NN_H'):
+    check(k in ov0 and k in cm0[0], 'overall/case 都新增了 %r' % k)
+check(ov0['derate_loss'] == 0.0, 'c=0 ⇒ derate_loss 恰为 0 (实得 %.12f)' % ov0['derate_loss'])
+check(ov5['derate_loss'] > 0.0, 'c=5 且动作越界 ⇒ derate_loss > 0 (实得 %.6f)' % ov5['derate_loss'])
+check(any(m['derate_loss'] > 0 for m in cm5), 'per-case 也记录了 derate_loss')
+
+# 记录列不变 (用户硬性要求): 轨迹不依赖奖励 ⇒ profit/dsoc/profit_econ 逐位相同
+same = all(cm0[i]['profit'] == cm5[i]['profit'] and cm0[i]['dsoc'] == cm5[i]['dsoc']
+           and cm0[i]['profit_econ'] == cm5[i]['profit_econ'] for i in range(9))
+check(same, '**per-case profit/dsoc/profit_econ 在 c=0 与 c=5 之间逐位相同** (记录列不变)')
+check(ov0['profit'] == ov5['profit'] and ov0['profit_econ'] == ov5['profit_econ'],
+      '**overall profit/profit_econ 逐位相同**')
+check(ov5['r1'] < ov0['r1'], 'c=5 的 r1 更低 (%.4f < %.4f)' % (ov5['r1'], ov0['r1']))
+
+# 恒等式: profit/45 - r1 == (penalty_NN_H + derate_loss)/45   (test9_compare [6] 依赖此式)
+for tag, ov in (('c=0', ov0), ('c=5', ov5)):
+    lhs = ov['profit'] / 45.0 - ov['r1']
+    rhs = (ov['penalty_NN_H'] + ov['derate_loss']) / 45.0
+    check(abs(lhs - rhs) < 1e-9 * max(1.0, abs(rhs)),
+          'overall 恒等式 %s: profit/45-r1 == (罚+削减)/45 (%.10f vs %.10f)' % (tag, lhs, rhs))
+for tag, cms in (('c=0', cm0), ('c=5', cm5)):
+    err = max(abs(m['profit'] / 5.0 - m['r1'] - (m['penalty_NN_H'] + m['derate_loss']) / 5.0)
+              for m in cms)
+    check(err < 1e-9, 'per-case 恒等式 %s: 最大偏差 %.2e' % (tag, err))
+
+check(ovN['r1'] == ov5['r1'] and cmN[0]['derate_loss'] == cm5[0]['derate_loss'],
+      'viol_derate_coef=None 等价于模块默认 5.0 (main 默认口径)')
+
+# ---------------------------------------------------------------------------
+section('7. 静态接线: main 与 nine_case_test')
 # ---------------------------------------------------------------------------
 src_main = open('td3per/td3per_main.py', encoding='utf-8').read()
 src_my = open('td3per/td3per_myfunc.py', encoding='utf-8').read()
@@ -154,6 +253,20 @@ check('action_H_raw = agent_H.select_action(norm_obs)' in src_my,
 check('turbine_derate=_derate' in src_my, 'nine_case_test 把系数传进 Cal_Rew_RB')
 check('def violation_derate(' in src_my and 'def violation_amount(' in src_my,
       'helper (violation_amount/violation_derate) 定义在 td3per_myfunc')
+# 分解三列必须落盘 (test9_compare [6] 消费)
+check(src_my.count("pc['turbine_profit'] += details['turbine_profit']") == 1
+      and src_my.count("pc['derate_loss'] += details['turbine_profit'] * (1.0 - _derate)") == 1,
+      'nine_case_test 逐步累加 turbine_profit / derate_loss')
+check("'turbine_profit': m['turbine_profit']" in src_main
+      and "'turbine_profit': overall['turbine_profit']" in src_main,
+      'main 把 turbine_profit/derate_loss/penalty_NN_H 写进 df_test9 (per-case + OVERALL)')
+src_tool = open('agentutil/test9_compare.py', encoding='utf-8').read()
+check('derate_loss' in src_tool and 'turbine_profit' in src_tool
+      and 'penalty_NN_H' in src_tool and '未分离' in src_tool,
+      'test9_compare [6] 读三列并分开报 (缺列时退回"未分离")')
+src_model = open('model.py', encoding='utf-8').read()
+check('故意不做有界压缩' in src_model and 'tanh' in src_model,
+      'model.py 在 Actor 输出处注明 tanh 有害 (含实测依据)')
 # 其它五个方法不应被牵连
 import glob
 others = [p for p in glob.glob('*/[a-z]*_myfunc.py') if 'td3per/' not in p.replace('\\', '/')]

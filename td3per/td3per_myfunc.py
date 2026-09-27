@@ -607,7 +607,8 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
     _soc0_of, _soc1_of = {}, {}     # bi -> 块首/块末储存电量 [MWh]
     per_case = {i: {'r1': 0.0, 'c1': 0.0, 'r2': 0.0, 'c2': 0.0,
                     'cvm': 0, 'pf_viol': 0, 'profit': 0.0,
-                    'gap_pen': 0.0, 'soc_track_err': 0.0}
+                    'gap_pen': 0.0, 'soc_track_err': 0.0,
+                    'turbine_profit': 0.0, 'derate_loss': 0.0, 'penalty_NN_H': 0.0}
                 for i in range(len(blocks))}
     df = pd.DataFrame()
     soc_target = SOC_TARGET_CENTER
@@ -683,6 +684,13 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         pc['r2'] += r2
         pc['c2'] += c2
         pc['gap_pen'] += gap_pen
+        # r1 分解两项 (供审计: profit/45 - r1 == (罚 + 乘性削减)/45):
+        #   turbine_profit = **未打折**的风机收益 (与 details 同一个量 ⇒ 记录口径不变)
+        #   derate_loss    = turbine_profit * (1 - f), f = exp(-c·x) 的乘性削减量
+        # 注意两者都按 5 步求和 (与 pc['profit'] 同口径, 不除 n_per_case)。
+        pc['turbine_profit'] += details['turbine_profit']
+        pc['derate_loss'] += details['turbine_profit'] * (1.0 - _derate)
+        pc['penalty_NN_H'] += penalty_NN_H
         if c1_step > 0:
             pc['cvm'] += 1
         if details['P_F'] > 3.0 + 1e-4:
@@ -743,6 +751,10 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             'pf_viol': pc['pf_viol'],
             'profit': pc['profit'],
             'soc_track_err': pc['soc_track_err'],
+            # r1 分解 (r1 = turbine_profit·f + bess_profit − degradation − penalty_NN_H):
+            'turbine_profit': pc['turbine_profit'],   # 未打折的风机收益 (5 步之和)
+            'derate_loss': pc['derate_loss'],         # 乘性削减量 (5 步之和; --viol_derate 0 时为 0)
+            'penalty_NN_H': pc['penalty_NN_H'],       # 线性越界罚 (5 步之和)
         })
 
     # ---- 存货结算: 逐 case 追加 (profit 是现金流口径, 不含储存电量变动) ----
@@ -761,6 +773,10 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         'pf_viol': int(sum(m['pf_viol'] for m in case_metrics)),
         'profit': float(sum(m['profit'] for m in case_metrics)),
         'soc_track_err': float(np.mean([m['soc_track_err'] for m in case_metrics])),
+        # r1 分解 (45 步总量; 供审计: profit/45 - r1 == (penalty_NN_H + derate_loss)/45)
+        'turbine_profit': float(sum(m['turbine_profit'] for m in case_metrics)),
+        'derate_loss': float(sum(m['derate_loss'] for m in case_metrics)),
+        'penalty_NN_H': float(sum(m['penalty_NN_H'] for m in case_metrics)),
     }
     # ---- 存货结算: 45 步总量口径 (逐 case 的 dsoc 望远镜求和 = 首末之差) ----
     _b0, _bN = min(_soc0_of), max(_soc1_of)

@@ -526,6 +526,11 @@ def train(num_iterations_H,
                             'soc_start': m['soc_start'], 'soc_end': m['soc_end'],
                             'dsoc': m['dsoc'], 'profit_econ': m['profit_econ'],
                             'soc_track_err': m['soc_track_err'],
+                            # r1 分解三项 (新增列, 正交于既有口径; profit/profit_econ 不变):
+                            #   profit/5 - r1 == (penalty_NN_H + derate_loss)/5
+                            'turbine_profit': m['turbine_profit'],
+                            'derate_loss': m['derate_loss'],
+                            'penalty_NN_H': m['penalty_NN_H'],
                         })
                     df_test_rows.append({
                         'step': step,
@@ -540,6 +545,10 @@ def train(num_iterations_H,
                         'soc_start': overall['soc_start'], 'soc_end': overall['soc_end'],
                         'dsoc': overall['dsoc'], 'profit_econ': overall['profit_econ'],
                         'soc_track_err': overall['soc_track_err'],
+                        # r1 分解三项 (45 步总量): profit/45 - r1 == (penalty_NN_H + derate_loss)/45
+                        'turbine_profit': overall['turbine_profit'],
+                        'derate_loss': overall['derate_loss'],
+                        'penalty_NN_H': overall['penalty_NN_H'],
                     })
                     df_test_written = flush_csv_append_batch(
                         '{}/df_test9.csv'.format(output),
