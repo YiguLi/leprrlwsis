@@ -256,6 +256,7 @@ def main():
     ap.add_argument('--s-p', type=float, default=1000.0, help='H 层 reward 归一尺度（默认 1000）')
     ap.add_argument('--anchor-win', type=int, default=20000, help='锚点滚动窗口（默认 20000 步）')
     ap.add_argument('--stat-win', type=int, default=4, help='[C] 摘要统计的窗口长度（末 N 个评估步，默认 4）')
+    ap.add_argument('--lag-n', type=int, default=7, help='[F] 标度律用每个 run 自己最后 N 个连续 checkpoint（默认 7）')
     ap.add_argument('--anchor-min', type=float, default=1.0,
                     help='锚点稳健阈值: |锚点| < 该值时自洽比记为 nan（小分母相除会虚高，默认 1.0）')
     ap.add_argument('--check-gamma', action='store_true', help='反解各 run 的 gamma_eff')
@@ -452,6 +453,45 @@ def main():
         anchor = np.mean(br) / (1 - args.gamma) / args.s_p if br else float('nan')
         print('  %-8s 末 ckpt %6d: D_pi首 %6.3f  M %6.3f  Qbar %6.3f  锚 %6.3f  比 %5.2f  历史最靠后 D_pi首 见 [A]'
               % (nm, last, d_pi(a, a0), out_of_bound(a), q, anchor, q / anchor if anchor else float('nan')))
+
+    # ---- 输出 F: 位移-间隔标度律 (策略到底停在定点, 还是还在匀速漂移?) ----
+    print('\n[F] 策略是否还在漂移: 位移-间隔标度律 (每个 run 用自己最后 %d 个连续 checkpoint)' % args.lag_n)
+    print('    rms(k) = sqrt(mean_s ||a_{i+k}(s) - a_i(s)||^2), 对同间隔的所有 i 取均值')
+    print('    拟合 log rms = alpha * log k + c:')
+    print('      alpha ~ 1.0  匀速漂移   -> 尚未收敛 (位移随间隔线性增长)')
+    print('      alpha ~ 0.5  定点附近随机游走 -> 已收敛到稳定点 (位移按 sqrt(k) 扩散)')
+    print('      alpha ~ 0.0  冻结       -> 完全不动')
+    print('    a_scale = 面板上动作的标准差量级; rms(1)/a_scale 越小说明"checkpoint 间移动"相对')
+    print('    "策略在不同状态间的差异"越可忽略 (经验: <0.1 基本可视为冻结)')
+    print('  %-10s %5s %9s %9s %9s %10s  %s' % ('run', 'n', 'alpha', 'R2', 'rms(1)', 'rms1/a_sc', 'rms(k) k=1..'))
+    for nm in runs:
+        d = dirs[nm]
+        ss = ckpt_steps(d)[-args.lag_n:]
+        if len(ss) < 3:
+            print('  %-10s (checkpoint 不足 3 个, 跳过)' % nm)
+            continue
+        acts = {s: policy_actions(load_actor(d, s), X) for s in ss}
+        A_all = np.concatenate([acts[s] for s in ss], axis=0)
+        a_scale = float(np.sqrt((A_all.std(axis=0) ** 2).mean()))
+        ks, rms = [], []
+        for k in range(1, len(ss)):
+            ds = [float(np.sqrt(((acts[ss[i + k]] - acts[ss[i]]) ** 2).sum(axis=1).mean()))
+                  for i in range(len(ss) - k)]
+            ks.append(k)
+            rms.append(float(np.mean(ds)))
+        al, c0 = np.polyfit(np.log(ks), np.log(rms), 1)
+        pred = al * np.log(ks) + c0
+        r2 = 1 - ((np.log(rms) - pred) ** 2).sum() / ((np.log(rms) - np.mean(np.log(rms))) ** 2).sum()
+        print('  %-10s %5d %9.3f %9.4f %9.4f %10.4f  %s'
+              % (nm, len(ss), al, r2, rms[0], rms[0] / a_scale,
+                 ' '.join('%.4f' % v for v in rms)))
+        # 相邻 D_pi 的线性趋势 (末 N 个 checkpoint)
+        adj = [d_pi(acts[ss[i]], acts[ss[i - 1]]) for i in range(1, len(ss))]
+        sl = np.polyfit(np.arange(len(adj)), adj, 1)[0]
+        verdict = ('仍在匀速漂移(未收敛)' if al > 0.8 else
+                   '定点附近游走(已稳定)' if 0.35 <= al <= 0.8 else '冻结')
+        print('             %s: 相邻 D_pi 趋势 %+.4f/ckpt, 序列 %s'
+              % (verdict, sl, ' '.join('%.3f' % v for v in adj)))
 
 
 if __name__ == '__main__':
