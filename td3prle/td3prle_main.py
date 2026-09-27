@@ -1019,10 +1019,13 @@ if __name__ == "__main__":
     #       且界面斜率 = c·(该步风机收益), 与收益同尺度、随风速/电价自动缩放。
     #     * r1 单调不增 (f<=1 且 turbine_profit>=0) ⇒ 越界永不改善奖励。
     #     * **只动 r1**: env 物理量、revenue/turbine_profit/degradation/profit 等记录列不变。
-    #   复现历史 run1~run13 请显式传 --viol_derate 0 (该路径逐位不变: f 恰为 1.0)。
+    #   ⚠ **默认 0 = 关闭** (run14 实测 c=5.0 有害: 奖励电平被策略自身越界率绑架
+    #     ⇒ critic 高估约 2x ⇒ 正反馈; 详见 README 的 --viol_derate 条目)。
+    #   传 0 = 逐位复现历史 run1~run14。
     parser.add_argument('--viol_derate', default=VIOL_DERATE_COEF, type=float,
                         help='越界乘性惩罚系数 c: 风机收益 × exp(-c·Σ前5维越界量) '
-                             '(默认 %.1f = 生产口径; 0 = 关闭, 逐位复现历史 run)' % VIOL_DERATE_COEF)
+                             '(默认 %.1f = **关闭**; 5.0 = 已证伪的旧口径, 见 README run14 分析)'
+                             % VIOL_DERATE_COEF)
     parser.add_argument('--window_length', default=1, type=int, help='')
     parser.add_argument('--tau',
                         default=0.001,

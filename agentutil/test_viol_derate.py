@@ -207,7 +207,9 @@ def _run_h(coef, a_H):
 A_H_VIOL = [0.70, 0.55, -0.10, 0.30, 0.30, 0.05]      # x = 0.20+0.05+0.10 = 0.35
 cm0, ov0 = _run_h(0.0, A_H_VIOL)
 cm5, ov5 = _run_h(5.0, A_H_VIOL)
-cmN, ovN = _run_h(None, A_H_VIOL)                       # None = 用模块默认 (5.0)
+# None ⇒ 用模块默认 VIOL_DERATE_COEF (现为 0.0 = 关闭)。动态跟随常量, 改默认值不会再破测试。
+cmD, ovD = _run_h(M.VIOL_DERATE_COEF, A_H_VIOL)
+cmN, ovN = _run_h(None, A_H_VIOL)
 
 for k in ('turbine_profit', 'derate_loss', 'penalty_NN_H'):
     check(k in ov0 and k in cm0[0], 'overall/case 都新增了 %r' % k)
@@ -234,8 +236,10 @@ for tag, cms in (('c=0', cm0), ('c=5', cm5)):
               for m in cms)
     check(err < 1e-9, 'per-case 恒等式 %s: 最大偏差 %.2e' % (tag, err))
 
-check(ovN['r1'] == ov5['r1'] and cmN[0]['derate_loss'] == cm5[0]['derate_loss'],
-      'viol_derate_coef=None 等价于模块默认 5.0 (main 默认口径)')
+check(ovN['r1'] == ovD['r1'] and cmN[0]['derate_loss'] == cmD[0]['derate_loss'],
+      'viol_derate_coef=None 等价于模块默认 VIOL_DERATE_COEF (=%.1f, 现为关闭)' % M.VIOL_DERATE_COEF)
+check(M.VIOL_DERATE_COEF == 0.0,
+      '默认值 = 0 (关闭): c=5.0 经 run14 实测有害, 已回退 (见 README)')
 
 # ---------------------------------------------------------------------------
 section('7. 静态接线: main 与 nine_case_test')

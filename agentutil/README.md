@@ -1,4 +1,4 @@
-# agentutil/ —— agent 自建的**项目无关**工具与测试
+﻿# agentutil/ —— agent 自建的**项目无关**工具与测试
 
 本目录是 HSRL 项目的**约定目录**（见根目录 `AGENTS.md`）：
 
@@ -26,7 +26,7 @@
 | `test_l_track_range.py` | 下层 r2/c2 两区间分治不变量（F=∅ ⇒ 单点竭力值 / `n_rem` 时间表 / 单位符号） | `python agentutil/test_l_track_range.py` |
 | `test_phase_uniform.py` | 24h 相位口径统一回归：五统一模块的 `Normalize_H`/`phase_daily_table`/`day_price_schedule` 逐位相同 + `rep_minute_for_price_level` 两种调用约定（档位名/数值电价）+ `td3leprrlrb` 旧口径**语义等价** + 六方法接线契约（`--phase_feat`、`nb_states_H`、`--bsize 128`、两个接收方的 `nine_case_test` 与 main、`test_five_days.py` 的 `h_obs`） | `python agentutil/test_phase_uniform.py` |
 | `test_nstep_h.py` | H 层 **n 步回报**（`--nstep`，**滑窗 stride-1**，CLI 默认 5）与 twin-target 聚合（`--target_agg`）实现契约：**显式 `nstep=1`（复现 run1~run10 的历史口径）**与输入逐位相同 + 滑窗条数 `=块数−n+1`、起点逐块覆盖、`Σγ^k r_k`/第 n 后继/`γ^n`/done 截断/episode 尾结算 + 一整集条数 == 块数（不丢状态覆盖）+ target 公式（`r+γv` vs `Σγ^k r_k+γ^n v`、min 与 mean 聚合） | `python agentutil/test_nstep_h.py` |
-| `test_viol_derate.py` | **越界乘性惩罚**（`--viol_derate`，`r1` 的风机收益 `× exp(−c·Σ前5维越界量)`）契约：`x` 只含机组维（**dim5 signal 不计**）+ 关闭/无越界时 `f` **恰为 1.0**（逐位复现历史 run）+ 只缩放风机项（`Δr1 == turbine_profit·(f−1)`）+ **`r1` 单调不增**（越界永不改善奖励）+ **`details` 里 `turbine_profit`/`revenue`/`bess_profit`/`degradation` 不受影响**（记录列不变）+ main/`nine_case_test` 接线与其它 8 个 `*_myfunc` 未被牵连 + **端到端（桩 env 真跑 `nine_case_test`，不需 MATLAB）**：`c=0` 与 `c=5` 的 `profit`/`dsoc`/`profit_econ` **逐位相同**、分解恒等式 `profit/N − r1 == (罚 + 削减)/N` 成立、`coef=None` ≡ 模块默认 | `python agentutil/test_viol_derate.py` |
+| `test_viol_derate.py` | **越界乘性惩罚**（`--viol_derate`，**默认 0 = 关闭**；`r1` 的风机收益 `× exp(−c·Σ前5维越界量)`）契约：`x` 只含机组维（**dim5 signal 不计**）+ 关闭/无越界时 `f` **恰为 1.0**（逐位复现历史 run）+ 只缩放风机项（`Δr1 == turbine_profit·(f−1)`）+ **`r1` 单调不增**（越界永不改善奖励）+ **`details` 里 `turbine_profit`/`revenue`/`bess_profit`/`degradation` 不受影响**（记录列不变）+ main/`nine_case_test` 接线与其它 8 个 `*_myfunc` 未被牵连 + **端到端（桩 env 真跑 `nine_case_test`，不需 MATLAB）**：`c=0` 与 `c=5` 的 `profit`/`dsoc`/`profit_econ` **逐位相同**、分解恒等式 `profit/N − r1 == (罚 + 削减)/N` 成立、`coef=None` ≡ 模块默认（动态跟随常量）+ 断言默认值 = 0（c=5.0 经 run14 实测有害已回退） | `python agentutil/test_viol_derate.py` |
 | `analyse_q_scale.py` | 从 `update_stats_H.csv` 量化 Q 尺度瞬态与相对 TD 误差 | `python agentutil/analyse_q_scale.py [csv|通配 ...]` |
 | `ab_critic_bias.py` | 同 seed 短程 A/B 驱动（bias 初始化 / 值函数尺度） | `python agentutil/ab_critic_bias.py --project td3perrb --seed 101 --steps 20000 [--dry-run]` |
 | `probe_q_profile_boundary.py` | **逐维动作边界剖面**：固定其它维、只扫一维得到 `Q(a_j)` 面板均值切片 → 峰位、界内/界外签名斜率、"反差 = 越界深度 × \|界外斜率\|" vs critic TD 误差。**区分两类越界**：(A) 角点最优 + 平滑策略 → 峰在界内但界外回正力不足；(B) critic 偏好在界外 → **Q 峰落在界外或界外斜率符号错**。训练/评估路径不 import `*_myfunc`（不启 MATLAB） | `python agentutil/probe_q_profile_boundary.py run13 [--steps 34000 40000] [--dims 4 5] [--td-error 644] [--which p\|c] [--grid -1 1 0.05]` |
@@ -34,6 +34,7 @@
 | `port_nstep.py` | **一次性迁移脚本（已执行完毕，保留作审计记录）**：把 td3per 的 H 层 n 步机制同步到其余五个 TD3 方法（`*_ddpg.py` 加 `nstep`/`target_agg` kwarg + init 块 + target 聚合 + 按条 `_disc` + `_push_transition`/`_emit_nstep`/滑窗 `observe_jump`；`*_main.py` 加 `--nstep`(默认5)/`--target_agg`(默认min)、`--rmsize` 改 20000、构造接线；两个 PRLE 项目额外做 context 拼接 + `relabel_all(discount=γ)` 按块 γ 加权）。作用域解析支持类与方法, 每个变换要求"恰好命中 1 次"否则不写盘; 默认 dry-run | `python agentutil/port_nstep.py [--apply]` |
 | `test_viol_derate_uniform.py` | **越界乘性惩罚的跨项目一致性**（六个 TD3 方法）：helper **逐位同源** + 六个包装函数（`Cal_Rew_RB`/`Cal_Rew_RLRB`/`Cal_Rew_PRRBB`）的 `Δr1 == turbine_profit·(f−1)` 与记录列不变 + **端到端（桩 env 真跑 `nine_case_test`）**：`c=0`/`c=5` 的 `profit`/`profit_econ`/`dsoc` **逐位相同**、分解残差**与 c 无关**（`wT=wB=1` 的两个项目残差 ≡0；四个 PRRRB 系项目因收益重加权残差非零，属正常）+ 六个 main 的静态接线。**不需 MATLAB** | `python agentutil/test_viol_derate_uniform.py` |
 | `port_viol_derate.py` | **一次性迁移脚本（已执行完毕，保留作审计记录）**：把 td3per 的奖励侧改动（helper 块**从 td3per 逐字提取**、r1 乘系数、包装函数透传、`nine_case_test` 分解三列、main 的 CLI/接线/df_test9 三列）同步到其余五个 TD3 方法。每个变换要求"作用域内恰好命中 1 次"，不满足则整体不写盘；默认 dry-run，`--apply` 才写 | `python agentutil/port_viol_derate.py [--apply]` |
+| `flip_viol_derate_default.py` | **一次性脚本（已执行）：把 `--viol_derate` 默认从 5.0 改回 0（关闭）**。run14 实测该乘性罚有害（奖励电平被策略自身越界率绑架 ⇒ critic 高估约 2x ⇒ 正反馈），故只回退默认值、**保留机制/开关/全部测试**供日后受控实验；带断言、默认 dry-run。**另见 README 的 `--viol_derate` 条目里的失败模式** | `python agentutil/flip_viol_derate_default.py [--apply]` |
 | `probe_action_symmetry.py` | 已训练 critic 的 ∂Q/∂a 动作对称性探针 | `python agentutil/probe_action_symmetry.py output/<run1> [run2 ...]` |
 | `probe_value_scale.py` | 归一化两臂的学习曲线/隐层激活量级诊断 | `python agentutil/probe_value_scale.py` |
 | `probe_l_fempty_point.py` | 用真实 run 数据验证 `F=∅` 参考集合是零宽单点（只有竭力值免费） | `python agentutil/probe_l_fempty_point.py [csv]` |
