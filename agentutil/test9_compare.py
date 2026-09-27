@@ -102,7 +102,8 @@ def load(path):
             continue
         w, p = r[ix['wind_level']], r[ix['price_level']]
         if w == OVERALL:
-            ov[st] = (g(r, 'profit_econ'), g(r, 'profit'), g(r, 'dsoc'), g(r, 'soc_track_err'))
+            ov[st] = (g(r, 'profit_econ'), g(r, 'profit'), g(r, 'dsoc'), g(r, 'soc_track_err'),
+                      g(r, 'r1'))
         else:
             sc.setdefault(st, []).append((w, p, g(r, 'profit'), g(r, 'profit_econ'),
                                           g(r, 'dsoc'), g(r, 'soc_track_err')))
@@ -202,7 +203,7 @@ def main():
     base = None
     for nm, _, ov in data:
         s = max(ov)
-        pe, pr, ds, se = ov[s]
+        pe, pr, ds, se = ov[s][:4]
         print('  %-10s %8d %12.1f %+12.1f %12.1f %9.2f' % (nm, s, pr, args.settle * ds, pe, se))
         if base is None:
             base = (nm, pe, pr, args.settle * ds)
@@ -216,7 +217,6 @@ def main():
                 print('  %-10s %8s => 结算项解释了 econ 差的 %.0f%%'
                       % ('', '', 100.0 * stl / gap))
 
-    # ---- 4) 训练增益 / 动态范围 ----
     print('\n[4] test9 动态范围 (step480 未训练 vs 最好) —— 范围越小，判别力越弱')
     for nm, _, ov in data:
         steps = sorted(ov)
@@ -232,6 +232,34 @@ def main():
             print('  --- %s @ step %d ---' % (nm, s))
             for w, p, pr, pe, ds, se in sorted(sc.get(s, []), key=lambda x: (x[0], x[1])):
                 print('    %-6s %-6s profit_econ %9.1f  dsoc %+.3f  soc_err %.2f' % (w, p, pe, ds, se))
+
+
+    # ---- 6) r1 与 profit 的分解 ----
+    print('\n[6] r1 vs profit 分解 —— 二者是同一笔钱的不同包装:')
+    print('    r1     = revenue - degradation - penalty_NN_H   (每步量, 见 td3per_myfunc.Cal_r1_continuous)')
+    print('    profit = 45 步现金流总和 ;  profit_econ = profit + settle*dsoc')
+    print('    => profit/45 - r1 = penalty_NN_H 的每步均值 >= 0  (动作越界罚, 不进钱包)')
+    print('    含义: r1 抖而 profit/econ 稳 ==> 抖的是越界罚, 经济结果稳定。')
+    print('    判经济用 profit/profit_econ; 判 RL 奖励用 r1; 不要混用。')
+    print('  %-12s %8s %9s %9s %9s %11s %11s' % ('run', 'n', 'r1 cv%', 'profit cv%', 'econ cv%',
+                                                '罚/步 均值', '罚/步 max'))
+    for name, _, ov in data:
+        steps = sorted(ov)
+        if args.window:
+            lo, hi = args.window
+            steps = [s for s in steps if lo <= s <= hi]
+        else:
+            steps = steps[-args.tail:]
+        if not steps:
+            print('  %-12s (无数据)' % name)
+            continue
+        pe, pr, r1 = arr(ov, steps, 0), arr(ov, steps, 1), arr(ov, steps, 4)
+        pen = pr / 45.0 - r1
+        cv = lambda v: 100 * np.nanstd(v) / abs(np.nanmean(v)) if np.nanmean(v) else float('nan')
+        bad = int(np.nansum(pen < -1e-6))
+        print('  %-12s %8d %9.2f %9.2f %9.2f %11.3f %11.3f%s'
+              % (name, len(steps), cv(r1), cv(pr), cv(pe), np.nanmean(pen), np.nanmax(pen),
+                 '   <== 出现负残差, 恒等式不成立!' if bad else ''))
 
 
 if __name__ == '__main__':
