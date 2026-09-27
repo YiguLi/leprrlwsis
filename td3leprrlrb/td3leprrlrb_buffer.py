@@ -109,7 +109,7 @@ class LEPRRLRBBuffer(PrioritizedReplayBuffer):
             self._it_sum[idx] = self._max_priority ** self._alpha
             self._it_min[idx] = self._max_priority ** self._alpha
 
-    def relabel_all(self, relabel_r_fn, relabel_c_fn=None):
+    def relabel_all(self, relabel_r_fn, relabel_c_fn=None, discount=1.0):
         """Recompute every stored H-layer (reward, cost) pair.
 
         For each transition carrying a context, the reward is recomputed as
@@ -140,9 +140,11 @@ class LEPRRLRBBuffer(PrioritizedReplayBuffer):
 
             obs_t, action, _old_reward, cost, obs_tp1, done = self._storage[i]
 
+            _blk = int(getattr(self, 'block_size', 5) or 5)
+            _gam = float(discount)
             new_reward = 0.0
-            for sub in ctx:
-                new_reward += relabel_r_fn(
+            for _i, sub in enumerate(ctx):
+                new_reward += (_gam ** (_i // _blk)) * relabel_r_fn(
                     sub['u'],
                     sub['pr'],
                     sub['turbine_raw'],
@@ -155,8 +157,8 @@ class LEPRRLRBBuffer(PrioritizedReplayBuffer):
             new_cost = cost
             if relabel_c_fn is not None:
                 new_cost = 0.0
-                for sub in ctx:
-                    new_cost += relabel_c_fn(
+                for _i, sub in enumerate(ctx):
+                    new_cost += (_gam ** (_i // _blk)) * relabel_c_fn(
                         sub['u'],
                         sub['P_F'],
                         sub.get('unfeasible_gap', 0.0),

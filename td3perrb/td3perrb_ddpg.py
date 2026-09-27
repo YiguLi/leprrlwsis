@@ -41,7 +41,8 @@ class SP_TD3(object):
                  record_update_stats=False,
                  policy_delay=2, policy_noise=0.1, noise_clip=0.3,
                  cost_critic_mode='max',
-                 wt_noise=0.05, sig_noise_max=0.2, sig_noise_min=0.05):
+                 wt_noise=0.05, sig_noise_max=0.2, sig_noise_min=0.05,
+                 nstep=1, target_agg='min'):
 
         # Determine device first
         self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -104,6 +105,22 @@ class SP_TD3(object):
         self.tau = args.tau
         self.discount = args.discount
         self.depsilon = 1.0 / args.epsilon
+
+        # ---- H 层 n 步回报 (默认 nstep=1 = 历史 1-step 口径, 逐位不变) ----
+        #   动机: γ=0.98 时真值 ≈ 块奖励/(1−γ) = 50× 块奖励, 1-step 目标必须把
+        #   奖励信息沿 50 步自助传播; 冻结批实测 (agentutil 离线验证) 40k 次更新
+        #   只到真值的 34 %, 而 n=10 只需 20k 次就到 90 %。n 步把需要自助传播的
+        #   深度从 50 降到 50/n。
+        #   target_agg='mean': 去掉 twin-min 的悲观偏差 (冻结批 Qbar +18 %);
+        #   'min' = TD3 原口径 (默认, 不动历史 run)。
+        self.nstep = max(1, int(nstep))
+        self.target_agg = str(target_agg)
+        assert self.target_agg in ('min', 'mean'), self.target_agg
+        self._pending = []        # nstep>1 时的滑窗队列: 最近 n-1 个块 (等待后继块结算)
+        # 每条转移自带的 bootstrap 系数 (γ^n; episode 截断处为 0), 按 memory 下标存。
+        # nstep>1 的 update_policy 用它替代全局 discount; nstep==1 时完全不读。
+        self._boot = (np.full(int(args.rmsize), float(self.discount), dtype=np.float32)
+                      if self.nstep > 1 else None)
 
         #
         self.epsilon = 1.0
@@ -264,7 +281,11 @@ class SP_TD3(object):
         q_c1_next = self.critic_target_c([next_state_batch, a_smoothed])
         q_c2_next = self.critic_target_c2([next_state_batch, a_smoothed])
 
-        min_p_next = self._pair_min(q_p1_next, q_p2_next)
+        if self.target_agg == 'mean':
+            # 去掉 twin-min 的悲观偏差: 冻结批实测 Qbar 6.997 -> 8.235 (真值 9.159)
+            min_p_next = 0.5 * (q_p1_next + q_p2_next)
+        else:
+            min_p_next = self._pair_min(q_p1_next, q_p2_next)
         # cost aggregate: max (safe, avoid underestimation) or min (TD3 paper).
         # clamp(min=0): costs are non-negative by construction (c1 = c+0.1*P_F,
         # c2 = 1000*soc_deviation), so a negative cost bootstrap target is
@@ -272,10 +293,18 @@ class SP_TD3(object):
         min_c_next = self._aggregate_pair(q_c1_next, q_c2_next).clamp(min=0.0)
 
         # A1: terminal 语义修复 —— bootstrap 当且仅当非终止转移
+        # nstep>1: 每条转移自带 bootstrap 系数 γ^n (episode 截断处为 0),
+        #          替代全局 discount; nstep==1 时 _disc 就是 float(discount),
+        #          表达式与历史版本逐位相同。
+        if self.nstep > 1:
+            _disc = torch.tensor(self._boot[batch_idxes], dtype=torch.float32,
+                                 device=self.device).reshape(-1, 1)
+        else:
+            _disc = self.discount
         target_q_batch_p = profit_batch + \
-            self.discount * (1 - terminal_batch) * min_p_next
+            _disc * (1 - terminal_batch) * min_p_next
         target_q_batch_c = cost_batch + \
-            self.discount * (1 - terminal_batch) * min_c_next
+            _disc * (1 - terminal_batch) * min_c_next
 
         # ---- Critic updates (all four, every call) ----
         self.critic_p.zero_grad()
@@ -446,9 +475,67 @@ class SP_TD3(object):
             self.memory.append(self.s_t, self.a_t, r_t, c_t, s_t1, done)
             self.s_t = s_t1
 
+    # ---- n 步回报: 写入侧 --------------------------------------------------
+    def _push_transition(self, s_t, a_t, r_t, c_t, s_t1, done, boot):
+        """写一条转移进 memory, 并记录它的 bootstrap 系数 boot。
+
+        boot 只在 nstep>1 时被 update_policy 读取 (nstep==1 走原分支, 不读)。
+        下标 = append 之前的 memory._next_idx —— PrioritizedReplayBuffer.append
+        也用同一个值作为 segment-tree 下标, 两者一致。
+        """
+        idx = self.memory._next_idx
+        self.memory.append(s_t, a_t, r_t, c_t, s_t1, done)
+        if self._boot is not None and 0 <= idx < len(self._boot):
+            self._boot[idx] = boot
+
+    def _emit_nstep(self, start, n_used):
+        """把 _pending[start : start+n_used] 折叠成一条 n 步转移写入 memory。
+
+        reward = Σ_{k<n} γ^k·r_k (成本通道同式); next_state = 第 n 个后继状态;
+        boot = γ^n, 但窗口内出现 done 就截断且 boot=0 (由 done 表达终止)。
+
+        注意: 正常路径 (滑窗) 每次只有 start=0, n_used=nstep —— 每来一个块结算一条;
+        start>0 只出现在 episode 末的尾部结算 (逐条截断)。
+        """
+        seg = self._pending[start:start + n_used]
+        gam = float(self.discount)
+        r_sum = 0.0
+        c_sum = 0.0
+        trunc = False
+        for k, (_s, _a, _r, _c, _s2, _d) in enumerate(seg):
+            r_sum += (gam ** k) * float(_r)
+            c_sum += (gam ** k) * float(_c)
+            if _d:
+                trunc = True
+                break
+        boot = 0.0 if trunc else gam ** n_used
+        self._push_transition(seg[0][0], seg[0][1], r_sum, c_sum, seg[-1][4],
+                              1.0 if trunc else float(seg[-1][5]), boot)
+
     def observe_jump(self, s_t, a_t, r_t, c_t, s_t1, done):
-        if self.is_training:
+        if not self.is_training:
+            return
+        if self.nstep <= 1:
             self.memory.append(s_t, a_t, r_t, c_t, s_t1, done)
+            return
+        self._pending.append((s_t, a_t, r_t, c_t, s_t1, done))
+        # ---- 滑窗 (stride-1): 每来一个新块就结算**队首**那一条, 队列长度稳定在 n-1 ----
+        #   为什么必须滑窗而不是"攒满 n 个清空": 分块版每条转移的起点是 b1,b(1+n),...
+        #   ⇒ 只有 1/n 的块状态成为**训练输入**, 其余只作为 bootstrap 的后继 (target 侧)
+        #   出现, 网络从未以它们为输入拟合过。滑窗版每个块都是某条转移的起点 ⇒
+        #   **状态覆盖 = 块数**, 同时每条仍带 n 步目标 (标准做法: Rainbow/Ape-X 的
+        #   n_step wrapper 即 stride-1)。
+        #   代价: 条目数 ×n (rmsize 口径变回"≈块数"), 且相邻两条共享 n-1 个奖励
+        #   ⇒ 批内相关、PER 优先级在同一奖励段上扩散 (看 weight_mean)。
+        while len(self._pending) >= self.nstep:
+            self._emit_nstep(0, self.nstep)
+            self._pending.pop(0)
+        if done:
+            # episode 末: 尾部 (不足 n 步) 逐条按截断结算, 防止跨 episode 混算
+            k = len(self._pending)
+            for i in range(k):
+                self._emit_nstep(i, k - i)
+            self._pending = []
 
     def random_action(self):
         charge = 10.

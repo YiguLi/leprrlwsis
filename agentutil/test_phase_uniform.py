@@ -170,16 +170,20 @@ print('=' * 100)
 print('D. 接线契约（静态扫描）')
 print('=' * 100)
 P_MAIN = {k: os.path.join(k, '%s_main.py' % k) for k in ALL6}
-# --rmsize 默认值的**例外**: td3per 因 H 层 n 步滑窗 (1 条 = n 块 = 5n 环境步)
-# 单独下调到 20000 (≈500k 环境步); 其余五方法无 n 步 ⇒ 维持 80000 (≈400k 步)。
-RMSIZE_DEFAULT = {'td3per': 20000}
+# --rmsize 默认 = 20000 (**六个 TD3 方法已统一**; 均启用 H 层 n 步滑窗, 1 条 = n 块
+# = 5n 环境步 ⇒ 20000 条 ≈ 500k 环境步。此前只有 td3per 下调, 其余维持 80000,
+# 批次 2 同步后例外表已取消)。
+RMSIZE_DEFAULT = 20000
 for k in ALL6:
     src = read_text(P_MAIN[k])
     check("'--phase_feat', default=1, type=int, choices=[0, 1, 2]" in src,
           '%s: --phase_feat 默认 1 / choices [0,1,2]' % k)
-    _rm = RMSIZE_DEFAULT.get(k, 80000)
-    check("'--bsize', default=128" in src and 'default=%d,' % _rm in src,
-          '%s: --bsize 128 / --rmsize %d' % (k, _rm))
+    check("'--bsize', default=128" in src and 'default=%d,' % RMSIZE_DEFAULT in src,
+          '%s: --bsize 128 / --rmsize %d' % (k, RMSIZE_DEFAULT))
+    check("'--nstep', default=5" in src and "'--target_agg', default='min'" in src,
+          '%s: --nstep 默认 5 / --target_agg 默认 min' % k)
+    check('nstep=args.nstep, target_agg=args.target_agg' in src,
+          '%s: H 层构造接线 nstep/target_agg' % k)
 for k in UNIFORM:
     src = read_text(P_MAIN[k])
     check('nb_states_H = 4 + PHASE_DIM[int(getattr(args, \'phase_feat\', 0))]' in src,

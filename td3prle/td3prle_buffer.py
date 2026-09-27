@@ -79,7 +79,7 @@ class PRLEBuffer(PrioritizedReplayBuffer):
         else:
             self._contexts[idx] = context
 
-    def relabel_all(self, relabel_r_fn, relabel_c_fn=None):
+    def relabel_all(self, relabel_r_fn, relabel_c_fn=None, discount=1.0):
         """
         Recompute all stored rewards (and optionally costs) using current wind
         thresholds.
@@ -115,9 +115,13 @@ class PRLEBuffer(PrioritizedReplayBuffer):
             # Unpack current storage tuple
             obs_t, action, _old_reward, cost, obs_tp1, done = self._storage[i]
 
+            # n 步折叠后 ctx 覆盖多个块 (每 block_size 个子步为一块): 按块加 γ^k
+            #   discount=1.0 (默认, 单块 context) 时权重恒 1 ⇒ 与旧行为逐位相同。
+            _blk = int(getattr(self, 'block_size', 5) or 5)
+            _gam = float(discount)
             new_reward = 0.0
-            for sub in ctx:
-                new_reward += relabel_r_fn(
+            for _i, sub in enumerate(ctx):
+                new_reward += (_gam ** (_i // _blk)) * relabel_r_fn(
                     sub['u'],
                     sub['pr'],
                     sub['turbine_raw'],
@@ -129,8 +133,8 @@ class PRLEBuffer(PrioritizedReplayBuffer):
             new_cost = cost
             if relabel_c_fn is not None:
                 new_cost = 0.0
-                for sub in ctx:
-                    new_cost += relabel_c_fn(
+                for _i, sub in enumerate(ctx):
+                    new_cost += (_gam ** (_i // _blk)) * relabel_c_fn(
                         sub['u'], sub['P_F'],
                         sub.get('unfeasible_gap', 0.0))
 
