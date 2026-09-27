@@ -283,6 +283,7 @@ python td3leprrlrb/td3leprrlrb_main.py    # 需配置 LLM
 | `--discount` | 0.99 | 折扣因子（以 5 min 的"块"为单位） |
 | `--policy_delay` | 2 | TD3 延迟策略更新频率 |
 | `--nstep` | **5** | H 层 **n 步回报**（滑窗 stride-1：每个块都是某条转移的起点，条数 ≈ 块数、状态不丢；`reward=Σγ^k r_k`、自带 bootstrap 系数 `γ^n`）。把需要自助传播的深度从 `1/(1−γ)=50` 降到 `50/n` ⇒ 冻结批实测 n=5 自洽比 0.79 / n=10+mean ≈1.0（1-step 仅 0.41）。**默认 5 = 生产口径**（依据 run12/run13 的 2v2 观测：`\|dQp/da\|` 5~8 倍且不衰减、早期块奖励 160~181 vs 55~91 元、自洽比 0.59/0.60 vs 0.34/0.47；⚠ 非受控 A/B）。**复现 run1~run10 请显式 `--nstep 1`**（那条路径逐位不变）。注意条数与 `rmsize` 口径随 n 变（1 条 = n 块 = 5n 环境步） |
+| `--rmsize` | **20000** | H 层 memory **条数**（覆盖环境步 = `rmsize × 5 × nstep`）。默认 20000 = 生产口径（与 run12/run13 一致）：n=5 时 ≈ **500k 环境步 ≈ 1.8 epoch**，即"最近约 1.8 个 epoch 的滚动窗口"；≤60k 步的 run 里仍填不满（12,000 条）。**复现 run1~run10 请传 `--rmsize 80000`**（1-step 口径 ≈400k 步）。其余五个方法无 n 步 ⇒ 维持 80000（`agentutil/test_phase_uniform.py` 里有例外表） |
 | `--target_agg` | `min` | H 层 twin **profit**-critic 的 target 聚合：`min` = TD3 原口径（悲观、防过估计）；`mean` = 去偏（未收敛期实测 +18 %，但真实网两网相关 0.99+ 时仅 ~2 %）。actor 的梯度聚合始终为 `min`（`_pair_min`），此开关只改回归目标 |
 | `--phase_feat` | 1 | H 观测加入 24h 相位特征（4→6 维） |
 | `--wt_bias_init` | 1 | 风机输出层 bias 初始化到 Cp 高效区 |
