@@ -143,13 +143,62 @@ def Cal_soc_deviation(SOC, wind_level=None):
 # 4. Upper-level r1
 # =============================================================================
 
-def Cal_r1_continuous(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
-                      SOC=3.0, time=1.0 / 60):
+# ---- 越界乘性惩罚 (--viol_derate) -------------------------------------------
+# 动机 (agentutil/probe_q_profile_boundary.py 的实测):
+#   线性罚 200/单位在 critic 回归空间只有 200/s_p = 0.2, 而框内经济斜率实测
+#   0.27~4.5 ⇒ 跨界几乎不花钱。一维 Q(a_j) 剖面显示 Q 峰就贴在约束边界上
+#   (dim4 峰 a=0.05; dim5 峰甚至在界外 -0.60) ⇒ 平滑 actor 逼近角点解时必有一
+#   半状态落界外。且典型越界(深度~0.09)的罚贡献 = 200*0.09/1000 = 0.018,
+#   比 critic 自身 TD 误差 0.64 小 30+ 倍 ⇒ 边界位置落在 critic 噪声里。
+# 做法: 给 **风机收益** 乘一个自缩放系数 f = exp(-c·x), x = Σ_{j=0..4} 越界量
+#   (只算机组限功率维; dim5=signal 不计 —— 按用户决定)。
+#   * 乘在 turbine_profit 上而非净利润: turbine_profit = w·pr·ptur·dt ≥ 0 恒成立
+#     (实测 100% 的步), 结构上排除"亏损步上 f<1 反而鼓励越界"的符号陷阱;
+#     且其量级(49.9/步)大于 r1(29.9/步), 界外斜率更强。
+#   * 与收益同尺度 ⇒ 界面斜率 = c·(该步风机收益), 随风速/电价自动缩放。
+#   * r1 单调不增: f<=1 且 turbine_profit>=0 ⇒ 越界在任何情况下都不会让 r1 变大。
+#   * 只动 r1; env 物理量、revenue/degradation/turbine_profit/profit 等**记录列全部不变**。
+VIOL_DERATE_COEF = 5.0     # c; <=0 关闭 (返回 1.0 ⇒ 与历史路径逐位相同)
+VIOL_DERATE_DIMS = 5       # 前 N 维 = 机组限功率; dim5(signal) 不计入 x
+_ACT_HI, _ACT_LO = 0.5, 0.0   # 与 CheckAction 的前 5 维边界一致
+
+
+def violation_amount(action, n_dims=None):
+    """x = 前 n_dims 维 (机组限功率, 边界 [0,0.5]) 的越界量之和。"""
+    if n_dims is None:
+        n_dims = VIOL_DERATE_DIMS
+    a = np.asarray(action, dtype=float).reshape(-1)
+    n = min(int(n_dims), a.size)
+    if n <= 0:
+        return 0.0
+    v = np.maximum(np.maximum(a[:n] - _ACT_HI, _ACT_LO - a[:n]), 0.0)
+    return float(v.sum())
+
+
+def violation_derate(action, coef=None, n_dims=None):
+    """乘性越界系数 f = exp(-c·x)。
+
+    coef<=0 或 x==0 ⇒ 恰好返回 1.0 (IEEE754 下 `tp*1.0 == tp` 逐位相等),
+    因此 `--viol_derate 0` 与改动前的训练路径**逐位一致**。
     """
-    r1 = wT * (pr * ptur * time)             ← 风机收益
+    c = VIOL_DERATE_COEF if coef is None else float(coef)
+    if c <= 0.0:
+        return 1.0
+    x = violation_amount(action, n_dims)
+    if x <= 0.0:
+        return 1.0
+    return float(np.exp(-c * x))
+
+
+def Cal_r1_continuous(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
+                      SOC=3.0, time=1.0 / 60, turbine_derate=1.0):
+    """
+    r1 = turbine_derate * wT * (pr * ptur * time)   ← 风机收益 (乘越界系数)
        + wB * (-pr * pbrule * time)          ← BESS 收益 (正=pbrule<0 放电)
        - 490 * max(-pbrule, 0) * time        ← 退化
        - penalty_NN_H
+
+    turbine_derate=1.0 (默认) 时与旧口径逐位相同。
     """
     w_wind = get_wT(wind_level, price_level)
     w_bess = get_wB(price_level, wind_level, SOC)
@@ -159,7 +208,8 @@ def Cal_r1_continuous(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
     degradation    = (DEG_COST_DISCHARGE * max(-pbrule, 0.0)
                       + DEG_COST_CHARGE * max(pbrule, 0.0)) * time
 
-    return turbine_profit + bess_profit - degradation - penalty_NN_H
+    return (turbine_profit * turbine_derate + bess_profit - degradation
+            - penalty_NN_H)
 
 
 # =============================================================================
@@ -183,7 +233,7 @@ def gap_penalty(soc_target, SOC_end, tol=SOC_TOL):
 
 def Cal_Rew_RB(observation, observation2, action_rbb, rbb_info,
                penalty_NN_H=0.0, time=1.0 / 60, ptur=None,
-               pb_cmd=None):
+               pb_cmd=None, turbine_derate=1.0):
     """
     上层 (H) 奖励/成本 —— 非分段口径 (与 td3perrb_myfunc.Cal_Rew_RB 逐字一致).
 
@@ -196,6 +246,7 @@ def Cal_Rew_RB(observation, observation2, action_rbb, rbb_info,
     penalty_NN_H : 上层动作越界罚
     ptur         : 风机功率 (MW)
     pb_cmd       : 下层给 RBB 之前的功率指令 (MW) —— 仅诊断列 (RL 下层 = pb_original)
+    turbine_derate : 越界乘性系数 f=exp(-c·x), 只乘风机收益项; 默认 1.0 (旧口径逐位相同)
 
     Returns
     -------
@@ -224,7 +275,8 @@ def Cal_Rew_RB(observation, observation2, action_rbb, rbb_info,
 
     # ==== r1 (H 机会侧) ====
     r1 = Cal_r1_continuous(pr_old, ptur, pbrule, penalty_NN_H,
-                           wind_level, price_level, SOC=SOC_decision, time=time)
+                           wind_level, price_level, SOC=SOC_decision, time=time,
+                           turbine_derate=turbine_derate)
 
     # ==== c1 (H 风险侧) ====
     c1_risk_coeff = C1_RISK_COEF   # 非分段 ⇒ 恒为 1.0 (不做风况分档)
@@ -519,7 +571,7 @@ except ImportError:
 SOC_SETTLE_PR = float(hc.PR_REF)
 def nine_case_test(agent_H, agent_L, env_test, rbb_system,
                    scenario=None, test_csv=False, output=None, seed=None,
-                   phase_mode=0, phase_table=None):
+                   phase_mode=0, phase_table=None, viol_derate_coef=None):
     """
     TD3PER 45-step 9-case in-training test (上层 = 非分段 SOC 目标信号, 下层 = RL).
 
@@ -562,8 +614,10 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
 
     while step < num_iterations:
         if step % 5 == 0:
-            action_H = agent_H.select_action(norm_obs)
-            action_H, penalty_NN_H = CheckAction(action_H)
+            action_H_raw = agent_H.select_action(norm_obs)
+            action_H, penalty_NN_H = CheckAction(action_H_raw)
+            # 越界乘性系数 (与训练同口径; 系数<=0 时恒 1.0 ⇒ 旧口径逐位不变)
+            _derate = violation_derate(action_H_raw, viol_derate_coef)
             pw_tru = env_test.PowerOutput(obs[1], action_H)
             soc_target = soc_target_from_signal(action_H[-1])
 
@@ -602,6 +656,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             obs, obs2, action_rbb, rbb_info,
             penalty_NN_H=penalty_NN_H, time=time,
             ptur=ptur, pb_cmd=pb_original,
+            turbine_derate=_derate,
         )
 
         # 块末: SOC 目标可行性罚 (上层)

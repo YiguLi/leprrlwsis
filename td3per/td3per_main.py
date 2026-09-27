@@ -68,6 +68,7 @@ from util import *
 from td3per.td3per_myfunc import (
     CheckAction, Normalize, Normalize_H,
     Cal_Rew_RB, gap_penalty, soc_target_from_signal, nine_case_test,
+    violation_derate, VIOL_DERATE_COEF,
     build_L_obs_distilled, lower_reward, lower_cost_soc_track,
     SOC_TOL,
     PHASE_DIM, day_price_schedule, phase_features, phase_daily_table,
@@ -250,6 +251,8 @@ def train(num_iterations_H,
             else:
                 original_action_H = agent_H.select_action(norm_observation)
                 applied_action_H, penalty_NN_H = CheckAction(original_action_H)
+            # 越界乘性系数 (每块一个 H 动作 ⇒ 块内恒定; 系数<=0 时恒 1.0 ⇒ 旧口径逐位不变)
+            viol_derate = violation_derate(original_action_H, args.viol_derate)
             norm_observation_H = norm_observation
             pw_tru = env.PowerOutput(observation[1], applied_action_H)
             # SOC 目标 (块级固定) —— 上层信号语义
@@ -349,6 +352,7 @@ def train(num_iterations_H,
             observation, observation2, action_rbb, rbb_info,
             penalty_NN_H=penalty_NN_H, time=time,
             ptur=ptur, pb_cmd=pb_original,
+            turbine_derate=viol_derate,
         )
         P_F = reward_details['P_F']
 
@@ -503,7 +507,8 @@ def train(num_iterations_H,
             if episode_steps % 480 == 0:
                 case_metrics, overall = nine_case_test(
                     agent_H, agent_L, env_test, rbb_system, seed=42,
-                    phase_mode=phase_mode, phase_table=phase_table)
+                    phase_mode=phase_mode, phase_table=phase_table,
+                    viol_derate_coef=args.viol_derate)
                 if use_csv:
                     for m in case_metrics:
                         df_test_rows.append({
@@ -888,6 +893,22 @@ if __name__ == "__main__":
                         choices=['min', 'mean'],
                         help='H 层 twin profit-critic 的 target 聚合 '
                              '(min = TD3 原口径; mean = 去掉悲观偏差)')
+    # ---- 越界乘性惩罚 ----
+    #   动机 (agentutil/probe_q_profile_boundary.py 一维 Q(a_j) 剖面实测, run13 ckpt40000):
+    #     线性罚 200/单位在 critic 空间只有 200/1000 = 0.2, 而框内经济斜率 0.27~4.5
+    #     ⇒ 跨界几乎不花钱, Q 峰贴在约束边界上 (dim4 峰 a=0.05, dim5 峰甚至在界外 -0.60)
+    #     ⇒ 平滑 actor 逼近角点解时一半状态落界外 (dim4 25.7%, dim5 47.1%)。
+    #     且典型越界(深度~0.09)的罚贡献 = 0.018, 比 critic 自身 TD 误差 0.64 小 30+ 倍,
+    #     边界位置落在 critic 噪声里。
+    #   做法: r1 的风机收益项乘 f = exp(-c·x), x = Σ 前 5 维越界量 (dim5=signal 不计)。
+    #     * 乘 turbine_profit (>=0 恒成立) 而非净利润: 排除亏损步上 f<1 鼓励越界的符号陷阱;
+    #       且界面斜率 = c·(该步风机收益), 与收益同尺度、随风速/电价自动缩放。
+    #     * r1 单调不增 (f<=1 且 turbine_profit>=0) ⇒ 越界永不改善奖励。
+    #     * **只动 r1**: env 物理量、revenue/turbine_profit/degradation/profit 等记录列不变。
+    #   复现历史 run1~run13 请显式传 --viol_derate 0 (该路径逐位不变: f 恰为 1.0)。
+    parser.add_argument('--viol_derate', default=VIOL_DERATE_COEF, type=float,
+                        help='越界乘性惩罚系数 c: 风机收益 × exp(-c·Σ前5维越界量) '
+                             '(默认 %.1f = 生产口径; 0 = 关闭, 逐位复现历史 run)' % VIOL_DERATE_COEF)
     parser.add_argument('--bsize', default=128, type=int,
                         help='minibatch size')
     # ---- memory 容量 ----
@@ -1115,6 +1136,12 @@ if __name__ == "__main__":
     print('[H] nstep={} target_agg={} (n 步回报: 自助传播深度 50->{:.1f}; '
           '复现历史 run1~run10 请传 --nstep 1)'.format(
               args.nstep, args.target_agg, 50.0 / max(1, args.nstep)))
+    if args.viol_derate > 0:
+        print('[H] 越界乘性惩罚 c={:.2f}: r1 的风机收益 × exp(-{:.2f}·Σ前5维越界量); '
+              '记录列(revenue/turbine_profit/degradation/profit)不变'.format(
+                  args.viol_derate, args.viol_derate))
+    else:
+        print('[H] 越界乘性惩罚已关闭 (--viol_derate 0): 与历史 run 逐位一致')
     agent_H.lam = _HCFG['lam_init'] if _HCFG else 5.0
     # 值函数回归空间归一化 (s = hc.value_scale()): 只作用于 H 层 r1/c1 进入
     # critic 之前; buffer/对偶/日志/CSV 仍是原始口径 (见 hsrl_cost 末尾小节)。
