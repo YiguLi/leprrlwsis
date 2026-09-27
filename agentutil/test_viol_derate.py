@@ -267,11 +267,17 @@ check('derate_loss' in src_tool and 'turbine_profit' in src_tool
 src_model = open('model.py', encoding='utf-8').read()
 check('故意不做有界压缩' in src_model and 'tanh' in src_model,
       'model.py 在 Actor 输出处注明 tanh 有害 (含实测依据)')
-# 其它五个方法不应被牵连
+# 六个 TD3 方法**应有** helper (批次 1 已同步); **非 TD3** 方法不得被牵连
 import glob
-others = [p for p in glob.glob('*/[a-z]*_myfunc.py') if 'td3per/' not in p.replace('\\', '/')]
+SIX_TD3 = {'td3per', 'td3perrb', 'td3prrlrb', 'td3prrbb', 'td3prle', 'td3leprrlrb'}
+others = [p for p in glob.glob('*/[a-z]*_myfunc.py')
+          if os.path.basename(os.path.dirname(p)) not in SIX_TD3]
 bad = [p for p in others if 'violation_derate' in open(p, encoding='utf-8').read()]
-check(not bad, '其它方法的 *_myfunc.py 未被牵连 (%d 个文件)' % len(others))
+check(not bad, '非 TD3 方法的 *_myfunc.py 未被牵连 (%d 个: %s)'
+      % (len(others), ', '.join(sorted(os.path.basename(os.path.dirname(p)) for p in others))))
+missing = [k for k in SIX_TD3
+           if 'violation_derate' not in open('%s/%s_myfunc.py' % (k, k), encoding='utf-8').read()]
+check(not missing, '六个 TD3 方法的 myfunc 都已同步 helper (缺: %s)' % (missing or '无'))
 
 print('\n' + '=' * 60)
 if FAIL:

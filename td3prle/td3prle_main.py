@@ -82,6 +82,7 @@ from util import *
 from td3prle.td3prle_myfunc import (
     CheckAction, Normalize, Normalize_H, Original,
     Cal_Rew_PRRBB, nine_case_test,
+    violation_derate, VIOL_DERATE_COEF,
     build_L_obs_distilled,
     get_price_level,
     get_wind_thresholds, set_wind_thresholds,
@@ -287,6 +288,7 @@ def train(num_iterations_H,
             else:
                 original_action_H = agent_H.select_action(norm_observation)
                 applied_action_H, penalty_NN_H = CheckAction(original_action_H)
+            viol_derate = violation_derate(original_action_H, args.viol_derate)
             norm_observation_H = norm_observation
             pw_tru = env.PowerOutput(observation[1], applied_action_H)
             # 上层信号 → SOC 目标 (下层映射; 块内保持不变)
@@ -391,6 +393,7 @@ def train(num_iterations_H,
             observation, observation2, action_rbb, rbb_info,
             penalty_NN_H=penalty_NN_H, time=time,
             ptur=ptur, n_rem=5 - (episode_steps % 5),
+            turbine_derate=viol_derate,
         )
 
         # Total reward and cost (H uses r1/c1; L uses r2/c2)
@@ -557,7 +560,8 @@ def train(num_iterations_H,
             if episode_steps % 480 == 0:
                 case_metrics, overall = nine_case_test(
                     agent_H, agent_L, env_test, rbb_system, seed=42,
-                    phase_mode=phase_mode, phase_table=phase_table)
+                    phase_mode=phase_mode, phase_table=phase_table,
+                    viol_derate_coef=args.viol_derate)
                 if use_csv:
                     df_test = pd.concat([df_test, pd.DataFrame([{
                         'step': step,
@@ -570,6 +574,9 @@ def train(num_iterations_H,
                         # c1 = 结算总成本 (含块末 SOC 跟踪项); c1_soc_track 为其分量
                         'c1_soc_track': m['c1_soc_track'],
                         'profit': m['profit'],
+                        'turbine_profit': m['turbine_profit'],
+                        'derate_loss': m['derate_loss'],
+                        'penalty_NN_H': m['penalty_NN_H'],
                         # 存货结算 (口径修正, 不改训练路径): profit 只记现金流, 不含储存电量变动;
                         # 按外生账面价 SOC_SETTLE_PR (= hc.PR_REF = 580) 结算 ΔSOC。
                         'soc_start': m['soc_start'], 'soc_end': m['soc_end'],
@@ -589,6 +596,9 @@ def train(num_iterations_H,
                         'cvm': overall['cvm'],
                         'c1_soc_track': overall['c1_soc_track'],
                         'profit': overall['profit'],
+                        'turbine_profit': overall['turbine_profit'],
+                        'derate_loss': overall['derate_loss'],
+                        'penalty_NN_H': overall['penalty_NN_H'],
                         'soc_start': overall['soc_start'], 'soc_end': overall['soc_end'],
                         'dsoc': overall['dsoc'], 'profit_econ': overall['profit_econ'],
                         'project_wind_levels': '',
@@ -976,6 +986,22 @@ if __name__ == "__main__":
                         default=80000,
                         type=int,
                         help='memory size') # 6000000
+    # ---- 越界乘性惩罚 ----
+    #   动机 (agentutil/probe_q_profile_boundary.py 一维 Q(a_j) 剖面实测, run13 ckpt40000):
+    #     线性罚 200/单位在 critic 空间只有 200/1000 = 0.2, 而框内经济斜率 0.27~4.5
+    #     ⇒ 跨界几乎不花钱, Q 峰贴在约束边界上 (dim4 峰 a=0.05, dim5 峰甚至在界外 -0.60)
+    #     ⇒ 平滑 actor 逼近角点解时一半状态落界外 (dim4 25.7%, dim5 47.1%)。
+    #     且典型越界(深度~0.09)的罚贡献 = 0.018, 比 critic 自身 TD 误差 0.64 小 30+ 倍,
+    #     边界位置落在 critic 噪声里。
+    #   做法: r1 的风机收益项乘 f = exp(-c·x), x = Σ 前 5 维越界量 (dim5=signal 不计)。
+    #     * 乘 turbine_profit (>=0 恒成立) 而非净利润: 排除亏损步上 f<1 鼓励越界的符号陷阱;
+    #       且界面斜率 = c·(该步风机收益), 与收益同尺度、随风速/电价自动缩放。
+    #     * r1 单调不增 (f<=1 且 turbine_profit>=0) ⇒ 越界永不改善奖励。
+    #     * **只动 r1**: env 物理量、revenue/turbine_profit/degradation/profit 等记录列不变。
+    #   复现历史 run1~run13 请显式传 --viol_derate 0 (该路径逐位不变: f 恰为 1.0)。
+    parser.add_argument('--viol_derate', default=VIOL_DERATE_COEF, type=float,
+                        help='越界乘性惩罚系数 c: 风机收益 × exp(-c·Σ前5维越界量) '
+                             '(默认 %.1f = 生产口径; 0 = 关闭, 逐位复现历史 run)' % VIOL_DERATE_COEF)
     parser.add_argument('--window_length', default=1, type=int, help='')
     parser.add_argument('--tau',
                         default=0.001,

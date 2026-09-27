@@ -179,8 +179,55 @@ def get_wB(price_level, wind_level, SOC):
 # 4. Upper-Level (H): r1 with wind × price segmented profit decomposition
 # =============================================================================
 
+# ---- 越界乘性惩罚 (--viol_derate) -------------------------------------------
+# 动机 (agentutil/probe_q_profile_boundary.py 的实测):
+#   线性罚 200/单位在 critic 回归空间只有 200/s_p = 0.2, 而框内经济斜率实测
+#   0.27~4.5 ⇒ 跨界几乎不花钱。一维 Q(a_j) 剖面显示 Q 峰就贴在约束边界上
+#   (dim4 峰 a=0.05; dim5 峰甚至在界外 -0.60) ⇒ 平滑 actor 逼近角点解时必有一
+#   半状态落界外。且典型越界(深度~0.09)的罚贡献 = 200*0.09/1000 = 0.018,
+#   比 critic 自身 TD 误差 0.64 小 30+ 倍 ⇒ 边界位置落在 critic 噪声里。
+# 做法: 给 **风机收益** 乘一个自缩放系数 f = exp(-c·x), x = Σ_{j=0..4} 越界量
+#   (只算机组限功率维; dim5=signal 不计 —— 按用户决定)。
+#   * 乘在 turbine_profit 上而非净利润: turbine_profit = w·pr·ptur·dt ≥ 0 恒成立
+#     (实测 100% 的步), 结构上排除"亏损步上 f<1 反而鼓励越界"的符号陷阱;
+#     且其量级(49.9/步)大于 r1(29.9/步), 界外斜率更强。
+#   * 与收益同尺度 ⇒ 界面斜率 = c·(该步风机收益), 随风速/电价自动缩放。
+#   * r1 单调不增: f<=1 且 turbine_profit>=0 ⇒ 越界在任何情况下都不会让 r1 变大。
+#   * 只动 r1; env 物理量、revenue/degradation/turbine_profit/profit 等**记录列全部不变**。
+VIOL_DERATE_COEF = 5.0     # c; <=0 关闭 (返回 1.0 ⇒ 与历史路径逐位相同)
+VIOL_DERATE_DIMS = 5       # 前 N 维 = 机组限功率; dim5(signal) 不计入 x
+_ACT_HI, _ACT_LO = 0.5, 0.0   # 与 CheckAction 的前 5 维边界一致
+
+
+def violation_amount(action, n_dims=None):
+    """x = 前 n_dims 维 (机组限功率, 边界 [0,0.5]) 的越界量之和。"""
+    if n_dims is None:
+        n_dims = VIOL_DERATE_DIMS
+    a = np.asarray(action, dtype=float).reshape(-1)
+    n = min(int(n_dims), a.size)
+    if n <= 0:
+        return 0.0
+    v = np.maximum(np.maximum(a[:n] - _ACT_HI, _ACT_LO - a[:n]), 0.0)
+    return float(v.sum())
+
+
+def violation_derate(action, coef=None, n_dims=None):
+    """乘性越界系数 f = exp(-c·x)。
+
+    coef<=0 或 x==0 ⇒ 恰好返回 1.0 (IEEE754 下 `tp*1.0 == tp` 逐位相等),
+    因此 `--viol_derate 0` 与改动前的训练路径**逐位一致**。
+    """
+    c = VIOL_DERATE_COEF if coef is None else float(coef)
+    if c <= 0.0:
+        return 1.0
+    x = violation_amount(action, n_dims)
+    if x <= 0.0:
+        return 1.0
+    return float(np.exp(-c * x))
+
+
 def Cal_r1_PRRBB(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
-                 SOC=3.0, time=1.0 / 60):
+                 SOC=3.0, time=1.0 / 60, turbine_derate=1.0):
     """
     PRRBB upper-level r1 — 机会/风险分离的分段收益分解 (与 td3prrbb 一致).
 
@@ -200,7 +247,8 @@ def Cal_r1_PRRBB(pr, ptur, pbrule, penalty_NN_H, wind_level, price_level,
     bess_profit    = w_bess * (-pr * pbrule * time)
     degradation    = BESS_DEG_RMB_PER_MWH * max(-pbrule, 0.0) * time
 
-    return turbine_profit + bess_profit - degradation - penalty_NN_H
+    return (turbine_profit * turbine_derate + bess_profit - degradation
+            - penalty_NN_H)
 
 
 # =============================================================================
@@ -392,7 +440,7 @@ def Cal_soc_deviation(SOC, wind_level='MEDIUM'):
 
 
 def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
-                   penalty_NN_H=0.0, time=1.0 / 60, ptur=None, n_rem=None):
+                   penalty_NN_H=0.0, time=1.0 / 60, ptur=None, n_rem=None, turbine_derate=1.0):
     """
     PRRBB reward: 机会/风险分离 (与 td3prrbb 一致);
     Upper r1 = wT*pr*ptur*dt + wB*(-pr*pbrule*dt) - 退化 - penalty_NN_H
@@ -449,7 +497,8 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 
     # ==== Upper Level (H) ====
     r1 = Cal_r1_PRRBB(pr_old, ptur, pbrule, penalty_NN_H,
-                       wind_level, price_level, SOC=SOC_decision, time=time)
+                       wind_level, price_level, SOC=SOC_decision, time=time,
+                       turbine_derate=turbine_derate)
 
     # c1: fluctuation penalty
     #   越限部分 10.0*(P_F-3.0) 仅在 P_F > 3.0 时生效；
@@ -878,7 +927,7 @@ def rep_minute_for_price_level(level):
 
 def nine_case_test(agent_H, agent_L, env_test, rbb_system,
                    scenario=None, test_csv=False, output=None, seed=None,
-                   phase_mode=0, phase_table=None):
+                   phase_mode=0, phase_table=None, viol_derate_coef=None):
     """
     TD3PRLE 45-step 9-case in-training test (uses CURRENT dynamic thresholds).
 
@@ -921,14 +970,16 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
     per_case = {i: {'r1': 0.0, 'c1': 0.0, 'r2': 0.0, 'c2': 0.0,
                     'r': 0.0, 'c': 0.0, 'cvm': 0, 'profit': 0.0,
                     'c1_soc_track': 0.0,
-                    'project_winds': set()}
+                    'project_winds': set(),
+                    'turbine_profit': 0.0, 'derate_loss': 0.0, 'penalty_NN_H': 0.0}
                 for i in range(len(blocks))}
     df = pd.DataFrame()
 
     while step < num_iterations:
         if step % 5 == 0:
-            action_H = agent_H.select_action(norm_obs)
-            action_H, penalty_NN_H = CheckAction(action_H)
+            action_H_raw = agent_H.select_action(norm_obs)
+            action_H, penalty_NN_H = CheckAction(action_H_raw)
+            _derate = violation_derate(action_H_raw, viol_derate_coef)
             pw_tru = env_test.PowerOutput(obs[1], action_H)
 
         # L 层观测蒸馏 (5维): [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
@@ -965,6 +1016,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             obs, obs2, action_rbb, rbb_info,
             penalty_NN_H=penalty_NN_H, time=time,
             ptur=ptur, n_rem=5 - (step % 5),
+            turbine_derate=_derate,
         )
 
         bi = step // 5
@@ -973,6 +1025,10 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         _soc1_of[bi] = float(obs2[2])             # 末次写入 = 本块末储存电量
         pc = per_case[bi]
         pc['r1'] += r1
+        # r1 分解三项 (审计: profit/N - r1 == (罚 + 乘性削减)/N)
+        pc['turbine_profit'] += details['turbine_profit']
+        pc['derate_loss'] += details['turbine_profit'] * (1.0 - _derate)
+        pc['penalty_NN_H'] += penalty_NN_H
         pc['c1'] += c1
         pc['r2'] += r2
         pc['c2'] += c2
@@ -1043,6 +1099,9 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             'cvm': pc['cvm'],
             'project_wind_levels': sorted(pc['project_winds']),
             'profit': pc['profit'],  # 该 case 5 步 profit 之和
+            'turbine_profit': pc['turbine_profit'],
+            'derate_loss': pc['derate_loss'],
+            'penalty_NN_H': pc['penalty_NN_H'],
         })
 
     # ---- 存货结算: 逐 case 追加 (profit 是现金流口径, 不含储存电量变动) ----
@@ -1063,6 +1122,9 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         'wind_low_max': wind_low_max,
         'wind_high_min': wind_high_min,
         'profit': float(sum(m['profit'] for m in case_metrics)),  # 45 步 profit 之和
+        'turbine_profit': float(sum(m['turbine_profit'] for m in case_metrics)),
+        'derate_loss': float(sum(m['derate_loss'] for m in case_metrics)),
+        'penalty_NN_H': float(sum(m['penalty_NN_H'] for m in case_metrics)),
     }
     # ---- 存货结算: 45 步总量口径 (逐 case 的 dsoc 望远镜求和 = 首末之差) ----
     _b0, _bN = min(_soc0_of), max(_soc1_of)
