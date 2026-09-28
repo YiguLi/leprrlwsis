@@ -443,6 +443,10 @@ $env:DEEPSEEK_API_KEY = "sk-..."
    `agentutil/`，不要散落在根目录或各方法目录；生产模块（`hsrl_*.py`、`myfunc.py`、
    `*_main.py` 等，被 9 个 main 直接 import）必须留在根目录。详见 `AGENTS.md` 与
    `agentutil/README.md`。
+9. **历史 run 与当前环境不可比**：2026-09-28 修掉了"5 维风机动作只有 dim0 生效"的接线
+   bug（dim1~4 曾是死维），修正改变了动作空间的物理含义 ⇒ 此前所有 run / checkpoint
+   须在新环境重训后再比较。机制、修法与复验见
+   [附：5 维轴向因子的逐台接线](#附5-维轴向因子的逐台接线wfsim_portm-入口修正2026-09-28)。
 
 ---
 
@@ -470,6 +474,48 @@ $env:DEEPSEEK_API_KEY = "sk-..."
 | **natsort** | Stephen Cobeldick | 自然顺序字符串排序 |
 | **numSubplots** | Rob Campbell (2010) | 最优子图布局 |
 | PALM / Jensen-PARK 模型 | 外部参考模型 | WFSim 精度验证与 DRL 对比基线 |
+
+---
+
+## 附：5 维轴向因子的**逐台**接线（`WFSim_port.m` 入口修正，2026-09-28）
+
+**症状。** 上层动作的前 5 维（5 台风机控制量）此前**只有 dim0 真正进入 WFSim**：
+`env.py::PowerOutput` 把动作交给 `matlab.double([list(act_wind)])`（**1×K 行向量**），
+`WFSim_port.m` 原样写入 `Control.a` / `Control.c_prime`，而 `bin/core/meshing.m:196-197`
+    `'CT_prime', zeros(NT,1) + Control.c_prime,   'a', zeros(NT,1) + Control.a`
+在 MATLAB 隐式扩展下把 `NT×1 + 1×K` 变成 **NT×K 矩阵**；`bin/core/Actuator.m:14` 取的
+`input = Wp.turbine.input(sol.k)` 是标量 struct（字段是矩阵），`:55 CT(kk) = input.CT_prime(kk)`
+与 `:61 a(kk) = input.a(kk)` 都是**线性索引**，`kk=1..NT` 全部落在**第一列** ⇒ 5 台机组
+一律拿到 `c_prime(a₀)`。**dim0 退化为"全场共用的集体诱导因子"，dim1~4 是死维**，
+第 6 维（SOC 信号）落在第 6 列同样被忽略。
+
+**修法（单点入口，覆盖所有读 `Control` 的分支）。** 不改 `meshing.m`（它有 4 处同样模式、
+另有 2 处硬写 `2*ones(NT,1)`），只改入口两处：
+1. `WFSim_port.m`：动作**截到 NT=5 并转成列向量**（`Control.a = a(1:NT); Control.a = Control.a(:)`），
+   使 `zeros(NT,1)+Control.a` 成为逐元素运算；不足 NT 维则 `error` 报错。
+2. `env.py::PowerOutput`：`clip` 前先截到 `self.num_turbine`，防多传的维再次触发隐式扩展。
+一次性补丁脚本：`agentutil/patch_a_induction_wiring.py`（已执行；锚点要求恰好命中 1 次，
+重复执行安全中止）。
+
+**复验（`agentutil/probe_a_per_turbine.py`，u = 10 m/s，三种动作组）。** 修前/修后对照：
+
+| 动作（5 维） | 修前逐台 `CT_prime` | 修后逐台 `CT_prime` | 修后 Δtotal |
+|---|---|---|---|
+| `all 0.20` | `0.512 ×5` | `0.512 ×5` | 基线 3.717941 MW |
+| `a2=0.50` 其余 0.20 | `0.512 ×5`（**与基线逐位相同**） | `[.512 .512 **.5** .512 .512]` | −0.177970 MW |
+| `a4=0.50` 其余 0.20 | `0.512 ×5`（**与基线逐位相同**） | `[.512 .512 .512 .512 **.5**]` | −0.091684 MW |
+| `ramp 0.1..0.5` | `0.324 ×5`（只取 `c_p(0.1)`） | `[.324 .512 .588 .576 .5]`（各取 `c_p(a_d)`） | −0.307925 MW |
+
+复验含两类**断言**：① `port` 臂（生产入口）中实测变化的机组集合必须恰为
+`{d : c_p(a_d) ≠ c_p(0.20)}`（故 `ramp` 的第 1 台 `a=0.20` 本就应"不变"），且 Δtotal 非零；
+② `env` 臂中 `PowerOutput(u, 6 维动作)` 与 `WFSim_port(u, 5 维前缀)` **逐位相同**（6 组 Δ = 0.00e+00），
+且第 6 维取 `+0.25` 与 `−0.40` 的风功率逐位相同 ⇒ 信号维未泄漏。脚本用 `raw` 臂（`meshing.m` 直连）
+保留原始故障态的复现，便于日后核对。
+
+**影响（务必注意）。** 修正改变了动作空间的**物理含义**：dim0 从"全场集体因子"变为"第 1 台机组"，
+dim1~4 从死维变为有效维。因此**在此之前产出的全部 run、checkpoint 与基于它们的结论
+（含 `agentutil/probe_a_induction_power.py` 里"dim2 斜率 +2.4 MW/单位"之类）都不再与新环境可比**，
+需在新环境重训后再做跨 run 比较。
 
 ---
 
