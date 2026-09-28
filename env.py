@@ -97,8 +97,11 @@ class WindBattery:
 
     def PowerOutput(self, u0, act_wind):
         if 3.5 <= u0 <= 25:
+            # 只取前 num_turbine 维: H 动作是 6 维 (5 台 + SOC 信号), 多传的维会经
+            # `zeros(NT,1)+Control.c_prime` 隐式扩展成 NT×K 矩阵, 而 Actuator.m
+            # 的线性索引只取第一列 ⇒ 只有 dim0 生效 (见 agentutil/probe_a_per_turbine.py)。
+            act_wind = np.asarray(act_wind, dtype=float).reshape(-1)[:self.num_turbine]
             act_wind = np.clip(act_wind, 0., 0.5)
-            act_wind = act_wind.astype(float)
             try:
                 u0 = float(u0)
                 target_result = self.engine.WFSim_port(matlab.double([u0]),
