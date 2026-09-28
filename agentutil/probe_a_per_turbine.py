@@ -15,7 +15,7 @@ r"""让 MATLAB 打印**逐台机组的 CT_prime / power** —— 直接看 5 个
 `NT×1` 列向量：压成列 ⇒ `zeros(NT,1)+a` 逐元素 ⇒ 5 台各自生效；留着 1×K 行 ⇒
 只有 dim0 生效（这正是 2026-09-28 实测到的故障态）。
 
-三个臂（`--arms`，默认全跑）
+四个臂（`--arms`，默认全跑）
 ---------------------------
   `port`（**生产入口**）`env.py::PowerOutput` 走的就是它：`WFSim_port(u, 0, a, 0)`。
          判定:**逐台 CT 必须按位置响应**——`a_d=0.50` 时只有第 d 台的 CT 变，
@@ -27,18 +27,21 @@ r"""让 MATLAB 打印**逐台机组的 CT_prime / power** —— 直接看 5 个
   `env` （**整链**）Python 侧 `WindBattery.PowerOutput(u, 6 维动作)` 的返回值必须与
          `WFSim_port(u, 5 维前缀)` **逐位相同**，且第 6 维（SOC 信号）取任何值都不影响
          功率 ⇒ 证明"截到 num_turbine + clip"与下传路径一致、信号维被正确丢弃。
+  `guard`（**入口维度守卫**）只接受**恰好 NT 维**：5 维通过，而 4 维（少传）与
+         6/10 维（多传）都必须**响亮报错**。多传曾是静默"只取前 NT 个"（实测
+         10 维 `[.2]*5+[.5]*5` 与 5 维逐位相同 3.717941 MW）——与"只有 dim0 生效"
+         是同一类**静默失效**，只是换了一层，故一并纳入回归。
 
-`port` / `env` 两臂带**断言**（含上面那条"按位置响应"的逐台断言），失败时退出码 1，
-故本脚本可直接当回归测试用。
+`port` / `env` / `guard` 三臂带**断言**，失败时退出码 1，故本脚本可直接当回归测试用。
 
 ⚠ **需要 MATLAB**（与 main 相同: 只 `start_matlab()`）。
 ⚠ 训练正在跑时**不要**改 `*.m`：MATLAB 会按时间戳重载函数文件，可能影响运行中的实验。
 
 用法
 ----
-    python agentutil/probe_a_per_turbine.py                  # port + raw + env
-    python agentutil/probe_a_per_turbine.py --arms port      # 只验生产入口
-    python agentutil/probe_a_per_turbine.py --u 12 --arms port env
+    python agentutil/probe_a_per_turbine.py                     # 四臂全跑
+    python agentutil/probe_a_per_turbine.py --arms port         # 只验生产入口
+    python agentutil/probe_a_per_turbine.py --u 12 --arms port env guard
 """
 
 import argparse
@@ -108,9 +111,10 @@ def main():
     ap = argparse.ArgumentParser(description='逐台机组 CT/power 读出 (确认 5 个动作维是否接入)',
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--u', type=float, default=10.0, help='风速 (默认 10 m/s)')
-    ap.add_argument('--arms', nargs='+', default=['port', 'raw', 'env'],
-                    choices=['port', 'raw', 'env'],
-                    help='要跑的臂: port=生产入口 / raw=meshing.m 直连 / env=整链 (默认全跑)')
+    ap.add_argument('--arms', nargs='+', default=['port', 'raw', 'env', 'guard'],
+                    choices=['port', 'raw', 'env', 'guard'],
+                    help='要跑的臂: port=生产入口 / raw=meshing.m 直连 / env=整链 / '
+                         'guard=维度守卫 (默认全跑)')
     args = ap.parse_args()
 
     import matlab
@@ -214,6 +218,36 @@ def main():
                   % p_sig_pos)
         print()
 
+    # ---------------- guard 臂：入口的维度守卫必须**对称** ----------------
+    if 'guard' in args.arms:
+        print('=' * 98)
+        print('[guard] 入口维度守卫：只接受**恰好 NT 维**；少传与多传都必须**响亮报错**')
+        print('        (多传曾是静默"只取前 NT 个" —— 实测 10 维 [.2]*5+[.5]*5 与 5 维')
+        print('         逐位相同 3.717941 MW，与"只有 dim0 生效"是同一类静默失效)')
+        print('=' * 98)
+        cases = [
+            ('恰好 5 维 [0.2]*5',        [0.20] * NT,              True),
+            ('6 维 [0.2]*5+[信号]',      [0.20] * NT + [0.25],     False),
+            ('4 维 [0.2]*4 (少传)',      [0.20] * (NT - 1),        False),
+            ('10 维 [0.2]*10 (多传)',    [0.20] * (2 * NT),        False),
+            ('10 维 [0.2]*5+[0.5]*5',    [0.20] * NT + [0.50] * NT, False),
+        ]
+        for label, a, should_pass in cases:
+            try:
+                tot = float(eng.WFSim_port(matlab.double([args.u]), matlab.double([0.0]),
+                                           matlab.double([list(a)]),
+                                           matlab.double([0.0]))['out']) / 1e6
+                ok, detail = should_pass, '%.6f MW' % tot
+            except Exception as e:                                    # noqa: BLE001
+                ok, detail = (not should_pass), str(e).strip().splitlines()[0][:60]
+            print('  %-26s 期望 %-8s 实测 %-28s %s'
+                  % (label, '接受' if should_pass else '报错', detail, 'OK' if ok else 'FAIL'),
+                  flush=True)
+            if not ok:
+                failures.append('[guard/%s] 期望 %s 但实际相反 ⇒ 守卫失效'
+                                % (label, '接受' if should_pass else '报错'))
+        print()
+
     eng.quit()
 
     print('=' * 98)
@@ -222,7 +256,8 @@ def main():
         for f in failures:
             print('  !! %s' % f)
         return 1
-    print('复验通过: port 臂逐台 CT **按位置**响应各自的动作维; env 臂 6 维动作 == 5 维前缀。')
+    print('复验通过: port 臂逐台 CT **按位置**响应各自的动作维; env 臂 6 维动作 == 5 维前缀;')
+    print('       guard 臂维度守卫对称 (少传/多传都报错)。')
     print('       (raw 臂的"CT 全同"是 meshing.m 的固有行为, 与本项判定无关。)')
     return 0
 

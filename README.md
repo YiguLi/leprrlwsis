@@ -491,8 +491,12 @@ $env:DEEPSEEK_API_KEY = "sk-..."
 
 **修法（单点入口，覆盖所有读 `Control` 的分支）。** 不改 `meshing.m`（它有 4 处同样模式、
 另有 2 处硬写 `2*ones(NT,1)`），只改入口两处：
-1. `WFSim_port.m`：动作**截到 NT=5 并转成列向量**（`Control.a = a(1:NT); Control.a = Control.a(:)`），
-   使 `zeros(NT,1)+Control.a` 成为逐元素运算；不足 NT 维则 `error` 报错。
+1. `WFSim_port.m`：动作**要求恰好 NT=5 维并转成列向量**（`Control.a = a(:)`），
+   使 `zeros(NT,1)+Control.a` 成为逐元素运算。维度守卫做成**对称**的（`numel(a) ~= NT` ⇒ `error`）：
+   实测**少传**（4 维）与**多传**（6 维 = 5 台+信号、10 维）都曾出问题——少传本就报错，
+   而多传是**静默只取前 5 个**（`[.2]*5+[.5]*5` 与 `[.2]*5` 的总功率逐位相同 3.717941 MW），
+   与"只有 dim0 生效"是同一类静默失效，故一并封死。"策略 6 维 → 风场 5 维"的翻译
+   由 `env.py::PowerOutput` 独家负责（截到 `num_turbine` 后再下传）。
 2. `env.py::PowerOutput`：`clip` 前先截到 `self.num_turbine`，防多传的维再次触发隐式扩展。
 一次性补丁脚本：`agentutil/patch_a_induction_wiring.py`（已执行；锚点要求恰好命中 1 次，
 重复执行安全中止）。
