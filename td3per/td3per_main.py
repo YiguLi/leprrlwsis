@@ -12,7 +12,7 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
       - 观测 = Normalize(obs) 4 维 + 24h 相位特征 (--phase_feat 1 → 6 维);
       - 对偶: lam1 ∈ [3, 100] 初值 5.0, d_block_H = 50 → 地板 5 (EMA 实际块成本);
       - 每块 2 次更新; 逐维探索噪声 (--wt_noise / --sig_noise_max / --sig_noise_min);
-      - --epsilon 4000 (H 决策次数 ⇒ 20k 环境步); actor 输出层 WT bias 初始化到“风场功率最优带”。
+      - --epsilon 4000 (H 决策次数 ⇒ 20k 环境步); actor 输出层 WT bias 初始化到“中性宽带”。
   * 下层 L: **td3per 自己的 RL BESS 操作保留** (TD3 + PER + EMA 对偶 + RBB 硬裁剪),
       只把"信号 / 追踪目标"换成 SOC 目标:
       - 观测 (5 维蒸馏) = [pbrulemin/10, pbrulemax/10, **soc_target/10**, SOC/10, u/10]
@@ -96,8 +96,8 @@ engine = matlab.engine.start_matlab()
 RUN_TAG = 'td3per'
 
 
-def init_wt_action_bias(agent, lo=0.17, hi=0.23, sig_value=0.0, verbose=True):
-    """把 actor 输出层前 5 维 (WT 轴向诱导因子 a) 的 bias 初始化到“风场功率最优带”。
+def init_wt_action_bias(agent, lo=0.05, hi=0.45, sig_value=0.0, verbose=True):
+    """把 actor 输出层前 5 维 (WT 轴向诱导因子 a) 的 bias 初始化到“中性宽带”。
 
     为什么必须做 (run160/初始策略诊断):
       `model.py` 的 Actor 只把 fc4.weight 初始化成 ±init_w(0.003),
@@ -107,7 +107,8 @@ def init_wt_action_bias(agent, lo=0.17, hi=0.23, sig_value=0.0, verbose=True):
       于是初始策略 ≈ bias: 实测 5 个种子 → 死机 2~4 台、全场 ΣCp 仅 0.47~0.72
       (效率 16%~24%)。策略从"半停机"出发, 而 a<0 区被 CheckAction 裁掉后梯度为 0
       → 若没有恢复力就会长期停在停机态。
-    bias∈[lo,hi]=[0.17,0.23] 对应单机 Cp≈0.468~0.545 —— **低于**单机最优 0.593：风场最优本就落在单机 Cp 的**次优点**(上游降载减少尾流亏损, 全场反而多出 7.3%, 实测 u=10)。
+    bias∈[lo,hi]=[0.05,0.45] 覆盖"上游降载 → 末台单机最优"的整个区间, **故意不预设**风场最优的形状
+    (它随尾流状态(风速/湍流/来流)变化, 是**策略要学的函数**, 不是可预先测定的常数)。
     SOC 目标信号维 (第 6 维) 置 sig_value=0 → 初始 soc_target = 3.0 (SOC 带中点)。
 
     `model.py` 为多项目共享文件, 不修改; 这里构造后覆写 actor 与 actor_target 的 bias。
@@ -1045,8 +1046,8 @@ if __name__ == "__main__":
 
     # ---- 输出层 bias 初始化 (与 td3perrb 一致) ----
     parser.add_argument('--wt_bias_init', default=1, type=int, choices=[0, 1],
-                        help='1: 把 actor 输出层 WT 5 维 bias 初始化到“风场功率最优带” '
-                             '[0.17,0.23]; 0: 用 PyTorch 默认')
+                        help='1: 把 actor 输出层 WT 5 维 bias 初始化到“中性宽带” '
+                             '[0.05,0.45]; 0: 用 PyTorch 默认')
 
     parser.add_argument('--value_scale', default=hc.VALUE_SCALE, type=float,
                         help='H 层 r1/c1 进入值函数回归空间的统一缩放 s '
@@ -1164,7 +1165,7 @@ if __name__ == "__main__":
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     if args.wt_bias_init:
-        init_wt_action_bias(agent_H, lo=0.17, hi=0.23, sig_value=0.0)
+        init_wt_action_bias(agent_H, lo=0.05, hi=0.45, sig_value=0.0)
 
     # 下层 L: 保留 td3per 自己的 RL BESS 操作
     #   * 观测 5 维蒸馏 = [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]

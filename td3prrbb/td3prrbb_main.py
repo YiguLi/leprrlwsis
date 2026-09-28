@@ -86,17 +86,17 @@ engine = matlab.engine.start_matlab()
 
 
 # TD3PRRBB: TD3 + PRRBB 分段奖励 + CL
-def init_wt_action_bias(agent, lo=0.17, hi=0.23, sig_value=0.0, verbose=True):
+def init_wt_action_bias(agent, lo=0.05, hi=0.45, sig_value=0.0, verbose=True):
     """把 H 层 actor / actor_target 输出层 `fc4.bias` 的前 5 维(风机轴向诱导因子)初始化到
-    风场功率最优带 **U(0.17, 0.23)**(5 维各自独立随机), 第 6 维(信号)置 sig_value。
+    中性宽带 **U(0.05, 0.45)**(5 维各自独立随机), 第 6 维(信号)置 sig_value。
 
     动机(run160 诊断, 与 td3perrb/td3prrlrb 同): `model.py` 只把 `fc4.weight` 初始化到
     ±3e-3, `fc4.bias` 仍是 PyTorch 默认 U(±1/√fan_in); 而 `Cp = 4a(1−a)²`(见 WFSim_port.m):
     a=0 → Cp=0(该机停机), a=1/3 → 0.593(Betz 最优), a=0.5 → 0.5。
     初始策略 ≈ bias ⇒ 不设的话从"半停机"起步(实测死机 2~4 台、全场 ΣCp 仅 0.47~0.72),
     且 a<0 区被 `CheckAction` 裁掉后梯度为 0 ⇒ 没有恢复力就会长期停在停机态。
-    U(0.17,0.23) 对应单机 Cp≈0.468~0.545 —— **低于**单机最优 0.593, 因为**风场**最优
-    本就落在单机 Cp 的次优点(上游降载减少尾流亏损, 全场反而多出 7.3%, 实测 u=10);
+    U(0.05,0.45) 覆盖"上游降载 → 末台单机最优"的整个区间, **故意不预设**风场最优的形状
+    (它随尾流状态变化, 是**策略要学的函数**);
     **5 维各自随机**另有打破机组间初始对称的作用。
 
     不改共享的 model.py; 构造后覆写 actor 与 actor_target。
@@ -927,7 +927,7 @@ if __name__ == "__main__":
                         help='风速分段方法: percentile | kmeans | expert (默认 expert)')
 
     parser.add_argument('--wt_bias_init', default=1, type=int, choices=[0, 1],
-                        help='风机输出层 bias 初始值 = U(0.17,0.23) x5 (风场功率最优带): 1=开(默认) 0=关')
+                        help='风机输出层 bias 初始值 = U(0.05,0.45) x5 (中性宽带): 1=开(默认) 0=关')
     parser.add_argument('--value_scale', default=hc.VALUE_SCALE, type=float,
                         help='H 层 r1/c1 进入值函数回归空间的统一缩放 s '
                              '(默认 1000: 把回归目标从 O(1e4) 压到 O(10); '
@@ -1036,9 +1036,9 @@ nstep=args.nstep, target_agg=args.target_agg)
     # critic 之前; buffer/对偶/日志/CSV 仍是原始口径 (见 hsrl_cost 末尾小节)。
     agent_H.value_scale = hc.value_scale()
     agent_H.cost_scale = hc.cost_scale()
-    # ---- 风机起始点: actor 输出层 bias = U(0.17,0.23) x5 (风场功率最优带; 策略接管时的起点) ----
+    # ---- 风机起始点: actor 输出层 bias = U(0.05,0.45) x5 (中性宽带; 策略接管时的起点) ----
     if args.wt_bias_init:
-        init_wt_action_bias(agent_H, lo=0.17, hi=0.23, sig_value=0.0)
+        init_wt_action_bias(agent_H, lo=0.05, hi=0.45, sig_value=0.0)
 
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
