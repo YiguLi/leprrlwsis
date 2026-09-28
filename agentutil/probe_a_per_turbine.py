@@ -44,9 +44,9 @@ Control.a = [$A$];
 Control.c_prime = 4*Control.a.*(1-Control.a).^2;
 sol = WFSim(Wind, Control);
 fprintf('    a_in     = %s\n', mat2str(Control.a, 4));
-fprintf('    CT_prime = %s\n', mat2str(sol{1,5}.turbine.CT_prime(:,1)', 5));
-fprintf('    power    = %s\n', mat2str(sol{1,5}.turbine.power(:,1)', 7));
-fprintf('    total    = %.6f MW\n', sum(sol{1,5}.turbine.power(:,1))/1e6);
+fprintf('    CT_prime = %s\n', mat2str(sol{1,5}.turbine.CT_prime, 5));
+fprintf('    power    = %s\n', mat2str(sol{1,5}.turbine.power, 7));
+fprintf('    total    = %.6f MW\n', sum(sol{1,5}.turbine.power(:))/1e6);
 """
 
 VARIANTS = [
