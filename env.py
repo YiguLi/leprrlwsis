@@ -71,7 +71,7 @@ class WindBattery:
         self.count_price = 0
         self.pr = self.CalPrice() #FIXME: price
         
-        a_temp = np.ones(self.num_turbine) * 0.3333
+        a_temp = np.ones(self.num_turbine) * 0.20
         temp = self.PowerOutput(self.u, a_temp)
         self.P_G_prev = temp  # 初始 P_G 作为波动计算的基准
         obs = np.array([self.pr, self.u, self.E, temp])
@@ -89,7 +89,7 @@ class WindBattery:
         self.E = 5.
 
         # a_temp = np.array([0.1416, 0.1645, 0.1968, 0.2461, 0.3333])
-        a_temp = np.ones(self.num_turbine) * 0.3333
+        a_temp = np.ones(self.num_turbine) * 0.20
         temp = self.PowerOutput(self.u, a_temp)
         self.P_G_prev = temp  # 初始 P_G 作为波动计算的基准
         obs = np.array([self.pr, self.u, self.E, temp])
@@ -250,7 +250,7 @@ class WindBattery:
         self.pr = price_seq[0]
         self.u = wind_seq[0]
 
-        a_temp = np.ones(self.num_turbine) * 0.3333
+        a_temp = np.ones(self.num_turbine) * 0.20
         temp = self.PowerOutput(self.u, a_temp)
         self.P_G_prev = temp  # 初始 P_G 作为波动计算的基准
         obs = np.array([self.pr, self.u, self.E, temp])

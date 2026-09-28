@@ -148,7 +148,7 @@ def test_one_episode(env, agent_H, agent_L, rbb_system,
     obs[1] = env.u
 
     # Fix P_G_prev: reset() computed it with fixed-sequence wind, recompute with shared wind
-    a_temp = np.ones(env.num_turbine) * 0.3333
+    a_temp = np.ones(env.num_turbine) * 0.20
     temp = env.PowerOutput(env.u, a_temp)
     env.P_G_prev = temp
     obs[-1] = temp

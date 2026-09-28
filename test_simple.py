@@ -140,7 +140,7 @@ def main():
         env.count_wind = 0
         env.u = float(env.wind_day.iloc[0])
         obs[1] = env.u
-        a_temp = np.ones(NB_TURBINE) * 0.3333
+        a_temp = np.ones(NB_TURBINE) * 0.20
         env.P_G_prev = env.PowerOutput(env.u, a_temp)
         obs[-1] = env.P_G_prev
 

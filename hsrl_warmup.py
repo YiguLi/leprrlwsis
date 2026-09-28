@@ -4,14 +4,20 @@ HSRL warmup 期调度助手（多项目共享）
 本模块把 warmup 期的三件事收敛到**一处单一真源**：
 
 1. `WarmupSchedule` —— warmup 期上层 H 的**确定性动作调度**（不再 `random_action()`）：
-      * 5 个风机轴向因子各维从 **0.33** 起步（Cp = 4a(1−a)² 的最优点，也是
-        `env.reset()` 的标称动作 a=1/3 与 actor 的 `init_wt_action_bias(0.25~0.40)` 中心）；
+      * 5 个风机轴向因子各维从 **0.20** 起步（**风场总功率**的峰位 —— 实测 u=6/8/10/12/14 的集体峰全在 a=0.20，且峰功率精确
+        ∝ u³ ⇒ 最优动作**与风速无关**、是常向量；这也是 `env.reset()` 的标称动作与
+        actor 的 `init_wt_action_bias(0.17~0.23)` 中心）；
       * 每**块**（= 5 环境步，H 的决策周期）各维独立随机 **±0.05**，并直接 clip 到
-        **[0.20, 0.45]**（该带内 Cp 仍为最优的 86%~100%，E[ΣCp]=2.82 ≈ 95% 最优；
-        clip 到 [0,0.5] 则 89% 的样本会出现某维 ≤0.05、ΣCp 掉到 83% 最优）；
+        **[0.15, 0.25]**（= 实测风场功率 ±2% 平台的两端：0.15 损 2.7%、0.20 为峰、
+        0.25 损 1.0%；三档游走 {0.15,0.20,0.25} 的平稳分布均匀 ⇒ E[a] ≡ 0.20 = 峰位）；
       * 第 6 维（信号维）**恒为 0.0**：对 SOC 目标语义的项目 = `soc_target ≡ 3`，
         对影子电价语义的项目 = 中性影子价 0。两者都恰好等于 actor 的
         `init_wt_action_bias(..., sig_value=0.0)`，即 warmup 与策略起步**同分布**。
+    ⚠ 2026-09-28 判据修正：此前 `WT_START=0.33 / WT_LO,WT_HI=0.20,0.45`、
+    `init_wt_action_bias(U(0.25,0.40))` 的判据是"**单机** C_p = 4a(1−a)² 保持
+    86%~100% 最优"，而**单机 C_p 最优 ≠ 风场总功率最优**（全体 1/3 比 a=0.20
+    低 7.3%）。现按实测的"风场功率平台"重定，并把 actor 的 init bias 一并移正。
+
     RNG 用**独立 RandomState**（不吃全局 np.random 流，避免扰动 episode SOC 随机化与探索噪声）。
 
 2. `WarmupBessRule` —— warmup 期下层 BESS 的**规则行为体**（BESS-RL 项目专用）：
@@ -46,9 +52,9 @@ HSRL warmup 期调度助手（多项目共享）
 import numpy as np
 
 # ---------------------------------------------------------------- 默认参数
-WT_START = 0.33          # Cp 最优点 (= 1/3; env.reset 的标称动作)
+WT_START = 0.20          # 风场功率最优点 (实测 u∈[6,14] 全为 0.20; env.reset 标称动作)
 WT_STEP = 0.05           # 每块每维 ±0.05
-WT_LO, WT_HI = 0.20, 0.45   # 直接 clip 的安全带 (Cp 保持 86%~100% 最优)
+WT_LO, WT_HI = 0.15, 0.25   # clip 安全带 = 实测风场功率 ±2% 平台 {0.15,0.20,0.25}
 SIG_VALUE = 0.0          # 第 6 维: SOC 目标语义→target=3; 影子电价语义→中性 0
 SOC_TARGET = 3.0         # warmup 期下层规则跟踪的目标 (MWh)
 ETA_C = ETA_D = 0.98
@@ -107,7 +113,7 @@ class WarmupSchedule:
         if not self.enabled:
             return None
         if self._first:
-            self._first = False                      # 第 0 块 = 起始点 (0.33, 信号 0)
+            self._first = False                      # 第 0 块 = 起始点 (0.20, 信号 0)
         else:
             self._wt = self._wt + self.rng.choice([-self.step, self.step],
                                                   size=self.nb_turbine)
@@ -264,16 +270,16 @@ def fill_bess_transition(agent_L, s_L, a_L, r2, c2, s_L_next, done_L,
 def add_warmup_args(parser):
     """把 warmup 调度的命令行开关挂到各 main 的 parser 上（9 个 main 共用）。"""
     parser.add_argument('--warmup_sched', default='fixed', choices=['fixed', 'random'],
-                        help='warmup 期上层动作调度: fixed=0.33 起每块±0.05 clip[0.20,0.45]'
+                        help='warmup 期上层动作调度: fixed=0.20 起每块±0.05 clip[0.15,0.25]'
                              ' + 信号维恒 0 (本方案); random=旧的 random_action() 对照臂')
     parser.add_argument('--warmup_wt_start', default=WT_START, type=float,
-                        help='warmup 风机动作起始值 (默认 0.33 = Cp 最优)')
+                        help='warmup 风机动作起始值 (默认 0.20 = 风场功率最优)')
     parser.add_argument('--warmup_wt_step', default=WT_STEP, type=float,
                         help='warmup 风机动作每块随机步长 (默认 ±0.05)')
     parser.add_argument('--warmup_wt_lo', default=WT_LO, type=float,
-                        help='warmup 风机动作 clip 下界 (默认 0.20)')
+                        help='warmup 风机动作 clip 下界 (默认 0.15)')
     parser.add_argument('--warmup_wt_hi', default=WT_HI, type=float,
-                        help='warmup 风机动作 clip 上界 (默认 0.45)')
+                        help='warmup 风机动作 clip 上界 (默认 0.25)')
     parser.add_argument('--warmup_bess', default='rule', choices=['rule', 'random'],
                         help='BESS-RL 项目 warmup 期下层行为: rule=RBB窗口+SOC目标跟踪'
                              ' (规则行为体, 无随机); random=旧的 agent_L.random_action()')

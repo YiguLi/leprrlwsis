@@ -597,7 +597,7 @@ class ProjectRunner:
         env.count_wind = 0
         env.u = float(wind_series.iloc[0])
         obs[1] = env.u
-        a_temp = np.ones(env.num_turbine) * 0.3333
+        a_temp = np.ones(env.num_turbine) * 0.20
         temp = env.PowerOutput(env.u, a_temp)
         env.P_G_prev = temp                   # 波动基准 = 当日首分钟出力
         obs[-1] = temp

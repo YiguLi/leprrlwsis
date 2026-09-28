@@ -189,25 +189,30 @@ print('生产链路 from_args(args) → on_block_end (verbose 默认 True) 无�
 print('--- 2) warmup 上层调度 ---')
 sched = hw.WarmupSchedule(nb_turbine=5, nb_actions=6, seed=7)
 a0 = sched.action()
-assert np.allclose(a0[:5], 0.33) and a0[5] == 0.0, a0
+assert np.allclose(a0[:5], 0.20) and a0[5] == 0.0, a0
 seq = [a0] + [sched.action() for _ in range(40)]
 A = np.array(seq)
 assert A.shape == (41, 6)
-assert A[:, :5].min() >= 0.20 - 1e-12 and A[:, :5].max() <= 0.45 + 1e-12
+assert A[:, :5].min() >= 0.15 - 1e-12 and A[:, :5].max() <= 0.25 + 1e-12
 assert np.allclose(A[:, 5], 0.0)
 d = np.diff(A[:, :5], axis=0)
 # 每块每维要么走满 ±0.05，要么是撞到 [lo,hi] 后截断的步 (|Δ| < 0.05 且新旧值必有一端贴墙)
-wall = np.isclose(A[:, :5], 0.20) | np.isclose(A[:, :5], 0.45)
+wall = np.isclose(A[:, :5], 0.15) | np.isclose(A[:, :5], 0.25)
 assert np.all(np.abs(d) <= 0.05 + 1e-12)
 short = np.abs(d) < 0.05 - 1e-12
 n_clipped = int(short.sum())
 assert np.all((wall[:-1] | wall[1:])[short]), '截断只应发生在贴墙处'
 print('41 块: wt∈[{:.2f},{:.2f}] 动作步长 |Δ|∈[{:.3f},{:.3f}] (贴墙截断 {} 处)'
       .format(A[:, :5].min(), A[:, :5].max(), np.abs(d).min(), np.abs(d).max(), n_clipped))
-cp = 4 * A[:, :5] * (1 - A[:, :5]) ** 2
-print('E[ΣCp]={:.3f} = 最优 {:.3f} 的 {:.1f}%'.format(cp.sum(1).mean(), 5 * 16 / 27,
-                                                     100 * cp.sum(1).mean() / (5 * 16 / 27)))
-assert cp.sum(1).mean() > 2.75, cp.sum(1).mean()
+# 判据换成**风场功率**(而不是"单机 ΣCp"): 用 probe_a_farm_structure.py 的实测平台
+#   u=10: 峰 3.717941 MW @ a=0.20; a=0.15 → 3.619155 (−2.7%); a=0.25 → 3.680407 (−1.0%)
+_PEAK, _P_LO, _P_HI = 3.717941, 3.619155, 3.680407
+_wall_loss = max((_PEAK - _P_LO) / _PEAK, (_PEAK - _P_HI) / _PEAK)
+a_mean = A[:, :5].mean()
+print('warmup wt: E[a]={:.4f} (峰位 0.20), a∈[{:.2f},{:.2f}], 两端功率代价 ≤{:.1f}%'
+      .format(a_mean, A[:, :5].min(), A[:, :5].max(), 100 * _wall_loss))
+assert abs(a_mean - 0.20) < 0.02, a_mean     # 三档游走 {0.15,0.20,0.25} 的平稳均值 = 峰位
+assert _wall_loss < 0.03, _wall_loss         # 带两端距峰不超过 3%
 # 可复现 + 种子无关的隔离流
 assert np.allclose(np.array([hw.WarmupSchedule(5, 6, seed=7).action() for _ in range(1)]), a0)
 s_a = np.array([hw.WarmupSchedule(5, 6, seed=11).action() for _ in range(3)])
@@ -293,7 +298,7 @@ d = ap.parse_args([])
 assert d.warmup_sched == 'fixed' and d.warmup_bess == 'rule'
 assert abs(d.warmup_soc_target - 3.0) < 1e-12
 assert (d.warmup_wt_start, d.warmup_wt_step, d.warmup_wt_lo, d.warmup_wt_hi) == \
-    (0.33, 0.05, 0.20, 0.45)
+    (0.20, 0.05, 0.15, 0.25)
 r = ap.parse_args(['--warmup_sched', 'random', '--warmup_bess', 'random',
                    '--warmup_soc_target', '2.5'])
 assert (r.warmup_sched, r.warmup_bess, r.warmup_soc_target) == ('random', 'random', 2.5)
@@ -310,6 +315,6 @@ ns_r = argparse.Namespace(**{**vars(r), 'seed': 3, 'rbb_rated_power': 10.0})
 sched_b, rule_b, stats_b = hw.build_from_args(ns_r, _HStub(), object())
 assert rule_b is None and sched_b.action() is None          # random 对照臂
 assert hw.build_from_args(ns, _HStub(), None)[2] is None    # 无 L agent ⇒ 无填入统计
-print('--warmup_sched/--warmup_bess/--warmup_soc_target/--warmup_wt_* 默认与对照臂 ✓')
+print('--warmup_sched/--warmup_bess/--warmup_soc_target/--warmup_wt_* 默认(风场功率最优先验)与对照臂 ✓')
 
 print('TEST OK')

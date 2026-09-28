@@ -4,12 +4,13 @@ r"""WFSim 风场总功率的**动作结构**（集体水平 / 空间斜坡 / 逐
 为什么要它
 ----------
 2026-09-28 修掉"5 维轴向因子只有 dim0 生效"的接线后，动作空间第一次**真正逐台**作用于风场。
-而本仓库动作侧的**先验**全部是在故障态下定下的：`hsrl_warmup.py` 的 warmup 带
+而当时动作侧的**先验**都是在故障态下定下的：`hsrl_warmup.py` 的 warmup 带
 `[0.20, 0.45]`、`init_wt_action_bias(U(0.25, 0.40))`，理由统一是"该带内单机
 `C_p = 4a(1−a)²` 保持 86%~100% 最优"。
 
 问题在于 **单机 C_p 最优 ≠ 风场总功率最优**：上游机组降载可以把风留给下游（尾流亏损）。
-本脚本用 WFSim 直接量三件事：
+本脚本用 WFSim 直接量四件事（下面 `[uniform]` 的输出**直接用于定 `WT_START/WT_LO/WT_HI`
+与 `init_wt_action_bias`**，2026-09-28 已据此把先验改为 `0.20 / [0.15, 0.25] / U(0.17,0.23)`）：
 
   `[uniform]`  共同水平 `a` 从 0.00 扫到 0.50 ⇒ 风场总功率的**集体最优水平**落在哪。
   `[ramp]`     上游低 / 下游高的"降载斜坡"若干条 + 其**镜像** ⇒ 空间结构重不重要、方向对不对。
@@ -41,10 +42,12 @@ sys.path.insert(0, _HERE)
 
 import numpy as np
 
+import hsrl_warmup as hw      # 单一真源: 先验带以它为准, 避免探针里的数字过期
+
 NT = 5
-BASE = 0.20            # 基线动作（= 生产 warmup 带的下沿）
+BASE = 0.20            # 基线动作（= 实测峰位，也是 WT_START）
 UNIFORM_GRID = [0.00, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 1.0 / 3, 0.40, 0.45, 0.50]
-FINE_GRID = [0.10, 0.15, 0.20, 0.25, 0.30, 0.35]
+FINE_GRID = [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40]
 
 RAMPS = [
     ('greedy 1/3 全体',          [1 / 3] * 5),
@@ -111,8 +114,10 @@ def main():
             print('=' * 100)
             print('[uniform] 共同水平 a 扫描 —— 风场总功率的集体最优在哪')
             print('=' * 100)
+            rows = []
             for a in UNIFORM_GRID:
                 ct, pw, tot = _run(eng, u, [a] * NT)
+                rows.append((a, tot))
                 flag = ''
                 if best_tot is None or tot > best_tot:
                     best_u, best_tot, flag = a, tot, '  ← 目前最好'
@@ -121,9 +126,25 @@ def main():
             print('\n  ⇒ 集体最优水平 a* = %.4f (%.6f MW); 基线 %.2f = %.6f MW; '
                   '单机 Cp 最优 1/3 = %.6f MW'
                   % (best_u, best_tot, BASE, tot0, tot_greedy))
-            print('     warmup 带为 [0.20, 0.45] ⇒ %s'
-                  % ('a* 在带内' if 0.20 <= best_u <= 0.45 else
-                     '**a* 低于带下沿 0.20 ⇒ 先验把策略按在错误一侧**'))
+            print('     当前 warmup 带为 [%.2f, %.2f] (WT_START=%.2f) ⇒ %s'
+                  % (hw.WT_LO, hw.WT_HI, hw.WT_START,
+                     'a* 在带内' if hw.WT_LO <= best_u <= hw.WT_HI else
+                     '**a* 在带外 ⇒ 先验与实测峰位不一致**'))
+            # ---- 平台宽度：决定 warmup 带 [WT_LO, WT_HI] 该放哪（网格量化到 UNIFORM_GRID 步长）
+            an = np.array([a for a, _ in rows])
+            pn = np.array([t for _, t in rows])
+            ip = int(np.argmax(pn))
+            print('\n  [平台] 峰 %.6f MW @ a=%.2f；"总功率 ≥ 峰的 (1−tol)"的连续区间:'
+                  % (pn[ip], an[ip]))
+            for tol in (0.01, 0.02, 0.05, 0.10):
+                lo = hi = ip
+                while lo - 1 >= 0 and pn[lo - 1] >= pn[ip] * (1 - tol):
+                    lo -= 1
+                while hi + 1 < len(pn) and pn[hi + 1] >= pn[ip] * (1 - tol):
+                    hi += 1
+                print('         tol=%2d%% ⇒ a ∈ [%.2f, %.2f]  (带宽 %.2f)'
+                      % (tol * 100, an[lo], an[hi], an[hi] - an[lo]))
+            print('         注: 网格步长 %.2f, 故上下界是量化值' % (UNIFORM_GRID[1] - UNIFORM_GRID[0]))
             print()
 
         if 'ramp' in args.arms:
@@ -167,7 +188,8 @@ def main():
 
         if 'opt' in args.arms:
             print('=' * 100)
-            print('[opt] 逐维细扫 0.10~0.35（其余维固定在基线 %.2f）—— 每台各自的最优水平' % BASE)
+            print('[opt] 逐维细扫 %.2f~%.2f（其余维固定在基线 %.2f）—— 每台各自的最优水平'
+                  % (FINE_GRID[0], FINE_GRID[-1], BASE))
             print('=' * 100)
             best_a, best_tot = [], []
             for d in range(NT):
@@ -179,13 +201,16 @@ def main():
                 bi = int(np.argmax([t for _, t in row]))
                 best_a.append(row[bi][0])
                 best_tot.append(row[bi][1])
-                peaks = ''.join('%s%.4f:%.4f' % ('*' if i == bi else ' ', a, t)
-                                for i, (a, t) in enumerate(row))
+                peaks = ' '.join('%s%.2f:%.4f' % ('*' if i == bi else '', a, t)
+                                 for i, (a, t) in enumerate(row))
                 print('  dim%-3d %s  ⇒ a*_%d=%.2f (%.6f MW)' % (d, peaks, d, row[bi][0], row[bi][1]))
             a_comb = list(best_a)
             tot_comb = _run(eng, u, a_comb)[2]
-            print('\n  逐维最优拼起来 %s ⇒ %.6f MW (vs 基线 %.2f = %.6f, vs 1/3 全体 = %.6f)'
+            print('\n  逐维最优 a* = %s ⇒ 拼接 %.6f MW '
+                  '(vs 基线 %.2f = %.6f, vs 1/3 全体 = %.6f)'
                   % (_fmt(a_comb, 3), tot_comb, BASE, tot0, tot_greedy))
+            print('  各维最优的**离散度**: min=%.2f max=%.2f 极差=%.2f'
+                  % (min(best_a), max(best_a), max(best_a) - min(best_a)))
             print('  ⚠ 若拼接值**低于**各维单独最优的期望, 说明维间存在**竞争**(共享同一股风),')
             print('    ⇒ 最优解不是把 5 个独立最优点拼起来, 网络必须学**维间相互作用**。')
             print()
@@ -193,9 +218,13 @@ def main():
     eng.quit()
     print('=' * 100)
     print('读法:')
-    print('  * [uniform] 集体最优水平 a* 与 warmup 带 [0.20,0.45] / init bias U(0.25,0.40) 的位置')
-    print('    关系: 若 a* 落在带下沿、而带内 2/3 的区域明显更差 ⇒ 这是**常量先验**错位,')
-    print('    要改的是 hsrl_warmup.py 的 WT_LO/WT_HI 与 init_wt_action_bias 的 (lo,hi), 不是网络。')
+    print('  * [uniform] 集体最优水平 a* 与**当前**先验 (warmup 带 [%.2f,%.2f] / init bias '
+          'U(0.17,0.23), 由 hsrl_warmup 单一真源读出) 的位置'
+          % (hw.WT_LO, hw.WT_HI))
+    print('    关系: 若 a* 落在带外、或带内大部分区域明显更差 ⇒ **常量先验**错位,')
+    print('    要改的是 hsrl_warmup.py 的 WT_START/WT_LO/WT_HI 与 init_wt_action_bias 的 (lo,hi), 不是网络。')
+    print('  * 2026-09-28 已据此把先验从 [0.20,0.45]/U(0.25,0.40) 改为 0.20/[0.15,0.25]/U(0.17,0.23):')
+    print('    u=6/8/10/12/14 的集体峰**全在 a=0.20**, 峰功率精确 ∝ u³ ⇒ 最优动作与风速无关。')
     print('  * [ramp] 若"降载斜坡"并不优于全体 1/3 ⇒ 最优动作**不**需要空间结构,')
     print('    动作空间虽 5 维但最优解接近常向量 ⇒ 比"5 个独立自由度"**更好学**。')
     print('  * [marginal] 割线被曲率主导, 只用来判峰在哪一侧; 真正的峰位看 [opt]。')
