@@ -445,11 +445,11 @@ print('  旧语义 (per/prrbb): 不给 cmd_pb ⇒ 仍按 |a_L − applied| 核�
 print('=' * 84)
 print('G. 评测夹具同步: 加载残余动作的 checkpoint 时必须补上规则基线')
 print('=' * 84)
-# test_five_days.py: 三个 TD3 SOC 项目 residual=True, 其余项目不得误标
+# test_five_days.py: 四个 TD3 SOC 项目 residual=True (2026-09-30 起含 yawflor), 其余项目不得误标
 _fd = src('test_five_days.py')
 assert 'import hsrl_soctarget as hst' in _fd, 'test_five_days 未接真源'
-assert _fd.count('residual=True,') == 3, _fd.count('residual=True,')
-for key in ('td3per', 'td3prrbb', 'td3prle'):
+assert _fd.count('residual=True,') == 4, _fd.count('residual=True,')
+for key in ('td3per', 'td3prrbb', 'td3prle', 'yawflor'):
     i = _fd.index("'%s': dict(" % key)
     j = _fd.index('),\n', i)
     assert 'residual=True,' in _fd[i:j], (key, '未标 residual')
@@ -471,8 +471,10 @@ assert 'action_L = np.array([float(pb_rule) + float(action_L[0])])' in _ts
 # test_compare_projects.py 只覆盖 per/prrbb/prle (影子电价 + DDPG) ⇒ 不动
 _cp = flat(src('test_compare_projects.py'))
 assert 'residual' not in _cp and 'hst.rule_action' not in _cp, 'compare_projects 不在本次范围'
-print('  test_five_days: 3 个项目 residual=True (其余 6 个不标) + 规则基线补齐; ')
-print('  test_simple: residual_proj = TD3PER/TD3PRRBB/TD3PRLE; test_compare_projects 不在范围')
+print('  test_five_days: 4 个项目 residual=True (td3per/td3prrbb/td3prle/yawflor; 其余 6 个不标) '
+      '+ 规则基线补齐; ')
+print('  test_simple: residual_proj = TD3PER/TD3PRRBB/TD3PRLE (未扩展 yawflor, '
+      '同 test_compare_projects 的"不在本次范围"); test_compare_projects 不在范围')
 
 # ------------------------------------------------------------------ H
 print('=' * 84)

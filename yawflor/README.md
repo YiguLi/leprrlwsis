@@ -501,6 +501,27 @@ yawflor/
 
 **每步遵守 git 协议**：改动前工作区非空先 `snapshot:` 提交，改动完成立即 `<type>: ...` 提交。
 
+### 6.1 本轮执行状态（P0②–P4，实测，2026-09-30）
+
+| # | 状态 | 验收证据（可复现命令 / 实测数） |
+|---|---|---|
+| P0① | ✅ 已冻结 | `python agentutil/test_yawflor_config.py` —— 42 项 + 口径快照落盘 |
+| **P0②** | ✅ 8/8 | `python agentutil/test_yaw_official_example.py`：与官方页面锚 `max(farm_power_baseline) = 5.261863e6 W` 相对偏差 **0.0000%**；270° 对齐 2.697065 → 3.275738 MW（**+21.46%**，γ\*=[25, 22.656, 0]）；**本项目的 `build_model` 与官方 `gch.yaml` 路径逐位一致**（基线/最优/最优 yaw 角 max\|Δ\| = 0） |
+| **P1** | ✅ 43/43 | `python agentutil/test_yaw_env_contract.py`：② 预取序列 ≡ 全直算序列（逐位，max\|Δ\|=0）且预取真生效；③ 确定性/无记忆；④ 全场 γ=45/47/60/89° 全返回有限值；⑤ **旧环境默认路径对 stub engine 逐位不变**。**实现期它当场抓出一个真 bug**：`ScenarioReset` 的标称动作漏改（硬写 0.3333 ⇒ γ=8.33°），已修 |
+| P1（实测更正） | ⚠ 见 §0 | 调用预算 **不是 ~0.3 s/episode 而是 ~16 s/episode**（训练路径每块一次 6 条批量；"0.3 s"对应"一次算完 1440 条"）。证据 `python agentutil/probe_floris_call_cost.py`；实现侧实测 16.3 s/episode（预取）vs 87.8 s/episode（全直算） |
+| **P2** | ✅ | `python agentutil/test_warmup_schedule.py` 第 6/7 节：偏航带（起点 0 / 界内 / 步长 = 带宽 10% / 两端可达 / 信号维恒 0，**不断言最优或效率**）+ 满带越界罚等值（`400×0.5 == 100×2 == 200 元`）+ 夹带 [−1,+1] + 下层 ±10 不变；旧 `WT_*` 逐位未动 |
+| **P3①** | ✅ | `python agentutil/port_yawflor.py --check`：三个文件**反向还原**后与 `td3per` 逐位相同 ⇒ "只差替换表列出的 **23 处**"（`yawflor_ddpg.py` 零改动） |
+| **P3②** | ✅ | `python -m yawflor.yawflor_main --mode train --env YAWFLOR --max_steps 3000 --seed 101`：退出码 0（3000 环境步 = 600 个 H 块，2 个 episode 末存盘）；`update_stats_H.csv`(560 行) / `df_test9.csv`(60 行) **无 NaN/inf**；`df_yawflor.csv` 3000 行**增量落盘**；收尾统计（`--max_steps 20` 的复核）**批量 4 / 单条 0 / 命中 25** ⇒ 预取 100% 覆盖训练路径 |
+| **P4①** | ✅ | `python test_five_days.py --yawflor output/YAWFLOR-run17 --days 5 --seed 7 --device cpu --no-tensorboard`：日志明写**"跳过 MATLAB 引擎（纯 Python 后端）"**，5 天跑完，**81.1 s**（≈16 s/天，与上面的物理预算一致），`five_day_steps.csv` 7200 行无 NaN/inf。（`test_five_days.py` 除"env 按注册表解析 + `'yawflor'` 注册项"外，另有两处必要同源化：评测起点的标称动作 `np.ones(nt)*0.3333` → **`env.nominal()`**〔旧路径逐位相同〕，以及 MATLAB 引擎改为**按需启动**〔`matlab=False` 的项目不启〕） |
+| **P4②** | ✅ | `python agentutil/test_five_days_regression.py --days 5`（stub 引擎，两条臂同引擎）：td3per / `TD3PER-run10` / seed 7 —— `five_day_steps.csv`（7200×16）、`five_day_days.csv`（5×22）、`five_day_summary.csv` 与基线 commit `476e269`（本次改动前）**全列逐位相同** |
+| P5 | ⬜ 未执行 | 本轮范围外：≥3 run + B1–B4 基线臂 + 平面支配判据（§7） |
+| P6 | ⬜ 未执行 | 本轮范围外：本文件"实测结果"节 + 根 `README.md` 的"方法 10：YAWFLOR" |
+
+> 说明：P3② 的 `--steps 3000` 在本仓库对应 **`--max_steps 3000`**（`--max_steps` 覆盖
+> `train_iter_H`，计的是**环境步**：3000 步 = 600 个 H 决策块）。冒烟产物 = `output/YAWFLOR-run17`；
+> `output/_p4_*` 为 P4 的两类验收产物（均在 `.gitignore` 的 `output/` 内）。
+
+
 ---
 
 ## 7. 评测协议（波动控制优先）

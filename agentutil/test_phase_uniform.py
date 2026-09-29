@@ -57,7 +57,7 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-UNIFORM = ['td3per', 'td3perrb', 'td3prrlrb', 'td3prrbb', 'td3prle']
+UNIFORM = ['td3per', 'td3perrb', 'td3prrlrb', 'td3prrbb', 'td3prle', 'yawflor']
 LEGACY = 'td3leprrlrb'
 ALL6 = UNIFORM + [LEGACY]
 
@@ -218,8 +218,9 @@ for k in ('td3prrbb', 'td3prle'):
 tf = read_text('test_five_days.py')
 n_phase = len(re.findall(r"h_obs='normalize_H'", tf))
 n_plain = len(re.findall(r"h_obs='normalize'(?!_H)", tf))
-check(n_phase == 6 and n_plain == 3,
-      "test_five_days.py: 6 个项目 h_obs='normalize_H' + 3 个旧项目 'normalize' (实得 %d/%d)"
+check(n_phase == 7 and n_plain == 3,
+      "test_five_days.py: 7 个项目 h_obs='normalize_H' (2026-09-30 起含 yawflor) "
+      "+ 3 个旧项目 'normalize' (实得 %d/%d)"
       % (n_phase, n_plain))
 
 print()

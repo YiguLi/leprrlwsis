@@ -1140,7 +1140,6 @@ if __name__ == "__main__":
     env = WindBatteryYaw(max_E, args.nb_turbine, upload, None, physics=yaw_physics)
     env_test = WindBatteryYaw(max_E, args.nb_turbine, upload, None,
                               physics=yaw_physics_test)
-    prCyan(env.summary())
     prCyan("口径: " + yturb.declared_scope())
 
     if args.seed > 0:
@@ -1248,6 +1247,9 @@ if __name__ == "__main__":
               use_csv=use_csv)
         if upload:
             writer.close()
+        prCyan('[yawflor] 训练结束 —— 物理调用统计（逐块预取是否生效的运行期证据）:')
+        prCyan(env.summary())
+        prCyan(env_test.summary())
 
     else:
         raise RuntimeError('undefined mode {}'.format(args.mode))

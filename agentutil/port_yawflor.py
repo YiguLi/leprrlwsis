@@ -276,9 +276,20 @@ MAIN_EDITS = [
         '    env = WindBatteryYaw(max_E, args.nb_turbine, upload, None, physics=yaw_physics)\n'
         '    env_test = WindBatteryYaw(max_E, args.nb_turbine, upload, None,\n'
         '                              physics=yaw_physics_test)\n'
-        '    prCyan(env.summary())\n'
         '    prCyan("口径: " + yturb.declared_scope())',
         1, 'env 构造 (WindBatteryYaw + FlorisPhysicsYaw)'),
+    # ---- 训练收尾：打印物理调用统计（预取是否生效的**运行期证据**）----
+    (
+        '              use_csv=use_csv)\n'
+        '        if upload:\n'
+        '            writer.close()',
+        '              use_csv=use_csv)\n'
+        '        if upload:\n'
+        '            writer.close()\n'
+        "        prCyan('[yawflor] 训练结束 —— 物理调用统计（逐块预取是否生效的运行期证据）:')\n"
+        '        prCyan(env.summary())\n'
+        '        prCyan(env_test.summary())',
+        1, '训练收尾打印物理调用统计'),
     # ---- bias 初始化调用 ----
     (
         '        init_wt_action_bias(agent_H, lo=0.05, hi=0.45, sig_value=0.0)',
