@@ -47,7 +47,7 @@
 | `probe_value_scale.py` | 归一化两臂的学习曲线/隐层激活量级诊断 | `python agentutil/probe_value_scale.py` |
 | `probe_l_fempty_point.py` | 用真实 run 数据验证 `F=∅` 参考集合是零宽单点（只有竭力值免费） | `python agentutil/probe_l_fempty_point.py [csv]` |
 | `probe_l_trackerr_worst.py` | 定位 trackerr 最大的步并归因（下层惰速/带宽失配指纹） | `python agentutil/probe_l_trackerr_worst.py [csv] [topN]` |
-| `probe_wfsim_memoryless.py` | **`WFSim_port` 是否无记忆**（决定 test9 能否当确定性收敛判据）：同参数恒定 / 穿插后复原 / 两实例共享引擎互不干扰 | `python agentutil/probe_wfsim_memoryless.py`（**需 MATLAB**，约 2 min） |
+| `probe_floris_yaw_structure.py` | **FLORIS 偏航环境（新方法）的功率结构与可行性探针**（**只读、不需 MATLAB**；需 `pip install floris`，实测 4.6.6）。物理口径逐项对齐 `WFSim_port.m`/`meshing.m` windTunnel：D=100 m、单排 5 台 5D 间距、ρ=1.2、a≡1/3 ⇒ `Cp=4a(1−a)²=0.59259`、`Cp_eff=0.56296`、`CT_eff=8/9`、无量定上限；`wind_directions=270`（FLORIS 用气象来向，270=沿 +x）。八节：①单机标定（隔离机组 vs 解析式，实测相对误差 **1.9e-16**）②均匀偏航族扫描（±5…±60°）③逐台串行精化求风场最优 ④带内可达功率区间（**削减能力**）⑤镜像对称/可重复性 ⑥调用耗时拆解 ⑦尾流模型×偏航损失指数敏感性 ⑧真实风速序列下的波动量级。**2026 实测（u=10，γ=0）**：单机 2.6529 MW（=解析），5 台总 **5.9918 MW**（同 u 的 WFSim 全体 a=1/3 为 3.4462 MW ⇒ 引擎绝对电平差 1.74×）；最优偏航 **+38~47%**（形态 = 上游 +16~25°、下游 0，正是"随尾流状态变化的斜坡"）；**带内最小出力只比 γ=0 低 2.5~3%**（最劣模式 = 只转末台）⇒ **±25° 内几乎没有削减能力**；`gauss` 挠曲模型在**全场同时 ≥45°** 时 `sqrt` 出 NaN（`wake_deflection/gauss.py:189`）⇒ env 必须守卫；GCH 默认三个开关里 `enable_transverse_velocities` 让 `P(+γ)≠P(−γ)` 约 +2%（关掉后**精确**为 0，但转向增益从 +43% 掉到 +10%）；jensen+jimenez 只给 **+13%**（模型依赖大）；单条调用 38 ms、批量 0.47 ms/条 | `python agentutil/probe_floris_yaw_structure.py [--skip-opt] [--skip-sens] [--skip-diag] [--skip-series] [--json output/x.json] [--log output/x.log]` |
 | `probe_bsize_scan.py` | `--bsize` 扫描：用**固定样本量 vs 固定步数**两口径把"梯度估计更准"与"多学了几遍"分开（离线有监督代理目标） | `python agentutil/probe_bsize_scan.py`（约 6 min） |
 | `probe_init_convention.py` | `fanin_init` 口径 A/B（**含 `stock` 纯噪声对照臂 + 逐 seed 配对差**）：`current`(现状) / `true_fanin` / `old_scoped`(把 fan_out 口径也套到 fc4/fc5) / `fix_fc1`，测 500/1500/6000 步 val R²·MSE·死 ReLU | `python agentutil/probe_init_convention.py`（约 10 min） |
 | `audit_coverage.py` | 九方法覆盖审计（归一化/bias 接线逐项核对）+ H 层 η1 分析 | `python agentutil/audit_coverage.py` |
@@ -79,7 +79,12 @@
 
 ## 运行前置
 
-* 需要环境：`C:\Users\yigul\anaconda3\envs\llmenhancedwsis\python.exe`（torch 2.12 CPU / numpy / pandas）。
+* 需要环境：`C:\Users\yigul\anaconda3\envs\llmenhancedwsis\python.exe`（torch 2.12 CPU / numpy 2.4 / pandas 3.0）。
+  FLORIS 相关脚本额外需要该环境里的 `floris`（**2026-09 实测装入 4.6.6**，一并带来
+  scipy/matplotlib/numexpr/shapely/coloredlogs/pathos/attrs/pyyaml；numpy/torch/pandas
+  未降级）。⚠ `floris` 在 import 时会 import matplotlib，后者要写 `~/.matplotlib`
+  字体缓存 —— 在受限沙箱下会报 `Could not save font_manager cache ... Permission denied`，
+  脚本已 `os.environ.setdefault('MPLCONFIGDIR', <ROOT>/output/_mplcache)` 规避。
 * 除 `test_*` 与 `probe_*` 外，涉及真实训练的脚本需要 **MATLAB**（`env.py` 启动
   `matlab.engine`）；单元测试**不需要** MATLAB，可在任何机器上跑。
 * **例外**：`probe_wfsim_memoryless.py` 必须启 MATLAB（它测的就是 MATLAB 侧的
