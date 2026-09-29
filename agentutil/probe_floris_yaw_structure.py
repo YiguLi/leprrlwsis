@@ -807,6 +807,87 @@ def sec_fluct_tradeoff(ys, col=1, n_steps=1440, block=5,
     return out
 
 
+# ---------------------------------------------------------------------------
+# 12. 引擎默认值的出处类型 + 偏离它值多少（回答"默认值又是咋设定的"）
+# ---------------------------------------------------------------------------
+def sec_defaults_provenance(us=(10.0,), gamma_max=GAMMA_MAX):
+    """把每个随包默认值按**来源类型**分类，并逐项量出"偏离默认"的代价。
+
+    读随包源码（`floris/core/**` 的 docstring 与字段定义）得到的事实：
+
+    ① **论文标定值**（✅ 可直接引用）：gauss 挠曲 = Bastankhah 2016 + King 2019；
+      curl/横向速度 = **Martínez-Tossas et al. (2019)**（源码 L301/L404 注明）；
+      `cc` = Bay 2022（基于 Bastankhah 2021）；`turbopark` = Ørsted 实现 + Nygaard 2020；
+      `nrel_5MW` 曲线 = NREL/turbine-models 的 `NREL_5MW_126_RWT_corrected.csv`（含锥角、94.4% 发电机效率）。
+    ② **历史惯性值（与原论文不同）**（⚠️ 只能说明）：`crespo_hernandez` 的
+      `initial/constant/ai` —— 原论文推荐 `-0.0325 / 0.73 / 0.8325`，随包发的是 `0.1 / 0.5 / 0.8`，
+      docstring 明说理由是"与历史 FLORIS 版本一致"，正负号争议见 Zehtabiyan-Rezaie 2023 /
+      GitHub issue #773，并写"**默认值可能在后续版本更新**"。
+    ③ **代码里无引用**（⚠️ 只能自己表态）：`wake_velocity/gauss.py` 的
+      `ka=0.38 / kb=0.004 / alpha=0.58 / beta=0.077`（裸 field，无 docstring 无 cite）；
+      `cosine_loss_exponent_yaw = 1.88`（`operation_models.py` 只给机制不给出处；
+      文献同类拟合值可见 1.41（Fleming 2017）与 3.0（Howland 2022 测试））。
+    ④ **标准常数**：`air_density 1.225`（ISA 海平面）、`wind_shear 0.12`（常用幂律指数）。
+    ⑤ **数值折中**：`turbine_grid_points 3`（代码硬约束 ≤3，"更高会降低性能"）⇒ 非物理参数。
+
+    ⇒ **"取默认"≠"有出处"**：只有 ① 能直接引用，②③ 必须在论文里自己表态。本节量它们的杠杆。
+    """
+    f, _ = build_model()
+    pat = np.array([[gamma_max, gamma_max, gamma_max * 0.5, gamma_max * 0.25, 0.0]])
+
+    def measure(model, u):
+        b, _ = eval_batch(model, [u], np.zeros((1, NT)))
+        q, _ = eval_batch(model, [u], pat)
+        return float(b[0]), float(q[0]), float(100 * (q[0] / b[0] - 1))
+
+    out = {}
+    print('  默认值来源类型 ②③⑤ 的杠杆（u=10、固定模式 = [25,25,12.5,6.25,0]）')
+    print('  变体                                      基线 MW   固定模式 MW   增益 %   Δ增益 pp')
+    b0, q0, g0 = measure(f, us[0])
+    print('  %-40s %8.4f   %9.4f   %+6.2f      —（基准）'
+          % ('随包默认（①+②+③+⑤）', b0, q0, g0))
+    out['default'] = dict(base_mw=b0, fixed_mw=q0, gain_pct=g0)
+
+    def variant(name, params):
+        fv, _ = build_model()
+        for path, val in params:
+            fv.set_param(path, val)
+        b, q, g = measure(fv, us[0])
+        out[name] = dict(base_mw=b, fixed_mw=q, gain_pct=g, d_gain_pp=g - g0,
+                         params={'.'.join(map(str, p)): v for p, v in params})
+        print('  %-40s %8.4f   %9.4f   %+6.2f   %+7.2f' % (name, b, q, g, g - g0))
+
+    W = ['wake']
+    CH = W + ['wake_turbulence_parameters', 'crespo_hernandez']
+    GV = W + ['wake_velocity_parameters', 'gauss']
+    # ② crespo_hernandez：换成原论文推荐值（零号争议，两种符号都试）
+    variant('(2) crespo 论文值 initial=-0.0325',
+            [(CH + ['initial'], -0.0325), (CH + ['constant'], 0.73), (CH + ['ai'], 0.8325)])
+    variant('(2) crespo 论文值 initial=+0.0325',
+            [(CH + ['initial'], 0.0325), (CH + ['constant'], 0.73), (CH + ['ai'], 0.8325)])
+    # ③ gauss 速度模型参数（无引用的裸默认值）
+    for ka in (0.30, 0.50):
+        variant('(3) gauss ka=%.2f (default 0.38)' % ka, [(GV + ['ka'], ka)])
+    for kb in (0.002, 0.008):
+        variant('(3) gauss kb=%.3f (default 0.004)' % kb, [(GV + ['kb'], kb)])
+    # ④ 标准常数（预期零阶）
+    variant('(4) air_density 1.225 (ISA)', [(['flow_field', 'air_density'], 1.225)])
+    # ⑤ 求解器分辨率（数值折中）
+    for n in (1, 2):
+        try:
+            fv = build_model()[0]
+            fv.set(solver_settings={'type': 'turbine_grid', 'turbine_grid_points': n})
+            b, q, g = measure(fv, us[0])
+            out['(5) turbine_grid_points=%d' % n] = dict(base_mw=b, fixed_mw=q, gain_pct=g,
+                                                        d_gain_pp=g - g0)
+            print('  %-40s %8.4f   %9.4f   %+6.2f   %+7.2f'
+                  % ('(5) turbine_grid_points=%d (default 3)' % n, b, q, g, g - g0))
+        except Exception as exc:                                   # noqa: BLE001
+            print('  %-40s FAILED: %s: %s' % ('(5) turbine_grid_points=%d' % n,
+                                              type(exc).__name__, exc))
+    return out
+
+
 def sec_wind_series(col=1, n_steps=1440):
     hdr('[8] 真实风速序列（FFC_speed_noise_1.csv 第 %d 列，前 %d 步）下的波动量级'
         % (col, n_steps))
@@ -852,6 +933,8 @@ def main():
     ap.add_argument('--skip-series', action='store_true', help='跳过真实风速序列一节')
     ap.add_argument('--skip-sens', action='store_true', help='跳过口径敏感性一节')
     ap.add_argument('--skip-diag', action='store_true', help='跳过结构诊断一节')
+    ap.add_argument('--skip-defaults', action='store_true',
+                    help='跳过"引擎默认值出处与杠杆"一节（第 12 节）')
     ap.add_argument('--skip-day', action='store_true', help='跳过"一天最优轨迹/速率限制"一节')
     ap.add_argument('--skip-delay', action='store_true', help='跳过"输运延迟代理"一节')
     ap.add_argument('--skip-fluct', action='store_true', help='跳过"波动-能量折中"一节')
@@ -894,6 +977,8 @@ def main():
                timing=sec_timing())
     if not args.skip_diag:
         res['diagnostics'] = sec_diagnostics()
+    if not args.skip_defaults:
+        res['defaults_provenance'] = sec_defaults_provenance()
     if not args.skip_sens:
         res['sensitivity'] = sec_sensitivity(us)
     if not args.skip_series:
