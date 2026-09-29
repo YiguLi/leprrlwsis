@@ -92,7 +92,8 @@ def detect_lam_scale(lam_min_obs, lam_max_obs):
 # ===========================================================================
 # 主分析
 # ===========================================================================
-def analyse(run_dir, gamma=0.98, anchor_win=20000, ev_win=20, verbose=True):
+def analyse(run_dir, gamma=0.98, anchor_win=20000, ev_win=20, eps=None,
+            viol_tol=1e-6, verbose=True):
     step_csv, stats_csv = find_run_inputs(run_dir)
     if step_csv is None:
         print('[skip] %s：找不到 df_*.csv 或 update_stats_H.csv' % run_dir)
@@ -119,13 +120,19 @@ def analyse(run_dir, gamma=0.98, anchor_win=20000, ev_win=20, verbose=True):
     lam_obs_min = float(np.nanmin(lam))
     lam_obs_max = float(np.nanmax(lam))
     kl = detect_lam_scale(lam_obs_min, lam_obs_max)
-    lo, hi = hc.LAM_MIN * kl, hc.LAM_MAX * kl
+    lo, hi_theory = hc.LAM_MIN * kl, hc.LAM_MAX * kl
+    # ⚠ 抬过 λ_max 的 run（如 `--dual-lammax 200` = 双通道硬通道）⇒ 用**观测上界**当上界，
+    #   否则会把它误判成"100% 贴顶"。
+    extended = bool(lam_obs_max > hi_theory * 1.01)
+    hi = lam_obs_max if extended else hi_theory
     at_lo = float(np.mean(lam <= lo * 1.02))
     at_hi = float(np.mean(lam >= hi * 0.98))
     mid = 1.0 - at_lo - at_hi
     if verbose:
-        print('\n[A] λ1 形态  (lam_scale = s_c/s_p ≈ %.3g ⇒ 区间 [%.4f, %.4f]，物理价 ×%.3g)'
-              % (kl, lo, hi, 1.0 / kl))
+        print('\n[A] λ1 形态  (lam_scale = s_c/s_p ≈ %.3g ⇒ 区间 [%.4f, %.4f]，物理价 ×%.3g%s)'
+              % (kl, lo, hi, 1.0 / kl,
+                 '；**该 run 抬过 λ_max**：上界取观测值 %.4f ⇒ 物理价 %.1f'
+                 % (lam_obs_max, lam_obs_max / kl) if extended else ''))
         print('    min %.4f | median %.4f | mean %.4f | max %.4f   ⇒ 物理价 %.3f ~ %.3f 元/(MW·step)'
               % (lam.min(), np.median(lam), lam.mean(), lam.max(),
                  lam.min() / kl, lam.max() / kl))
@@ -141,21 +148,25 @@ def analyse(run_dir, gamma=0.98, anchor_win=20000, ev_win=20, verbose=True):
     X = d.groupby(d['step'] // 5)['c1_step'].sum().to_numpy()[:len(blk)]
     ema = blk['ema_c1_H'].to_numpy(dtype=float)
     dblk = blk['d_block_H'].to_numpy(dtype=float)
+    # 预算口径：历史 EMA 对偶用 d_block_H；双通道硬通道用 **ε**（`--dual-eps`，默认 0.05）
+    budget = dblk if eps is None else np.full_like(dblk, float(eps))
+    bname = 'd_block_H' if eps is None else 'ε=%.3g（双通道硬通道容差）' % float(eps)
     ok = np.isfinite(ema)
-    ratio = np.divide(ema[ok], dblk[ok], out=np.full(ok.sum(), np.nan), where=dblk[ok] != 0)
+    ratio = np.divide(ema[ok], budget[ok], out=np.full(ok.sum(), np.nan),
+                      where=budget[ok] != 0)
     if verbose:
-        print('\n[B] 对偶驱动信号：块和 Σ₅c1（= 每块 5 步 c1 之和）与 EMA/预算')
+        print('\n[B] 对偶驱动信号：块和 Σ₅c1（= 每块 5 步 c1 之和）与 EMA/预算（预算 = %s）' % bname)
         print('    块和: median %.2f | p90 %.2f | p99 %.2f | max %.2f | max/median %.1f'
               % (np.median(X), np.percentile(X, 90), np.percentile(X, 99), X.max(),
                  X.max() / max(np.median(X), 1e-9)))
-        print('    EMA/d_block: median %.3f | >1 占比 %.1f%% | >2 占比 %.1f%% | max %.2f'
+        print('    EMA/预算: median %.3f | >1 占比 %.1f%% | >2 占比 %.1f%% | max %.2f'
               % (np.nanmedian(ratio), 100 * np.nanmean(ratio > 1), 100 * np.nanmean(ratio > 2),
                  np.nanmax(ratio)))
-        print('    ⇒ 单块极值对 EMA 的冲击 = 0.02×max(块和) = %.2f（预算 %.1f）'
-              % (0.02 * X.max(), float(np.nanmedian(dblk))))
+        print('    ⇒ 单块极值对 EMA 的冲击 = 0.02×max(块和) = %.2f（预算 %.3g）'
+              % (0.02 * X.max(), float(np.nanmedian(budget))))
     R.update(blocksum_median=float(np.median(X)), blocksum_p99=float(np.percentile(X, 99)),
              blocksum_max=float(X.max()), ema_ratio_median=float(np.nanmedian(ratio)),
-             ema_ratio_gt1=float(np.nanmean(ratio > 1)), d_block=float(np.nanmedian(dblk)))
+             ema_ratio_gt1=float(np.nanmean(ratio > 1)), d_block=float(np.nanmedian(budget)))
 
     # ---------------- C. 两种越界 ----------------
     coef = 100.0 if 'yawflor' in tag else 400.0        # 新/旧环境的越界罚系数
@@ -165,17 +176,34 @@ def analyse(run_dir, gamma=0.98, anchor_win=20000, ev_win=20, verbose=True):
     exc = np.maximum(PF - 3.0, 0.0)
     act_rate = float(np.mean(pen > 0))
     act_depth = float(np.mean(pen / coef / band))
-    viol_rate = float(np.mean(PF > 3.0))
+    # ⚠ 容差：`P_F = 3 + 1ulp` 会被朴素 `P_F > 3` 误判成越限（实测 run21/E1 各几百行，
+    #   其 exc_tot ≈ 4e-16）。评测脚本 test_five_days 用 VIOL_TOL 做了同样的事。
+    viol_rate = float(np.mean(PF > 3.0 + viol_tol))
     if verbose:
         print('\n[C] 两种"越界"必须分开（λ 只管后者）')
         print('    (a) 动作带越界 penalty_NN_H>0 : %.2f%% 步 | 越界深(带宽比例) %.4f | 均值 %.2f 元/步'
               % (100 * act_rate, act_depth, pen.mean()))
-        print('    (b) 波动越限 P_F>3 MW          : %.2f%% 步 | 越限总量均值 %.4f MW·step（λ 管这条）'
-              % (100 * viol_rate, exc.mean()))
-        print('    两者同时发生: %.2f%% 步' % (100 * np.mean((PF > 3.0) & (pen > 0))))
+        print('    (b) 波动越限 P_F>3 MW          : %.2f%% 步（容差 %g）| 越限总量均值 %.4f MW·step'
+              % (100 * viol_rate, viol_tol, exc.mean()))
+        print('    两者同时发生: %.2f%% 步' % (100 * np.mean((PF > 3.0 + viol_tol) & (pen > 0))))
+        if 'exc_inev' in d.columns:
+            real = d['exc_inev'].to_numpy(dtype=float) > 0
+            gap = d['unfeasible_gap'].to_numpy(dtype=float) if 'unfeasible_gap' in d.columns else None
+            print('    (c) **真越限**（exc_inev>0 = 窗口∩物理=∅，电池吸不动）: %d 步 (%.2f%%)'
+                  % (int(real.sum()), 100 * real.mean()))
+            print('        ⇒ 可避免越限 = %.0f%%（**RBB 硬裁剪结构性保证**：窗口可行时 pbrule∈窗口 ⇒ P_F≤limit）'
+                  % (0.0 if real.any() else 100.0))
+            if gap is not None and real.any():
+                g = gap[real]
+                print('        不可吸收缺口 unfeasible_gap: median %.2f | p90 %.2f | max %.2f MW'
+                      ' ⇒ 若要消除，rated_power 至少需 +%.1f(中位)/+%.1f(p90) MW'
+                      % (np.median(g), np.percentile(g, 90), g.max(),
+                         np.median(g), np.percentile(g, 90)))
     R.update(action_band_rate=act_rate, action_band_depth=act_depth,
              viol_rate=viol_rate, viol_excess_mean=float(exc.mean()),
              pen_mean=float(pen.mean()))
+    R['real_viol_rate'] = float((d['exc_inev'].to_numpy(dtype=float) > 0).mean()) \
+        if 'exc_inev' in d.columns else None
 
     # ---------------- D. 判定表 ----------------
     if at_lo > 0.80 and viol_rate < 0.05:
@@ -187,10 +215,27 @@ def analyse(run_dir, gamma=0.98, anchor_win=20000, ev_win=20, verbose=True):
         verdict = 'λ 两侧都常贴边 ⇒ 区间偏窄/对偶无阻尼（价格非平稳），优先治对偶而非单抬上界'
     else:
         verdict = 'λ 在中段工作、越限率可控 ⇒ 区间基本合适'
+    # ⭐ 决定性判读：若该 run 记录了 `exc_inev`（真实越限 = 物理不可避）且**可避免越限为 0**
+    #   ⇒ 硬通道的目标已被 RBB 硬裁剪结构性满足，抬 λ_max 无意义（改规格或如实报告）。
+    if 'exc_inev' in d.columns:
+        _real = d['exc_inev'].to_numpy(dtype=float) > 0
+        _allviol = int(_real.sum())
+        _totviol = int(np.sum(PF > 3.0 + viol_tol))
+        if _allviol > 0 and _allviol >= _totviol - 1:
+            _gap = d['unfeasible_gap'].to_numpy(dtype=float) if 'unfeasible_gap' in d.columns else None
+            verdict = ('⭐ 可避免越限 = 0（RBB 硬裁剪结构性满足）⇒ 剩余 %.2f%% 全为**物理不可避**'
+                       '（窗口∩物理=∅）⇒ 抬 λ_max 无意义；%s'
+                       % (100 * _real.mean(),
+                          ('要压总越限率只能改规格：rated_power +2 MW 可消除约 %.0f%%、'
+                           '+4 MW 约 %.0f%%、+6 MW 约 %.0f%% 的真实越限（缺口 median %.1f / p90 %.1f / max %.1f MW）'
+                           % (100 * np.mean(_gap[_real] <= 2.0), 100 * np.mean(_gap[_real] <= 4.0),
+                              100 * np.mean(_gap[_real] <= 6.0), np.median(_gap[_real]),
+                              np.percentile(_gap[_real], 90), _gap[_real].max()))
+                          if _gap is not None else '要压总越限率需改物理规格'))
+    R['verdict'] = verdict
     if verbose:
         print('\n[D] §7 判定表：λ 贴顶 %.1f%% / 贴底 %.1f%% × 波动越限率 %.2f%%  ⇒  %s'
               % (100 * at_hi, 100 * at_lo, 100 * viol_rate, verdict))
-    R['verdict'] = verdict
 
     # ---------------- E. Q 污染检查 ----------------
     def _m(a, s):
@@ -346,6 +391,10 @@ def main():
     ap.add_argument('--gamma', type=float, default=0.98, help='H 层块级折扣（默认 0.98）')
     ap.add_argument('--anchor-win', type=int, default=20000, help='锚点滚动窗口（步）')
     ap.add_argument('--ev-win', type=int, default=20, help='事件研究半窗（块）')
+    ap.add_argument('--eps', type=float, default=None,
+                    help='双通道硬通道容差 ε（tail run 应给，默认 0.05）；不给则用 d_block_H')
+    ap.add_argument('--viol-tol', type=float, default=1e-6,
+                    help='越限判定的容差（排除 P_F=3+1ulp 的浮点假阳性；默认 1e-6）')
     ap.add_argument('--json', default=None, help='报告落盘路径')
     args = ap.parse_args()
 
@@ -354,7 +403,8 @@ def main():
     out = []
     for rd in runs:
         try:
-            r = analyse(rd, gamma=args.gamma, anchor_win=args.anchor_win, ev_win=args.ev_win)
+            r = analyse(rd, gamma=args.gamma, anchor_win=args.anchor_win, ev_win=args.ev_win,
+                        eps=args.eps, viol_tol=args.viol_tol)
         except Exception as e:                                     # 单个 run 失败不影响其余
             print('[error] %s: %s: %s' % (rd, type(e).__name__, e))
             r = None
