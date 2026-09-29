@@ -113,6 +113,24 @@ MYFUNC_EDITS = [
 ]
 
 MAIN_EDITS = [
+    # ---- run 身份：日志目录名（TensorBoard 的 run 名）带方法名 ----
+    # 为什么必须改：TB 的 scalar tag 全是克隆来的通用名（`r1`/`c1`/`P_F`/`test9/...`），
+    # yawflor 的 run 与 td3per 的 run 在 tag 上**完全同名**（这正是跨 run 对齐比较所要的）。
+    # ⇒ 方法身份只能靠**日志目录名**（= `get_output_folder(output, args.env)`）与
+    #   CSV 文件名（`RUN_TAG='yawflor'`）。若沿用 `--env` 默认 `'TD3PER'`，不传参启动
+    #   会落进 `output/TD3PER-runN`，TB 里那一栏就叫 TD3PER ⇒ 与真 td3per 无法分辨。
+    (
+        "    parser.add_argument('--env',\n"
+        "                        default='TD3PER',\n"
+        "                        type=str,\n"
+        "                        help='open-ai gym environment')",
+        "    parser.add_argument('--env',\n"
+        "                        default='YAWFLOR',\n"
+        "                        type=str,\n"
+        "                        help='run 身份 (决定日志目录 output/<env>-runN, 即 TensorBoard 的 run 名);'\n"
+        "                             ' yawflor: TB 的 scalar tag 与 td3per 逐字同名(便于跨 run 对齐),'\n"
+        "                             ' 故方法区分靠此目录名 + CSV 名 (df_yawflor.csv)')",
+        1, "--env 默认 TD3PER → YAWFLOR（TB run 名自明）"),
     # ---- 模块 docstring ----
     (
         'TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层 = RL BESS 追 SOC 目标\n'

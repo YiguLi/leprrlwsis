@@ -871,9 +871,11 @@ if __name__ == "__main__":
                         type=str,
                         help='support option: train/test')
     parser.add_argument('--env',
-                        default='TD3PER',
+                        default='YAWFLOR',
                         type=str,
-                        help='open-ai gym environment')
+                        help='run 身份 (决定日志目录 output/<env>-runN, 即 TensorBoard 的 run 名);'
+                             ' yawflor: TB 的 scalar tag 与 td3per 逐字同名(便于跨 run 对齐),'
+                             ' 故方法区分靠此目录名 + CSV 名 (df_yawflor.csv)')
     # 网络宽度 (H/L 共用): 2026-09-29 由 16/100 提升到 64/128。
     #   ⚠ 改维度后旧 run 的 .pkl 不可直接复载 (fc1/fc3 形状不同)。
     parser.add_argument('--hidden1',
