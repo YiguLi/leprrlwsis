@@ -84,10 +84,10 @@ def init_wt_action_bias(agent, lo=0.05, hi=0.45, sig_value=0.0, verbose=True):
 
     为什么必须做 (run160/初始策略诊断):
       `model.py` 的 Actor 只把 fc4.weight 初始化成 ±init_w(0.003),
-      fc4.bias 仍是 PyTorch 默认 U(−1/√fan_in)=U(±0.125) (fan_in=hidden1=64);
+      fc4.bias 仍是 PyTorch 默认 U(−1/√fan_in)=U(±0.25) (fan_in=hidden1=16);
       而 a 与功率系数的关系是 Cp = 4a(1−a)² (见 WFSim_port.m):
         a=0 → Cp=0 (该机零出力/停机),  a=1/3 → Cp=0.593 (Betz 最大),  a=0.5 → Cp=0.5。
-      于是初始策略 ≈ bias: 实测 5 个种子 (旧 16/100 口径) → 死机 2~4 台、全场 ΣCp 仅 0.47~0.72
+      于是初始策略 ≈ bias: 实测 5 个种子 → 死机 2~4 台、全场 ΣCp 仅 0.47~0.72
       (效率 16%~24%)。策略从"半停机"出发, 而 a<0 区被 CheckAction 裁掉后梯度为 0
       → 若没有恢复力就会长期停在停机态。
     bias∈[lo,hi]=[0.05,0.45] 覆盖"上游降载 → 末台单机最优"的整个区间, **故意不预设**风场最优的形状
@@ -692,21 +692,18 @@ if __name__ == "__main__":
                         default='TD3PERRB',
                         type=str,
                         help='open-ai gym environment')
-    # 网络宽度 (H/L 共用): 2026-09-29 由 16/100 提升到 64/128。
-    #   ⚠ 改维度后旧 run 的 .pkl 不可直接复载 (fc1/fc3 形状不同)。
     parser.add_argument('--hidden1',
-                        default=64,
+                        default=16,
                         type=int,
                         help='hidden num of first fully connect layer')
     parser.add_argument('--hidden2',
-                        default=128,
+                        default=100,
                         type=int,
                         help='hidden num of second fully connect layer')
-    # critic lr: 2026-09-29 由 0.01 改为 1e-3 (actor lr 仍 1e-4, 见 --prate)
     parser.add_argument('--rate',
-                        default=0.001,
+                        default=0.01,
                         type=float,
-                        help='critic net learning rate')
+                        help='learning rate')
     parser.add_argument('--prate',
                         default=0.0001,
                         type=float,
@@ -739,12 +736,10 @@ if __name__ == "__main__":
                         choices=['min', 'mean'],
                         help='H 层 twin profit-critic 的 target 聚合 '
                              '(min = TD3 原口径; mean = 去掉悲观偏差)')
-    # minibatch / memory 条数: 2026-09-29 由 128/20000 提升到 256/40000
-    #   (40000 条 = 1000k 环境步, nstep=5; 复现 run12~run16 请传 --rmsize 20000)
-    parser.add_argument('--bsize', default=256, type=int,
+    parser.add_argument('--bsize', default=128, type=int,
                         help='minibatch size')
     parser.add_argument('--rmsize',
-                        default=40000,
+                        default=20000,
                         type=int,
                         help='memory size')
     # ---- 越界乘性惩罚 ----

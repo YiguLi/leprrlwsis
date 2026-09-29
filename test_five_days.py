@@ -444,8 +444,8 @@ def _detect_hidden(model_dir, nb_actions=6):
     """从 actor_<nb_actions>.pkl 的 fc1/fc2 权重反推 H 网络 (hidden1, hidden2)。
 
     为什么必须探测而不能写死: 一次评测里同时有
-      * 6 个 TD3 方法 —— 2026-09-29 起生产维度 64/128, 此前 run (<= run16) 是 16/100;
-      * 3 个改造前项目 (per/prrbb/prle) —— 仍是 16/100。
+      * 六个 TD3 方法 —— 网络宽度随配置变过 (16/100、64/128 都出现过, 见 README 口径表);
+      * 3 个改造前项目 (per/prrbb/prle) —— 16/100。
     rate/bsize/rmsize 只影响训练, 纯前向评测下不生效; **只有隐层维度必须与权重一致**。
     """
     import torch
@@ -466,16 +466,16 @@ def _build_args(device, seed, hidden=None):
         的默认值 (= 六个 TD3 main 的当前默认)。
     """
     ns = argparse.Namespace()
-    # 默认值 = 六个 TD3 main 的当前默认; 真实维度在 _build_args 末尾按 checkpoint 覆写
-    ns.hidden1 = 64
-    ns.hidden2 = 128
-    ns.rate = 0.001
+    # 默认值 = 六个 TD3 main 的当前默认; 真实维度在下面按 checkpoint 覆写
+    ns.hidden1 = 16
+    ns.hidden2 = 100
+    ns.rate = 0.01
     ns.prate = 0.0001
     ns.warmup = 200
     ns.discount = 0.98
     ns.l_discount = 0.98
     ns.bsize = 32          # 纯前向评测, 不更新网络; 保留小值即可
-    ns.rmsize = 40000
+    ns.rmsize = 20000
     if hidden:
         ns.hidden1, ns.hidden2 = int(hidden[0]), int(hidden[1])
     ns.window_length = 1
@@ -1233,7 +1233,7 @@ def main():
         print('TensorBoard: {}'.format(tb_dir))
 
     # 注意: run_args 现在按模型目录构造 (见下面循环) —— 各 run 的网络维度可以不同
-    # (历史 run 16/100 vs 2026-09-29 起的 64/128 vs 改造前项目仍 16/100)。
+    # (由 _detect_hidden 从权重形状读出, 不依赖 main 的当前默认值)。
 
     all_days = []
     n_step_rows = 0

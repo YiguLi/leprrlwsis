@@ -285,13 +285,10 @@ python td3leprrlrb/td3leprrlrb_main.py    # 需配置 LLM
 | `--warmup_sched` | `fixed` | warmup 上层动作调度：`fixed` = 1/3 起每块 ±0.05、clip[0.05,0.45]、信号维恒 0；`random` = 旧 `random_action()`（对照臂） |
 | `--warmup_bess` | `rule` | BESS-RL 项目（per/prrbb/prle/td3per/td3prrbb/td3prle）warmup 下层行为：`rule` = RBB 窗口 + SOC 目标跟踪（确定性，无随机）；`random` = 旧 `agent_L.random_action()`（对照臂） |
 | `--warmup_soc_target` | 3.0 | warmup 期规则下层跟踪的 SOC 目标（MWh） |
-| `--hidden1` / `--hidden2` | **64 / 128** | H/L 隐层宽度（**2026-09-29 由 16/100 提升**；⚠ 与旧 run 的 `.pkl` 形状不兼容，旧权重须用 `--hidden1 16 --hidden2 100` 复载） |
-| `--rate` / `--prate` | **1e-3** / 1e-4 | critic / actor 学习率（**critic 于 2026-09-29 由 0.01 降为 1e-3**） |
-| `--bsize` / `--rmsize` | **256** / 40000 | minibatch / H 层 memory 条数（**2026-09-29 由 128/20000 提升**；两者同步翻倍以保持"遍历遍数"不变） |
 | `--discount` | 0.99 | 折扣因子（以 5 min 的"块"为单位） |
 | `--policy_delay` | 2 | TD3 延迟策略更新频率 |
 | `--nstep` | **5** | H 层 **n 步回报**（滑窗 stride-1：每个块都是某条转移的起点，条数 ≈ 块数、状态不丢；`reward=Σγ^k r_k`、自带 bootstrap 系数 `γ^n`）。把需要自助传播的深度从 `1/(1−γ)=50` 降到 `50/n` ⇒ 冻结批实测 n=5 自洽比 0.79 / n=10+mean ≈1.0（1-step 仅 0.41）。**默认 5 = 生产口径**（依据 run12/run13 的 2v2 观测：`\|dQp/da\|` 5~8 倍且不衰减、早期块奖励 160~181 vs 55~91 元、自洽比 0.59/0.60 vs 0.34/0.47；⚠ 非受控 A/B）。**复现 run1~run10 请显式 `--nstep 1`**（那条路径逐位不变）。注意条数与 `rmsize` 口径随 n 变（1 条 = n 块 = 5n 环境步）。**六个 TD3 方法已统一**（td3per / td3perrb / td3prrlrb / td3prrbb / td3prle / td3leprrlrb；`agentutil/test_nstep_uniform.py` 验证滑窗条数/r_和/`γ^n`/done 截断/context 拼接六者同源）；四个 PRRBB 系项目共用自缩放奖励，其 `target_agg` 的 `mean` 分支同样启用 |
-| `--rmsize` | **40000** | H 层 memory **条数**（覆盖环境步 = `rmsize × 5 × nstep`）。默认 40000（**2026-09-29 由 20000 提升**；n=5 时 ≈ **1000k 环境步 ≈ 3.6 epoch**，即"最近约 3.6 个 epoch 的滚动窗口"）。**复现 run1~run10 请传 `--rmsize 80000`**（1-step 口径 ≈400k 步）；**复现 run12~run16（n=5 生产口径）请传 `--rmsize 20000`**（≈500k 步）。**六个 TD3 方法已统一为 40000**（此前只有 td3per 下调、"其余五方法维持 80000"的例外表已在批次 2 取消） |
+| `--rmsize` | **20000** | H 层 memory **条数**（覆盖环境步 = `rmsize × 5 × nstep`）。默认 20000 = 生产口径（与 run12/run13 一致）：n=5 时 ≈ **500k 环境步 ≈ 1.8 epoch**，即"最近约 1.8 个 epoch 的滚动窗口"；≤60k 步的 run 里仍填不满（12,000 条）。**复现 run1~run10 请传 `--rmsize 80000`**（1-step 口径 ≈400k 步）。**六个 TD3 方法已统一为 20000**（此前只有 td3per 下调、"其余五方法维持 80000"的例外表已在批次 2 取消） |
 | `--target_agg` | `min` | H 层 twin **profit**-critic 的 target 聚合：`min` = TD3 原口径（悲观、防过估计）；`mean` = 去偏（未收敛期实测 +18 %，但真实网两网相关 0.99+ 时仅 ~2 %）。actor 的梯度聚合始终为 `min`（`_pair_min`），此开关只改回归目标 |
 | `--viol_derate` | **0（关闭）** | ⚠ **⚠ 默认已回退为 0（关闭）：c=5.0 试行过一次（run14）并实测有害，详见本行末尾。** **越界乘性惩罚系数 c**：`r1` 的**风机收益**项乘 `f = exp(−c·x)`，`x = Σ` 前 5 维越界量（机组限功率 `[0,0.5]`；**dim5 signal 不计**）。动机（`agentutil/probe_q_profile_boundary.py` 一维 `Q(a_j)` 剖面实测，run13 ckpt40000）：线性罚 `200/单位` 在 critic 空间只有 `200/s_p = 0.2`，而框内经济斜率实测 0.27~4.5 ⇒ **跨界几乎不花钱**，`Q` 峰贴在约束边界上（dim4 峰 `a=0.05`；dim5 峰甚至在界外 `−0.60`）⇒ 平滑 actor 逼近角点解时一半状态落界外（dim4 25.7%、dim5 47.1%）；且典型越界（深度 ~0.09）的罚贡献 `0.018` 比 critic 自身 TD 误差 `0.64` 小 30+ 倍。乘性罚**与收益同尺度**（界面斜率 `= c·`该步风机收益）故随风速/电价自缩放；乘 `turbine_profit`（实测 100 % 的步 `≥0`）而非净利润，排除"亏损步上 `f<1` 反而奖励越界"的符号陷阱，并保证 **`r1` 单调不增**。**只动 `r1`**：env 物理量与 `revenue`/`turbine_profit`/`degradation`/`profit` 等**记录列全部不变**（`df_test9.csv` 另**新增**三列 `turbine_profit`/`derate_loss`/`penalty_NN_H` 供审计：`profit/45 − r1 == (罚 + 削减 + 未解释残差)/45`，正交于既有列，桩环境端到端验证过 `c=0` 与 `c=5` 的 `profit`/`profit_econ`/`dsoc` 逐位相同）。**复现历史 run1~run14 请传 `--viol_derate 0`**（该路径逐位不变：`f` 恰为 1.0；见 `agentutil/test_viol_derate.py`）。**六个 TD3 方法均已装此开关**（td3per / td3perrb / td3prrlrb / td3prrbb / td3prle / td3leprrlrb；helper 逐位同源，见 `agentutil/test_viol_derate_uniform.py`）。⚠ **四个 PRRBB 系项目**（td3prrlrb / td3prrbb / td3prle / td3leprrlrb）的 r1 对收益**重加权**（`wT`/`wB`≠1）⇒ 界面斜率 = `c·wT·风机收益`，同一个 `c` 的实际强度与 td3per/td3perrb 不同，且 `test9_compare [6]` 会显示非零"未解释残差"（正常，与 c 无关）；要给它们复标 c，先用 `agentutil/probe_q_profile_boundary.py` 量各自的框内斜率 `s_in`。**<br>⚠ 失败模式（run14，c=5.0，同 step 0–12k 对照 run13；两者只差此开关）**：块奖励 116.8 → **29.4（−5×）**；越界率 24.2% → **38.2%（并在 18%~78% 间振荡）**；罚/步 5.07 → 10.27、削减/步 0 → 9.46、净 r1/步 23.35 → **5.88（坏窗口 −14.6）**；**`Qbar` 3.8 未跟随（锚 4~9.9 → 2.1~3.0）⇒ 自洽比 0.4~0.8 → 1.25~1.78（高估约 2×）**；`\|dQp/da\|/Qbar` 0.85 → **2.08**；策略抖动 `rms(1)` 0.122 → **0.360**；test9 `profit_econ` −15 %、sd +43 %。**机制**：乘性罚让**奖励电平依赖策略自身的越界率** ⇒ 电平非平稳 ⇒ 与固定的 `s_p=1000` 和 warmup 期定的 bias 基线失配 ⇒ critic 相对可实现回报系统性高估 ⇒ actor 追虚高 `Q` ⇒ 越界更多 ⇒ 削得更狠（正反馈）。**教训**：奖励侧惩罚若其幅值随策略自身行为变化，必须先保证**奖励电平平稳**（例如对削减做运行均值归一化，或让 `s_p`/bias 基线与新电平一起重标），否则值层校准会失效。c=5.0 的备选值（13.5 翻倍 / 28 接近上限）**未经实验**，启用前请先解决上述电平问题 |
 | `--phase_feat` | 1 | H 观测加入 24h 相位特征（4→6 维） |
@@ -328,10 +325,10 @@ python test_five_days.py --projects td3prrlrb td3perrb --episode-length 120
 python test_five_days.py --list-projects        # 列出全部可测方法
 ```
 
-> **网络维度按 checkpoint 自动探测**（`_detect_hidden`）：同一次评测里可以混跑历史 run
-> （`<= run16`，16/100）、2026-09-29 起的新默认（64/128）与改造前的 `per/prrbb/prle`（16/100），
-> 不需要手填 `--hidden1/--hidden2`。观测维数同理（`_detect_nb_states` → 相位模式）。
-> 反例：`test_compare_projects.py` / `test_simple.py` 只跑改造前口径，其 args 里写死 16/100，
+> **网络维度按 checkpoint 自动探测**（`_detect_hidden`）：同一次评测里可以混跑网络宽度不同的
+> 权重（历史上出现过 16/100 与 64/128；改造前的 `per/prrbb/prle` 是 16/100），无需手填
+> `--hidden1/--hidden2`。观测维数同理（`_detect_nb_states` → 相位模式）。
+> 反例：`test_compare_projects.py` / `test_simple.py` 只跑改造前口径，其 args 里写死 16/100；
 > 评测六个 TD3 方法请一律用本脚本。
 
 输出（CSV 与 TensorBoard **双份**）：

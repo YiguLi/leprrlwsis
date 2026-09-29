@@ -59,16 +59,13 @@ RBB_RATED_POWER = 10.0
 def make_args(device):
     """Build a minimal args namespace for agent instantiation."""
     ns = argparse.Namespace()
-    # ⚠ 本脚本只跑**改造前**的项目口径 (per / prrbb / prle: H 观测 4 维, 权重 16/100),
-    #   因此这里必须保持 16/100。六个 TD3 方法 (2026-09-29 起 64/128) 请用
-    #   test_five_days.py —— 它按 checkpoint 自动探测网络维度。
     ns.hidden1 = 16
     ns.hidden2 = 100
     ns.rate = 0.01
     ns.prate = 0.0001
     ns.warmup = 200
     ns.discount = 0.98
-    ns.bsize = 32          # 纯前向评测, 不更新网络
+    ns.bsize = 32
     ns.rmsize = 20000
     ns.window_length = 1
     ns.tau = 0.001

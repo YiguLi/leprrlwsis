@@ -108,8 +108,8 @@ class Critic(nn.Module):
     def init_weights(self, init_w):
         # 本方法只写 3 个权重: fc1/fc2 用 fan_out (fanout_init), fc3(输出层, 50→1) 用
         # ±init_w=±3e-3。**fc4/fc5 的权重完全没有被覆写**, 保留 PyTorch 默认
-        # U(±1/sqrt(fan_in)) —— 即教科书口径, 是"正确"的那个。旧生产维度
-        # (--hidden1 16 / --hidden2 100) 下实测上界 (2026-09-29 起生产维度为 64/128):
+        # U(±1/sqrt(fan_in)) —— 即教科书口径, 是"正确"的那个。生产维度
+        # (--hidden1 16 / --hidden2 100) 下实测上界:
         #   fc1 0.248 (fan_in 口径应 0.5)  fc4 0.250 (=1/sqrt(16) ✓)
         #   fc2 0.112 (fan_in 口径应 0.097) fc5 0.112 (=1/sqrt(80) ✓)  fc3 0.003
         # bias 一律不碰 ⇒ 全部保持 ±1/sqrt(fan_in); 输出层 bias 的真正修正是
