@@ -1115,7 +1115,11 @@ if __name__ == "__main__":
     upload = True
     use_csv = True
     args.max_episode_length = 1440  # 1d = 24h*60m = 1440 steps
-    args.train_iter_H = 1000 * args.max_episode_length
+    # 训练预算: **200 episode** = 200 × 1440 = 288,000 环境步（yawflor 专用口径;
+    #   基线 td3per 等仍是 1000 episode = 1,440,000 步 ⇒ 跨方法比较须声明预算差异）。
+    #   288000 是 1440 的整数倍 ⇒ 恰好 200 个完整 episode, 不会停在半天中间;
+    #   `--max_steps` 仍可覆盖 (拉回基线口径: --max_steps 1440000)。
+    args.train_iter_H = 200 * args.max_episode_length
     if getattr(args, 'max_steps', 0) and args.max_steps > 0:
         args.train_iter_H = int(args.max_steps)
     args.seed = np.random.randint(0, 10000)

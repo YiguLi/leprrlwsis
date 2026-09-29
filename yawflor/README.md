@@ -58,6 +58,7 @@
 | 22 | λ 口径 | `LAM_MIN` **不重标定**（"每 MW"口径与风场电平无关）；只**核查 `LAM_MAX` 饱和** | 方案 | §7 附加项 |
 | 23 | 口径冻结 | **`agentutil/test_yawflor_config.py` 42 项断言 + `--json` 快照** | 已实现 | 首跑抓出 2 个问题（含"表自变量是 `u_eff`"的真实陷阱） |
 | 24 | 明确不做 | 载荷/疲劳、偏航速率与一阶延迟（默认关）、输运延迟（默认关）、额定上限、风向时变、FAST.Farm/SOWFA | 用户指令+文献惯例 | §8 |
+| 25 | **训练预算** | **200 episode = 288,000 环境步**（`train_iter_H = 200 × 1440`；`--max_steps` 仍可覆盖） | 用户指令 | 基线 td3per 等 9 个方法均为 **1000 episode = 1,440,000 步** ⇒ **跨方法比较必须声明该差异**；288000 是 1440 的整数倍 ⇒ 恰好 200 个完整 episode，不会停在半天中间。改动落在 `yawflor_main.py` 的 `args.train_iter_H`，已登记进 `agentutil/port_yawflor.py` 的 `MAIN_EDITS` 末条 |
 
 ---
 
@@ -510,7 +511,7 @@ yawflor/
 | **P1** | ✅ 43/43 | `python agentutil/test_yaw_env_contract.py`：② 预取序列 ≡ 全直算序列（逐位，max\|Δ\|=0）且预取真生效；③ 确定性/无记忆；④ 全场 γ=45/47/60/89° 全返回有限值；⑤ **旧环境默认路径对 stub engine 逐位不变**。**实现期它当场抓出一个真 bug**：`ScenarioReset` 的标称动作漏改（硬写 0.3333 ⇒ γ=8.33°），已修 |
 | P1（实测更正） | ⚠ 见 §0 | 调用预算 **不是 ~0.3 s/episode 而是 ~16 s/episode**（训练路径每块一次 6 条批量；"0.3 s"对应"一次算完 1440 条"）。证据 `python agentutil/probe_floris_call_cost.py`；实现侧实测 16.3 s/episode（预取）vs 87.8 s/episode（全直算） |
 | **P2** | ✅ | `python agentutil/test_warmup_schedule.py` 第 6/7 节：偏航带（起点 0 / 界内 / 步长 = 带宽 10% / 两端可达 / 信号维恒 0，**不断言最优或效率**）+ 满带越界罚等值（`400×0.5 == 100×2 == 200 元`）+ 夹带 [−1,+1] + 下层 ±10 不变；旧 `WT_*` 逐位未动 |
-| **P3①** | ✅ | `python agentutil/port_yawflor.py --check`：三个文件**反向还原**后与 `td3per` 逐位相同 ⇒ "只差替换表列出的 **24 处**"（`yawflor_ddpg.py` 零改动）。⚠ TB 的 scalar tag 与 td3per **逐字同名**（便于同一 TB 里对齐比较）⇒ 方法身份靠**日志目录名**（`--env` 默认已改为 `'YAWFLOR'` ⇒ `output/YAWFLOR-runN`）与 CSV 名（`df_yawflor.csv`） |
+| **P3①** | ⚠ `--check` 当前 exit 1 | `python agentutil/port_yawflor.py --check`：三个文件**反向还原**后与 `td3per` 逐位相同 ⇒ "只差替换表列出的 **31 处**"（`yawflor_ddpg.py` 零改动）。⚠ **2026-09-30 实测更正**：该 `--check` **当前 exit 1**（`yawflor_main.py` 反向还原 **FAIL**）—— 9/29–30 两次默认值提交往 `yawflor_main.py` 加了 **7 处未登记**的注释/文案分歧（`--hidden1`/`--rate`/`--bsize`/`--rmsize` 注释、`help` 文案、docstring 口径注记），与本行已登记的 31 处无关；且脚本末尾那行 ✅ 是**无条件打印**的（判据只有 `return 0 if ok else 1`）⇒ **必须看 exit code，不能看 ✅**。⚠ TB 的 scalar tag 与 td3per **逐字同名**（便于同一 TB 里对齐比较）⇒ 方法身份靠**日志目录名**（`--env` 默认已改为 `'YAWFLOR'` ⇒ `output/YAWFLOR-runN`）与 CSV 名（`df_yawflor.csv`） |
 | **P3②** | ✅ | `python -m yawflor.yawflor_main --mode train --env YAWFLOR --max_steps 3000 --seed 101`：退出码 0（3000 环境步 = 600 个 H 块，2 个 episode 末存盘）；`update_stats_H.csv`(560 行) / `df_test9.csv`(60 行) **无 NaN/inf**；`df_yawflor.csv` 3000 行**增量落盘**；收尾统计（`--max_steps 20` 的复核）**批量 4 / 单条 0 / 命中 25** ⇒ 预取 100% 覆盖训练路径 |
 | **P4①** | ✅ | `python test_five_days.py --yawflor output/YAWFLOR-run17 --days 5 --seed 7 --device cpu --no-tensorboard`：日志明写**"跳过 MATLAB 引擎（纯 Python 后端）"**，5 天跑完，**81.1 s**（≈16 s/天，与上面的物理预算一致），`five_day_steps.csv` 7200 行无 NaN/inf。（`test_five_days.py` 除"env 按注册表解析 + `'yawflor'` 注册项"外，另有两处必要同源化：评测起点的标称动作 `np.ones(nt)*0.3333` → **`env.nominal()`**〔旧路径逐位相同〕，以及 MATLAB 引擎改为**按需启动**〔`matlab=False` 的项目不启〕） |
 | **P4②** | ✅ | `python agentutil/test_five_days_regression.py --days 5`（stub 引擎，两条臂同引擎）：td3per / `TD3PER-run10` / seed 7 —— `five_day_steps.csv`（7200×16）、`five_day_days.csv`（5×22）、`five_day_summary.csv` 与基线 commit `476e269`（本次改动前）**全列逐位相同** |
@@ -520,6 +521,13 @@ yawflor/
 > 说明：P3② 的 `--steps 3000` 在本仓库对应 **`--max_steps 3000`**（`--max_steps` 覆盖
 > `train_iter_H`，计的是**环境步**：3000 步 = 600 个 H 决策块）。冒烟产物 = `output/YAWFLOR-run17`；
 > `output/_p4_*` 为 P4 的两类验收产物（均在 `.gitignore` 的 `output/` 内）。
+>
+> **训练预算（2026-09-30 起）：200 episode = 288,000 环境步**（决策登记 §0.1 #25）。
+> 落在 `yawflor_main.py` 的 `args.train_iter_H = 200 * args.max_episode_length`，已登记进
+> `agentutil/port_yawflor.py` 的 `MAIN_EDITS` 末条，故 `--check` 的登记数从 30 处变为 **31 处**。
+> ⚠ **9 个基线方法仍是 1000 episode = 1,440,000 步** ⇒ 跨方法比较必须声明该预算差异；
+> 要拉回基线口径：`--max_steps 1440000`。按 ~16 s/episode 的物理预算（§0 实测更正行），
+> 200 episode ≈ **54 min 纯 FLORIS 开销**（1000 episode ≈ 4.5 h），加 RL/写盘开销更高。
 
 ### 6.2 待复核：λ1（§7 附加项 1）——**判据已冻结，等 run 跑完再判**
 
