@@ -521,7 +521,8 @@ def sec_sensitivity(us):
 # 8b. 真实一天的最优偏航轨迹 → 速率限制的代价（回答"5 min 一次 / 一次能调多少度"）
 # ---------------------------------------------------------------------------
 def sec_day_trajectory(delta_max_list=(2.5, 5.0, 10.0, 20.0, 1e9), col=1, n_steps=1440,
-                       block=5, yaw_rate_deg_s=0.3, block_seconds=300.0):
+                       block=5, yaw_rate_deg_s=0.3, block_seconds=300.0,
+                       return_traj=False):
     """按"每个 5 min 块重新求一次最优偏航"造出一天的最优轨迹，量 |Δγ*| 的分布，
     再对若干 Δmax 做速率限制、比较全天电量。
 
@@ -601,6 +602,60 @@ def sec_day_trajectory(delta_max_list=(2.5, 5.0, 10.0, 20.0, 1e9), col=1, n_step
         out['limits'][tag] = dict(mwh=e, gain_vs_base_pct=float(100 * (e / energy_mwh(p0) - 1)),
                                   loss_vs_unconstrained_pct=float(100 * (e / energy_mwh(ps) - 1)),
                                   n_blocks_clipped=n_hit, actuator_seconds=float(need_s))
+    return (out, ys) if return_traj else out
+
+
+# ---------------------------------------------------------------------------
+# 10. 准稳态假设的代价：偏航的"渐变"FLORIS 不算 —— 用输运延迟做量化上界
+# ---------------------------------------------------------------------------
+def sec_delay_proxy(ys, col=1, n_steps=1440, block=5):
+    """量化"FLORIS 是稳态、不建模偏航渐变/尾流输运延迟"这一假设的**电量代价**。
+
+    物理时间尺度（本配置：D=100 m、单排 5D 间距、行中点 = 10D = 1000 m）：
+    * **执行器**：0.3 °/s ⇒ 实测最大块内跳变 5.5° 只需 ~18 s（占 300 s 的 6%）——可忽略；
+    * **尾流输运**：(i−1)·5D/U 秒，第 5 台的入流要等上游的偏航改变**输运过去**：
+      U=6/8/10/14 m/s → 第 5 台滞后 **333/250/200/143 s**（5.6/4.2/3.3/2.4 min），
+      与 5 min 决策周期**同量级**。FLORIS 对这个滞后**一无所知**（源码里 0 处 yaw rate/lag）。
+
+    代理实验（**保守上界**）：把整条逐分钟偏航命令按行中点输运时间（10D/U）整体后移后再
+    评估——真实情况里第 1 台没有上游、本应即时响应，故这样估出来的差值是**偏大**的。
+    同时给出按第 5 台输运时间（20D/U）的更大上界。
+    """
+    import pandas as pd
+
+    series = pd.read_csv('FFC_speed_noise_1.csv').iloc[:n_steps, col].values.astype(float)
+    f, _ = build_model()
+    Y = np.repeat(ys, block, axis=0)                      # (1440,5) 逐分钟命令
+
+    def energy_mwh(p):
+        return float(np.sum(p) / 60.0)
+
+    p_cmd, _ = eval_batch(f, series, Y)
+    p0, _ = eval_batch(f, series, np.zeros((n_steps, NT)))
+    out = dict(base_mwh=energy_mwh(p0), steady_cmd_mwh=energy_mwh(p_cmd), delays={})
+
+    print('  尾流输运时间 (i−1)·5D/U [s]（第 2/3/4/5 台）：')
+    for u in (6.0, 8.0, 10.0, 14.0):
+        t = [(i * SPACING) / u for i in range(1, NT)]
+        print('    U=%4.1f m/s → %s   （行中点 10D/U = %.0f s = %.1f min）'
+              % (u, ' '.join('%5.0f' % x for x in t), 10 * D_ROTOR / u,
+                 (10 * D_ROTOR / u) / 60.0))
+    print('  FLORIS 侧的对应实现：**没有**（源码 grep `yaw.?rate|lag|slew|rate_limit` = 0 命中；'
+          '`core.steady_state_atmospheric_condition()` 逐条件求稳态解）')
+
+    print('\n  延迟代理（保守上界）：')
+    print('    γ≡0 基线                      %8.3f MWh' % energy_mwh(p0))
+    print('    逐分钟命令（稳态假设=FLORIS） %8.3f MWh' % energy_mwh(p_cmd))
+    for tag, nd in (('10D/U（行中点）', 10.0), ('20D/U（第 5 台）', 20.0)):
+        tau_min = (nd * D_ROTOR / np.maximum(series, 1.0)) / 60.0
+        idx = np.clip(np.arange(n_steps) - np.round(tau_min).astype(int), 0, n_steps - 1)
+        p_del, _ = eval_batch(f, series, Y[idx])
+        e = energy_mwh(p_del)
+        print('    命令后移 %-16s %8.3f MWh  （相对稳态假设 %+.2f%%，平均滞后 %.2f min）'
+              % (tag, e, 100 * (e / energy_mwh(p_cmd) - 1), float(tau_min.mean())))
+        out['delays'][tag] = dict(mwh=e,
+                                  delta_vs_steady_pct=float(100 * (e / energy_mwh(p_cmd) - 1)),
+                                  mean_lag_min=float(tau_min.mean()))
     return out
 
 
@@ -651,6 +706,7 @@ def main():
     ap.add_argument('--skip-sens', action='store_true', help='跳过口径敏感性一节')
     ap.add_argument('--skip-diag', action='store_true', help='跳过结构诊断一节')
     ap.add_argument('--skip-day', action='store_true', help='跳过"一天最优轨迹/速率限制"一节')
+    ap.add_argument('--skip-delay', action='store_true', help='跳过"输运延迟代理"一节')
     ap.add_argument('--yaw-rate', default=0.3, type=float,
                     help='偏航角速度 [°/s]，默认 0.3（NREL 5MW 参考机口径）')
     ap.add_argument('--json', default=None, help='把全部结果写入该 JSON 路径')
@@ -689,7 +745,11 @@ def main():
     if not args.skip_series:
         res['wind_series'] = sec_wind_series()
     if not args.skip_day:
-        res['day_trajectory'] = sec_day_trajectory(yaw_rate_deg_s=args.yaw_rate)
+        day_out, day_ys = sec_day_trajectory(yaw_rate_deg_s=args.yaw_rate,
+                                             return_traj=True)
+        res['day_trajectory'] = day_out
+        if not args.skip_delay:
+            res['delay_proxy'] = sec_delay_proxy(day_ys)
     res['elapsed_s'] = time.perf_counter() - t_start
 
     hdr('汇总')
