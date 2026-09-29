@@ -35,10 +35,14 @@ def load(dirname, tag='6'):
     nb_states = next(v.shape[1] for k, v in sd.items() if v.dim() == 2)
     nb_actions = next(v.shape[0] for k, v in sd.items() if v.dim() == 2 and 'fc4' in k) \
         if any('fc4' in k for k in sd) else int(tag)
-    actor = Actor(nb_states, nb_actions, hidden1=16, hidden2=100, init_w=0.003)
+    # 隐藏层维度从 checkpoint 形状读取 (勿写死: 2026-09-29 起生产维度由 16/100 改为 64/128)
+    h1, h2 = sd['fc1.weight'].shape[0], sd['fc2.weight'].shape[0]
+    actor = Actor(nb_states, nb_actions, hidden1=h1, hidden2=h2, init_w=0.003)
     actor.load_state_dict(sd)
-    critic = Critic(nb_states, nb_actions, hidden1=16, hidden2=100, init_w=0.003)
-    critic.load_state_dict(torch.load(cp, map_location='cpu'))
+    csd = torch.load(cp, map_location='cpu')
+    critic = Critic(nb_states, nb_actions, hidden1=csd['fc1.weight'].shape[0],
+                    hidden2=csd['fc4.weight'].shape[0], init_w=0.003)
+    critic.load_state_dict(csd)
     actor.eval(); critic.eval()
     return actor, critic, nb_states, nb_actions
 

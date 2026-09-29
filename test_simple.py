@@ -80,6 +80,8 @@ def main():
 
     # ---- Agent ----
     ns = argparse.Namespace(
+        # ⚠ 本脚本的分支都是**改造前**口径 (H 观测 4 维, 权重 16/100) ⇒ 保持 16/100。
+        #   六个 TD3 方法 (2026-09-29 起 64/128) 请用 test_five_days.py (按 checkpoint 探测维度)。
         hidden1=16, hidden2=100, init_w=0.003, rate=0.01, prate=0.0001,
         warmup=200, epsilon=50000,
         discount=0.98, bsize=32, rmsize=20000, window_length=1, tau=0.001,

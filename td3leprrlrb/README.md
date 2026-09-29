@@ -330,6 +330,7 @@ TensorBoard 新增标量：`seg/wind_low_max`、`seg/wind_high_min`（逐步阈�
 
 **病因**：`model.Actor.init_weights()` 只初始化 `fc1/fc2/fc3` 的 weight 与 `fc4.weight`
 （±`init_w`=0.003），`fc4.bias` 仍是 PyTorch 默认 `U(±1/√fan_in)`，`fan_in = hidden1 = 16`
+（当时口径；2026-09-29 起默认 64 ⇒ `U(±0.125)`）
 ⇒ `U(±0.25)`。而 `WFSim_port.m` 给出 `Cp = 4a(1−a)²`，**a=0 就是停机（Cp=0）**。
 初始策略的"基准工作点"≈ bias 本身，于是初始 ΣCp 只有 ~0.4 甚至为负（负 bias 被
 `env.PowerOutput` 的 `clip(a,0,0.5)` 夹成 0），实测 5 个种子里 2~4 台机永久停机。

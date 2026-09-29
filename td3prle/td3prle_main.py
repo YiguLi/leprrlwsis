@@ -957,18 +957,21 @@ if __name__ == "__main__":
                         default='TD3PRLE',
                         type=str,
                         help='open-ai gym environment')
+    # 网络宽度 (H/L 共用): 2026-09-29 由 16/100 提升到 64/128。
+    #   ⚠ 改维度后旧 run 的 .pkl 不可直接复载 (fc1/fc3 形状不同)。
     parser.add_argument('--hidden1',
-                        default=16,
+                        default=64,
                         type=int,
                         help='hidden num of first fully connect layer')  # 400
     parser.add_argument('--hidden2',
-                        default=100,
+                        default=128,
                         type=int,
                         help='hidden num of second fully connect layer')  # 300
+    # critic lr: 2026-09-29 由 0.01 改为 1e-3 (actor lr 仍 1e-4, 见 --prate)
     parser.add_argument('--rate',
-                        default=0.01,
+                        default=0.001,
                         type=float,
-                        help='learning rate')
+                        help='critic net learning rate')
     parser.add_argument('--prate',
                         default=0.0001,
                         type=float,
@@ -1003,10 +1006,12 @@ if __name__ == "__main__":
                         choices=['min', 'mean'],
                         help='H 层 twin profit-critic 的 target 聚合 '
                              '(min = TD3 原口径; mean = 去掉悲观偏差)')
-    parser.add_argument('--bsize', default=128, type=int,
+    # minibatch / memory 条数: 2026-09-29 由 128/20000 提升到 256/40000
+    #   (40000 条 = 1000k 环境步, nstep=5; 复现 run12~run16 请传 --rmsize 20000)
+    parser.add_argument('--bsize', default=256, type=int,
                         help='minibatch size')  #64
     parser.add_argument('--rmsize',
-                        default=20000,
+                        default=40000,
                         type=int,
                         help='memory size') # 6000000
     # ---- 越界乘性惩罚 ----

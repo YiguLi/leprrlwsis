@@ -410,18 +410,44 @@ def _detect_nb_states(model_dir, nb_actions=6):
     return None
 
 
-def _build_args(device, seed):
-    """构造 agent 构造函数需要的 args 命名空间（各项目 main 默认值的并集）。"""
+def _detect_hidden(model_dir, nb_actions=6):
+    """从 actor_<nb_actions>.pkl 的 fc1/fc2 权重反推 H 网络 (hidden1, hidden2)。
+
+    为什么必须探测而不能写死: 一次评测里同时有
+      * 6 个 TD3 方法 —— 2026-09-29 起生产维度 64/128, 此前 run (<= run16) 是 16/100;
+      * 3 个改造前项目 (per/prrbb/prle) —— 仍是 16/100。
+    rate/bsize/rmsize 只影响训练, 纯前向评测下不生效; **只有隐层维度必须与权重一致**。
+    """
+    import torch
+    path = os.path.join(model_dir, 'actor_{}.pkl'.format(nb_actions))
+    if not os.path.isfile(path):
+        return None
+    sd = torch.load(path, map_location='cpu')
+    if not isinstance(sd, dict) or 'fc1.weight' not in sd or 'fc2.weight' not in sd:
+        return None
+    return int(sd['fc1.weight'].shape[0]), int(sd['fc2.weight'].shape[0])
+
+
+def _build_args(device, seed, hidden=None):
+    """构造 agent 构造函数需要的 args 命名空间。
+
+    hidden : (hidden1, hidden2) or None
+        H/L 隐层宽度, **按模型目录探测后覆写**(见 _detect_hidden); None 时用下面
+        的默认值 (= 六个 TD3 main 的当前默认)。
+    """
     ns = argparse.Namespace()
-    ns.hidden1 = 16
-    ns.hidden2 = 100
-    ns.rate = 0.01
+    # 默认值 = 六个 TD3 main 的当前默认; 真实维度在 _build_args 末尾按 checkpoint 覆写
+    ns.hidden1 = 64
+    ns.hidden2 = 128
+    ns.rate = 0.001
     ns.prate = 0.0001
     ns.warmup = 200
     ns.discount = 0.98
     ns.l_discount = 0.98
-    ns.bsize = 32
-    ns.rmsize = 20000
+    ns.bsize = 32          # 纯前向评测, 不更新网络; 保留小值即可
+    ns.rmsize = 40000
+    if hidden:
+        ns.hidden1, ns.hidden2 = int(hidden[0]), int(hidden[1])
     ns.window_length = 1
     ns.tau = 0.001
     ns.ou_theta = 0.15
@@ -1156,7 +1182,8 @@ def main():
         writer = SummaryWriter(tb_dir)
         print('TensorBoard: {}'.format(tb_dir))
 
-    run_args = _build_args(device, args.seed)
+    # 注意: run_args 现在按模型目录构造 (见下面循环) —— 各 run 的网络维度可以不同
+    # (历史 run 16/100 vs 2026-09-29 起的 64/128 vs 改造前项目仍 16/100)。
 
     all_days = []
     n_step_rows = 0
@@ -1179,6 +1206,8 @@ def main():
                 print('  方法 {}  ({})  第 {}/{} 组模型  <- {}'
                       .format(label, key, run_no, len(model_dirs), model_dir))
                 print('-' * 96)
+                run_args = _build_args(device, args.seed,
+                                       _detect_hidden(model_dir, 6))
                 runner = ProjectRunner(
                     key, model_dir, device, run_args, engine,
                     phase_feat=args.phase_feat, soc_init=args.soc_init,

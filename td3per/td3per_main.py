@@ -101,10 +101,10 @@ def init_wt_action_bias(agent, lo=0.05, hi=0.45, sig_value=0.0, verbose=True):
 
     为什么必须做 (run160/初始策略诊断):
       `model.py` 的 Actor 只把 fc4.weight 初始化成 ±init_w(0.003),
-      fc4.bias 仍是 PyTorch 默认 U(−1/√fan_in)=U(±0.25) (fan_in=hidden1=16);
+      fc4.bias 仍是 PyTorch 默认 U(−1/√fan_in)=U(±0.125) (fan_in=hidden1=64);
       而 a 与功率系数的关系是 Cp = 4a(1−a)² (见 WFSim_port.m):
         a=0 → Cp=0 (该机零出力/停机),  a=1/3 → Cp=0.593 (Betz 最大),  a=0.5 → Cp=0.5。
-      于是初始策略 ≈ bias: 实测 5 个种子 → 死机 2~4 台、全场 ΣCp 仅 0.47~0.72
+      于是初始策略 ≈ bias: 实测 5 个种子 (旧 16/100 口径) → 死机 2~4 台、全场 ΣCp 仅 0.47~0.72
       (效率 16%~24%)。策略从"半停机"出发, 而 a<0 区被 CheckAction 裁掉后梯度为 0
       → 若没有恢复力就会长期停在停机态。
     bias∈[lo,hi]=[0.05,0.45] 覆盖"上游降载 → 末台单机最优"的整个区间, **故意不预设**风场最优的形状
@@ -861,18 +861,21 @@ if __name__ == "__main__":
                         default='TD3PER',
                         type=str,
                         help='open-ai gym environment')
+    # 网络宽度 (H/L 共用): 2026-09-29 由 16/100 提升到 64/128。
+    #   ⚠ 改维度后旧 run 的 .pkl 不可直接复载 (fc1/fc3 形状不同)。
     parser.add_argument('--hidden1',
-                        default=16,
+                        default=64,
                         type=int,
                         help='hidden num of first fully connect layer')
     parser.add_argument('--hidden2',
-                        default=100,
+                        default=128,
                         type=int,
                         help='hidden num of second fully connect layer')
+    # critic lr: 2026-09-29 由 0.01 改为 1e-3 (actor lr 仍 1e-4, 见 --prate)
     parser.add_argument('--rate',
-                        default=0.01,
+                        default=0.001,
                         type=float,
-                        help='learning rate')
+                        help='critic net learning rate')
     parser.add_argument('--prate',
                         default=0.0001,
                         type=float,
@@ -923,20 +926,21 @@ if __name__ == "__main__":
                         help='越界乘性惩罚系数 c: 风机收益 × exp(-c·Σ前5维越界量) '
                              '(默认 %.1f = **关闭**; 5.0 = 已证伪的旧口径, 见 README run14 分析)'
                              % VIOL_DERATE_COEF)
-    parser.add_argument('--bsize', default=128, type=int,
+    # minibatch: 2026-09-29 由 128 改为 256
+    parser.add_argument('--bsize', default=256, type=int,
                         help='minibatch size')
     # ---- memory 容量 ----
     #   ⚠ 口径随 nstep 变: 滑窗下 1 条 = n 个块 = 5n 个环境步, 所以"条数"要按
     #   env-step 读: rmsize x 5n = 覆盖的环境步。
-    #   默认 20000 (生产口径, 与 run12/run13 一致): n=5 ⇒ 500k 步 ≈ 1.8 epoch ≈ 347 天,
-    #     即"最近 ~1.8 个 epoch 的滚动窗口"; ≤60k 步的 run 里仍填不满 (12,000 条)。
-    #   复现历史 run1~run10 (1-step) 请传 --rmsize 80000 (= 400k 步, 且与当时一致)。
-    #   其它五个方法没有 n 步 ⇒ 维持 80000 不动 (见 agentutil/test_phase_uniform.py 的例外表)。
+    #   默认 40000 (2026-09-29 由 20000 提升): n=5 ⇒ 1000k 步 ≈ 3.6 epoch ≈ 694 天,
+    #     即"最近 ~3.6 个 epoch 的滚动窗口"。
+    #   复现历史: run1~run10 (1-step 口径) 传 --rmsize 80000 (= 400k 步);
+    #             run12 起的 n=5 生产口径 传 --rmsize 20000 (= 500k 步)。
     parser.add_argument('--rmsize',
-                        default=20000,
+                        default=40000,
                         type=int,
                         help='H 层 memory 条数 (覆盖环境步 = rmsize x 5 x nstep; '
-                             '默认 20000 = 生产口径; 复现 run1~run10 传 80000)')
+                             '默认 40000; 复现 run1~run10 传 80000, run12+ 传 20000)')
     parser.add_argument('--window_length', default=1, type=int, help='')
     parser.add_argument('--tau',
                         default=0.001,
