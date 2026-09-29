@@ -106,6 +106,18 @@ US_DEFAULT = (6.0, 8.0, 10.0, 12.0, 14.0)         # 与 probe_a_farm_structure.p
 U_MIN_ENV, U_MAX_ENV = 3.5, 25.0                  # env.py::PowerOutput 的守卫
 U_TABLE_MAX = 40.0                                # 功率表上界：必须 > U_MAX_ENV，
                                                   # 否则 interp1d(fill_value=0) 会把高风速截成 0
+WIND_SHEAR = 0.0                                  # 全局切变口径（--wind-shear 设定）。
+                                                  # 0.0 = 对齐 2D 的 WFSim（无高度维度）；
+                                                  # 0.12 = FLORIS 随包 default_inputs.yaml 与
+                                                  # 官方 examples/inputs/gch.yaml 的取值。
+                                                  # ⚠ 实测 u=10：0.0 → 固定模式 +47.15%；
+                                                  # 0.12 → +38.00%（差 ~9pp，论文必须声明）
+
+
+def set_wind_shear(v):
+    global WIND_SHEAR
+    WIND_SHEAR = float(v)
+    return WIND_SHEAR
 
 
 def cp_analytic(u, a=A_IND):
@@ -142,22 +154,30 @@ def build_turbine_dict(cosine_loss_exponent_yaw=1.88, ref_tilt=0.0):
 
 def build_model(velocity_model='gauss', deflection_model='gauss',
                 turbulence_model='crespo_hernandez', combination_model='sosfs',
-                cosine_loss_exponent_yaw=1.88, nt=NT, wake_flags=None):
+                cosine_loss_exponent_yaw=1.88, nt=NT, wake_flags=None,
+                wind_shear=None, air_density=RHO):
     """构造 FlorisModel；返回 (model, info)。
 
     `wake_flags` 用于覆盖 `wake:` 下的布尔开关（`enable_secondary_steering` 等）——
     实测 `empirical_gauss` 与 `secondary_steering` 不兼容（`NotImplementedError`），
     所以换模型时必须能关掉它。
+
+    `wind_shear`：**这不是装饰性口径** —— 随包 `default_inputs.yaml` / 官方
+    `examples/inputs/gch.yaml` 都用 **0.12**，而本探针默认 0.0（对齐 2D 的 WFSim）。
+    实测 u=10：shear=0 → 基线 5.9918 MW、固定模式 +47.15%；shear=0.12 → 5.9423 MW、
+    **+38.00%**。即关掉切变会把转向增益抬高约 9 个百分点，论文里必须显式声明。
     """
     from floris import FlorisModel
 
+    ws = WIND_SHEAR if wind_shear is None else float(wind_shear)
+    rho = RHO if air_density is None else float(air_density)
     f = FlorisModel('defaults')
     # 顺序要求（实测）：必须先定 layout 再给 turbine_type —— 否则
     # farm.check_turbine_type 会拿默认布局的 3 台去比 "nt 个 turbine_type" 而报错。
     f.set(layout_x=[float(x) for x in LAYOUT_X[:nt]],
           layout_y=[float(y) for y in LAYOUT_Y[:nt]])
     f.set(turbine_type=[build_turbine_dict(cosine_loss_exponent_yaw)])
-    f.set(wind_shear=0.0, reference_wind_height=D_ROTOR, air_density=RHO)
+    f.set(wind_shear=ws, reference_wind_height=D_ROTOR, air_density=rho)
     for key, val in (('velocity_model', velocity_model),
                      ('deflection_model', deflection_model),
                      ('turbulence_model', turbulence_model),
@@ -172,7 +192,8 @@ def build_model(velocity_model='gauss', deflection_model='gauss',
                 enable_secondary_steering=f.get_param(['wake', 'enable_secondary_steering']),
                 enable_yaw_added_recovery=f.get_param(['wake', 'enable_yaw_added_recovery']),
                 enable_transverse_velocities=f.get_param(['wake', 'enable_transverse_velocities']),
-                air_density=RHO, ti=TI, wind_direction=WIND_DIR_ALIGNED,
+                air_density=rho, ti=TI, wind_direction=WIND_DIR_ALIGNED,
+                wind_shear=ws,
                 layout_x=list(LAYOUT_X[:nt]), layout_y=list(LAYOUT_Y[:nt]),
                 rotor_diameter=D_ROTOR, cp_a033=CP_A, cp_eff=CP_EFF, ct_eff=CT_EFF,
                 a_induced=A_IND, power_scale=POWER_SCALE,
@@ -836,12 +857,18 @@ def main():
     ap.add_argument('--skip-fluct', action='store_true', help='跳过"波动-能量折中"一节')
     ap.add_argument('--yaw-rate', default=0.3, type=float,
                     help='偏航角速度 [°/s]，默认 0.3（NREL 5MW 参考机口径）')
+    ap.add_argument('--wind-shear', default=None, type=float,
+                    help='风切变指数；默认 0.0（对齐 2D WFSim）。'
+                         '取 0.12 = FLORIS 随包 default_inputs.yaml / 官方 gch.yaml 口径'
+                         '（实测会把 u=10 的转向增益从 +47.15% 降到 +38.00%）')
     ap.add_argument('--json', default=None, help='把全部结果写入该 JSON 路径')
     ap.add_argument('--log', default=None, help='把报告（UTF-8）同时写入该文本路径')
     args = ap.parse_args()
 
     us = np.array([float(x) for x in args.us.split(',') if x.strip()])
     gammas = [float(x) for x in args.gammas.split(',') if x.strip()]
+    if args.wind_shear is not None:
+        set_wind_shear(args.wind_shear)
 
     tee = None
     if args.log:
