@@ -659,6 +659,132 @@ def sec_delay_proxy(ys, col=1, n_steps=1440, block=5):
     return out
 
 
+# ---------------------------------------------------------------------------
+# 11. 波动 vs 能量：偏航作为"块级工作点"旋钮的折中曲线（本项目的主目标）
+# ---------------------------------------------------------------------------
+def sec_fluct_tradeoff(ys, col=1, n_steps=1440, block=5,
+                       s_levels=(0.0, 0.25, 0.5, 0.75, 1.0), pf_limit=3.0,
+                       battery_mw=10.0, battery_mwh=6.0):
+    """把偏航当"转向档位 s"（γ = s·γ*），量 **波动控制 vs 盈利** 的折中。
+
+    动机：本项目主目标是"**波动控制条件下的盈利最大化**"。新环境里这两个目标**直接对抗**
+    —— 转向增益按比例放大绝对波动。本节的三个量：
+
+    1. **档位曲线**：s ∈ [0,1] 下的全天电量、|ΔP_w| 分位、超过并网限值 3 MW 的分钟占比；
+    2. **带端点**：±25° 带内可达的 [P_lo(u), P_hi(u)]（第 4 节实测两端模式与 u 无关）；
+    3. **"偏航单独能做到的平滑地板"**：假设 H 层每分钟都把 P_w 拉向上一分钟的 P_w
+       （目标 = 项目 c1 的定义 `|P_G(t)−P_G(t−1)|`），残差 = 目标到 [lo,hi] 的距离。
+       它回答"**多少比例的分钟步，偏航单独就能完全抹平**"，其余才需要电池。
+       （注：这是理想 H 层上界，不是可实现策略；H 每 5 min 才动一次、且不知道未来，实际更低。）
+    """
+    import pandas as pd
+
+    series = pd.read_csv('FFC_speed_noise_1.csv').iloc[:n_steps, col].values.astype(float)
+    f, _ = build_model()
+
+    def energy_mwh(p):
+        return float(np.sum(p) / 60.0)
+
+    def stats(p):
+        d = np.abs(np.diff(p))
+        return dict(energy_mwh=energy_mwh(p), d_mean=float(d.mean()),
+                    d_p95=float(np.percentile(d, 95)), d_p99=float(np.percentile(d, 99)),
+                    d_max=float(d.max()), frac_over=float((d > pf_limit).mean()))
+
+    # ---- 带端点（第 4 节实测：最劣 = 只转末台 25°，最优 = 上游满转）----
+    pat_hi = np.tile(np.array([GAMMA_MAX, GAMMA_MAX, 12.5, 6.25, 0.0]), (n_steps, 1))
+    pat_lo = np.tile(np.array([0.0, 0.0, 0.0, 0.0, GAMMA_MAX]), (n_steps, 1))
+    p_hi, _ = eval_batch(f, series, pat_hi)
+    p_lo, _ = eval_batch(f, series, pat_lo)
+    p_zero, _ = eval_batch(f, series, np.zeros((n_steps, NT)))
+
+    print('  一、带端点（可达工作点范围）')
+    print('     γ≡0 基线        mean %.3f MW   全天 %7.3f MWh'
+          % (p_zero.mean(), energy_mwh(p_zero)))
+    print('     带内最优(γ*)    mean %.3f MW   全天 %7.3f MWh  (%+.1f%%)'
+          % (p_hi.mean(), energy_mwh(p_hi), 100 * (energy_mwh(p_hi) / energy_mwh(p_zero) - 1)))
+    print('     带内最劣        mean %.3f MW   全天 %7.3f MWh  (%+.1f%%)'
+          % (p_lo.mean(), energy_mwh(p_lo), 100 * (energy_mwh(p_lo) / energy_mwh(p_zero) - 1)))
+    print('     ⇒ 相对工作点 γ* 的**下探余量**：%.1f%%（均值 %.3f → %.3f MW）'
+          % (100 * (1 - p_lo.mean() / p_hi.mean()), p_hi.mean(), p_lo.mean()))
+
+    print('\n  二、转向档位 s（γ = s·γ*）的能量-波动折中')
+    print('     s      全天电量[MWh]   增益%    |ΔP|均值  p95    p99    max    >3MW占比')
+    out = dict(band=dict(base_mwh=energy_mwh(p_zero), hi_mwh=energy_mwh(p_hi),
+                         lo_mwh=energy_mwh(p_lo),
+                         turndown_pct=float(100 * (1 - p_lo.mean() / p_hi.mean()))),
+               levels={})
+    Ystar = np.repeat(ys, block, axis=0)
+    for s in s_levels:
+        p, _ = eval_batch(f, series, s * Ystar)
+        st = stats(p)
+        st['gain_vs_base_pct'] = float(100 * (st['energy_mwh'] / energy_mwh(p_zero) - 1))
+        out['levels']['%.2f' % s] = st
+        print('     %.2f   %11.3f   %+6.2f   %7.3f  %5.2f  %5.2f  %5.2f   %5.2f%%'
+              % (s, st['energy_mwh'], st['gain_vs_base_pct'], st['d_mean'],
+                 st['d_p95'], st['d_p99'], st['d_max'], 100 * st['frac_over']))
+
+    # ---- 三、偏航单独能做到的平滑地板（理想 H）----
+    target = np.concatenate([[p_hi[0]], p_hi[:-1]])     # 目标 = 上一分钟的 P_w（γ* 轨迹）
+    residual = np.maximum(0.0, np.maximum(target - p_hi, p_lo - target))
+    p_hat = np.clip(target, p_lo, p_hi)
+    d_hat = np.abs(np.diff(p_hat))
+    d_raw = np.abs(np.diff(p_hi))
+    print('\n  三、偏航单独能做到的平滑地板（目标 = 上一分钟的 P_w，与 c1 定义一致）')
+    print('     γ* 轨迹原始    |ΔP_w| 均值 %.3f  p99 %.3f  max %.3f MW  超 3 MW 占比 %.2f%%'
+          % (d_raw.mean(), np.percentile(d_raw, 99), d_raw.max(),
+             100 * (d_raw > pf_limit).mean()))
+    print('     理想 H 用偏航   |ΔP_w| 均值 %.3f  p99 %.3f  max %.3f MW  超 3 MW 占比 %.2f%%'
+          % (d_hat.mean(), np.percentile(d_hat, 99), d_hat.max(),
+             100 * (d_hat > pf_limit).mean()))
+    print('     偏航**完全抹平**的分钟步占比 %.1f%%；残留 >3 MW 的步占比 %.1f%%'
+          % (100 * (residual <= 1e-9).mean(), 100 * (residual > pf_limit).mean()))
+    print('     残留（偏航管不了、必须交给电池）：均值 %.3f  p99 %.3f  max %.3f MW'
+          % (residual.mean(), np.percentile(residual, 99), residual.max()))
+    print('     电池能力对照：额定 %.0f MW / 容量 %.0f MWh（满功率仅 %.0f min）'
+          % (battery_mw, battery_mwh, battery_mwh / battery_mw * 60))
+    out['floor'] = dict(
+        raw=dict(d_mean=float(d_raw.mean()), d_p99=float(np.percentile(d_raw, 99)),
+                 d_max=float(d_raw.max()), frac_over=float((d_raw > pf_limit).mean())),
+        ideal_h=dict(d_mean=float(d_hat.mean()), d_p99=float(np.percentile(d_hat, 99)),
+                     d_max=float(d_hat.max()), frac_over=float((d_hat > pf_limit).mean())),
+        frac_fully_absorbable=float((residual <= 1e-9).mean()),
+        residual=dict(mean=float(residual.mean()), p99=float(np.percentile(residual, 99)),
+                      max=float(residual.max())),
+        battery=dict(mw=battery_mw, mwh=battery_mwh))
+
+    # ---- 三b、现实口径：H 每 5 min 只能选一次"转向档位 s"（块内恒定）----
+    # 贪心代理：每个块选一个 s，使**块首功率**尽量贴住上一分钟的实际功率（对块内波动的
+    # 缩放效应则由 s 的大小间接体现）。这是 H 层 5-min 粒度的能力上界近似。
+    S = np.linspace(0.0, 1.0, 11)
+    P = np.stack([eval_batch(f, series, s * Ystar)[0] for s in S])       # (11, n_steps)
+    nb = n_steps // block
+    p_blk = np.zeros(n_steps)
+    s_sel = np.zeros(nb)
+    for b in range(nb):
+        sl = slice(b * block, (b + 1) * block)
+        tgt = p_blk[b * block - 1] if b > 0 else P[-1, 0]
+        k = int(np.argmin(np.abs(P[:, b * block] - tgt)))
+        s_sel[b] = S[k]
+        p_blk[sl] = P[k, sl]
+    d_blk = np.abs(np.diff(p_blk))
+    print('     H 层 5-min 粒度（每块一个 s，块内恒定；贪心贴住上一分钟）：')
+    print('       |ΔP_w| 均值 %.3f  p99 %.3f  max %.3f MW  超 3 MW 占比 %.2f%%   '
+          '全天电量 %.3f MWh（%+.1f%%）'
+          % (d_blk.mean(), np.percentile(d_blk, 99), d_blk.max(),
+             100 * (d_blk > pf_limit).mean(), energy_mwh(p_blk),
+             100 * (energy_mwh(p_blk) / energy_mwh(p_zero) - 1)))
+    print('       选中的档位 s：均值 %.2f  p05 %.2f  p95 %.2f（0=不转向, 1=满转向）'
+          % (s_sel.mean(), np.percentile(s_sel, 5), np.percentile(s_sel, 95)))
+    out['floor']['block_greedy'] = dict(
+        d_mean=float(d_blk.mean()), d_p99=float(np.percentile(d_blk, 99)),
+        d_max=float(d_blk.max()), frac_over=float((d_blk > pf_limit).mean()),
+        energy_mwh=energy_mwh(p_blk),
+        gain_vs_base_pct=float(100 * (energy_mwh(p_blk) / energy_mwh(p_zero) - 1)),
+        s_mean=float(s_sel.mean()), s_p05=float(np.percentile(s_sel, 5)),
+        s_p95=float(np.percentile(s_sel, 95)))
+    return out
+
 
 def sec_wind_series(col=1, n_steps=1440):
     hdr('[8] 真实风速序列（FFC_speed_noise_1.csv 第 %d 列，前 %d 步）下的波动量级'
@@ -707,6 +833,7 @@ def main():
     ap.add_argument('--skip-diag', action='store_true', help='跳过结构诊断一节')
     ap.add_argument('--skip-day', action='store_true', help='跳过"一天最优轨迹/速率限制"一节')
     ap.add_argument('--skip-delay', action='store_true', help='跳过"输运延迟代理"一节')
+    ap.add_argument('--skip-fluct', action='store_true', help='跳过"波动-能量折中"一节')
     ap.add_argument('--yaw-rate', default=0.3, type=float,
                     help='偏航角速度 [°/s]，默认 0.3（NREL 5MW 参考机口径）')
     ap.add_argument('--json', default=None, help='把全部结果写入该 JSON 路径')
@@ -750,6 +877,8 @@ def main():
         res['day_trajectory'] = day_out
         if not args.skip_delay:
             res['delay_proxy'] = sec_delay_proxy(day_ys)
+        if not args.skip_fluct:
+            res['fluct_tradeoff'] = sec_fluct_tradeoff(day_ys)
     res['elapsed_s'] = time.perf_counter() - t_start
 
     hdr('汇总')
