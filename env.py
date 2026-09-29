@@ -4,9 +4,26 @@ import numpy as np
 import bisect
 import pandas as pd
 
-import matlab
-
 from util import *
+
+# ---------------------------------------------------------------------------
+# `matlab` 改成**惰性** import（yawflor/README.md §5 的最小改动①）
+# ---------------------------------------------------------------------------
+# 动机：新方法 `yawflor` 用 FLORIS 引擎（`yawflor/yawflor_env.py`），也不需要 MATLAB。
+# 顶层 `import matlab` 会让"没有 MATLAB 的环境/受限沙箱"连 `import env` 都失败
+# （例如只跑 agentutil 下的 FLORIS 契约测试时）。改成按需 import：
+# 走旧 MATLAB 路径的**行为逐位不变**（第一次调用时 import，之后走模块缓存）。
+_matlab_cache = None
+
+
+def _get_matlab():
+    """按需 import matlab（旧 MATLAB 后端专用）。"""
+    global _matlab_cache
+    if _matlab_cache is None:
+        import matlab as _m
+        _matlab_cache = _m
+    return _matlab_cache
+
 
 # Fixed random day sequence — permanently saved to file.
 # Generated once with np.random.RandomState(42).randint(1, 200, size=199).
@@ -16,12 +33,32 @@ _DAY_SEQ_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 FIXED_DAY_SEQUENCE = pd.read_csv(_DAY_SEQ_PATH, header=None).values.flatten().tolist()
 
 class WindBattery:
-    def __init__(self, max_E, num_turbine, upload, engine):
+    # ------------------------------------------------------------------
+    # 标称动作（yawflor/README.md §5 的最小改动③）：**类属性单一真源**
+    # ------------------------------------------------------------------
+    # 旧环境 = 5 维轴向因子 `a` 的标称值 0.3333（单机 `C_p = 4a(1−a)²` 最优点）；
+    # 新环境（`yawflor.yawflor_env.WindBatteryYaw`）覆写为 0.0 —— 那是**无量纲**
+    # 偏航动作 `n`，`n = 0 ⇒ γ = 0°`（单机自损最小）。
+    # `nominal_action` 非 None 时直接用它（可给完整向量）；否则用标量铺满 nt 维。
+    nominal_action_value = 0.3333
+    nominal_action = None
+
+    def nominal(self):
+        """标称动作向量（长度 = num_turbine）。"""
+        if self.nominal_action is not None:
+            return np.asarray(self.nominal_action, dtype=float).reshape(-1)[:self.num_turbine]
+        return np.full(self.num_turbine, float(self.nominal_action_value), dtype=float)
+
+    def __init__(self, max_E, num_turbine, upload, engine, physics=None):
         self.u = 10.
         self.episode_count = 0    # episode counter for fixed day sequence
 
         self.max_E = max_E
         self.engine = engine
+        # `physics=None` ⇒ **现有 MATLAB 路径**（所有既有调用点行为逐位不变；
+        # yawflor/README.md §5 的最小改动②）。非 None ⇒ 由该后端提供 PowerOutput
+        # （接口 = `physics.PowerOutput(u, act)` → 风场总出力 [MW]）。
+        self.physics = physics
         self.min_E = 0.0
 
         self.num_turbine = num_turbine
@@ -71,7 +108,7 @@ class WindBattery:
         self.count_price = 0
         self.pr = self.CalPrice() #FIXME: price
         
-        a_temp = np.ones(self.num_turbine) * 0.3333
+        a_temp = self.nominal()
         temp = self.PowerOutput(self.u, a_temp)
         self.P_G_prev = temp  # 初始 P_G 作为波动计算的基准
         obs = np.array([self.pr, self.u, self.E, temp])
@@ -89,13 +126,18 @@ class WindBattery:
         self.E = 5.
 
         # a_temp = np.array([0.1416, 0.1645, 0.1968, 0.2461, 0.3333])
-        a_temp = np.ones(self.num_turbine) * 0.3333
+        a_temp = self.nominal()
         temp = self.PowerOutput(self.u, a_temp)
         self.P_G_prev = temp  # 初始 P_G 作为波动计算的基准
         obs = np.array([self.pr, self.u, self.E, temp])
         return obs
 
     def PowerOutput(self, u0, act_wind):
+        # 后端分派（README §5 最小改动②）：physics 非 None ⇒ 走新物理引擎（FLORIS），
+        # 动作语义由后端定义（yawflor = 无量纲偏航 n）；None ⇒ 下面这条**逐位不变**
+        # 的 MATLAB 路径。
+        if self.physics is not None:
+            return self.physics.PowerOutput(u0, act_wind)
         if 3.5 <= u0 <= 25:
             # 只取前 num_turbine 维: H 动作是 6 维 (5 台 + SOC 信号), 多传的维会经
             # `zeros(NT,1)+Control.c_prime` 隐式扩展成 NT×K 矩阵, 而 Actuator.m
@@ -104,10 +146,11 @@ class WindBattery:
             act_wind = np.clip(act_wind, 0., 0.5)
             try:
                 u0 = float(u0)
-                target_result = self.engine.WFSim_port(matlab.double([u0]),
-                                                matlab.double([0.0]),
-                                                matlab.double([list(act_wind)]),
-                                                matlab.double([0.0]))
+                _ml = _get_matlab()          # 惰性 import（旧路径行为不变）
+                target_result = self.engine.WFSim_port(_ml.double([u0]),
+                                                _ml.double([0.0]),
+                                                _ml.double([list(act_wind)]),
+                                                _ml.double([0.0]))
             except:
                 print(u0)   
                 print(type(u0))
@@ -250,7 +293,7 @@ class WindBattery:
         self.pr = price_seq[0]
         self.u = wind_seq[0]
 
-        a_temp = np.ones(self.num_turbine) * 0.3333
+        a_temp = self.nominal()
         temp = self.PowerOutput(self.u, a_temp)
         self.P_G_prev = temp  # 初始 P_G 作为波动计算的基准
         obs = np.array([self.pr, self.u, self.E, temp])
