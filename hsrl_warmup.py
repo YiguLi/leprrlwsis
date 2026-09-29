@@ -65,6 +65,30 @@ DT = 1.0 / 60.0
 RATED_POWER = 10.0
 SOC_TOL = 0.0            # 下层无死区 (与各项目 SocTracker 默认一致)
 
+# ---------------------------------------------------------------- 偏航带（yawflor 专用）
+# `yawflor`（FLORIS 引擎）的动作是**无量纲偏航指令** `n ∈ [−1, 1]`，env 内 `γ = 25°·n`
+# （见 `yawflor/README.md` §4 的换算表：**按"占带宽比例"原样平移**，因此这里
+# 不重犯"把风场最优写进先验"的错 —— 先验只编码**单机物理**）。
+#
+#   * `YAW_START = 0`   —— 单机最优点是 γ = 0°（自损最小）；旧环境对应 a = 1/3（Cp 峰）
+#   * `YAW_LO/HI = ±1`  —— 中性**满带**（带宽 2；旧环境带宽 0.5，故步长/噪声按比例放大）
+#   * `YAW_STEP = 0.2`  —— 带宽的 10%（与旧 `WT_STEP=0.05` 占 0.5 带宽的 10% 同比例；
+#                          实测最优轨迹跳变 p99 = 5.5° ≈ 0.22 带宽 ⇒ 自洽）
+#
+# ⚠ 这组常量**只被 `yawflor` 使用**：旧 9 个方法继续用上面的 `WT_*`，行为逐位不变
+#   （`add_warmup_args(parser, yaw=False)` 默认分支）。
+YAW_START = 0.0
+YAW_STEP = 0.2
+YAW_LO, YAW_HI = -1.0, 1.0
+YAW_WT_NOISE = 0.2       # 探索噪声半宽（带宽的 10%；旧值 0.05 = 0.5 带宽的 10%）
+YAW_PENALTY_NN_H_COEF = 100.0   # 满带越界罚（元/单位）：100 × 带宽 2 = **200 元**，
+                                # 与旧环境 `400 × 0.5 = 200 元` **等值**（README §4）
+
+
+def yaw_band():
+    """偏航带四元组 (start, step, lo, hi)（单一真源；yawflor_main 与测试共用）。"""
+    return YAW_START, YAW_STEP, YAW_LO, YAW_HI
+
 
 # =============================================================================
 # 1. 上层 warmup 调度
@@ -270,19 +294,33 @@ def fill_bess_transition(agent_L, s_L, a_L, r2, c2, s_L_next, done_L,
     return agent_L.observe_jump(s_L, a_L, r2, c2, s_L_next, done_L, **kwargs)
 
 
-def add_warmup_args(parser):
-    """把 warmup 调度的命令行开关挂到各 main 的 parser 上（9 个 main 共用）。"""
+def add_warmup_args(parser, yaw=False):
+    """把 warmup 调度的命令行开关挂到各 main 的 parser 上（9 个 main + yawflor 共用）。
+
+    `yaw=True` ⇒ 默认值换成**偏航带**（`YAW_START/STEP/LO/HI`，无量纲 `n∈[−1,1]`），
+    文案也换成偏航语义。旧 9 个 main 不传该参数 ⇒ 与历史 run 逐位一致。
+    """
+    if yaw:
+        d_start, d_step, d_lo, d_hi = YAW_START, YAW_STEP, YAW_LO, YAW_HI
+        txt = ('偏航指令 n (yawflor: γ = 25°·n)')
+        h_start = 'warmup 偏航动作起始值 (默认 0 = 单机最优点 γ=0°)'
+        h_step = 'warmup 偏航动作每块随机步长 (默认 ±0.2 = 满带宽 2 的 10%)'
+        h_lo = 'warmup 偏航动作 clip 下界 (默认 −1)'
+        h_hi = 'warmup 偏航动作 clip 上界 (默认 +1)'
+    else:
+        d_start, d_step, d_lo, d_hi = WT_START, WT_STEP, WT_LO, WT_HI
+        txt = '上层动作'
+        h_start = 'warmup 风机动作起始值 (默认 1/3 = 单机 Cp 最优)'
+        h_step = 'warmup 风机动作每块随机步长 (默认 ±0.05)'
+        h_lo = 'warmup 风机动作 clip 下界 (默认 0.05)'
+        h_hi = 'warmup 风机动作 clip 上界 (默认 0.45)'
     parser.add_argument('--warmup_sched', default='fixed', choices=['fixed', 'random'],
-                        help='warmup 期上层动作调度: fixed=1/3 起每块±0.05 clip[0.05,0.45]'
-                             ' + 信号维恒 0 (本方案); random=旧的 random_action() 对照臂')
-    parser.add_argument('--warmup_wt_start', default=WT_START, type=float,
-                        help='warmup 风机动作起始值 (默认 1/3 = 单机 Cp 最优)')
-    parser.add_argument('--warmup_wt_step', default=WT_STEP, type=float,
-                        help='warmup 风机动作每块随机步长 (默认 ±0.05)')
-    parser.add_argument('--warmup_wt_lo', default=WT_LO, type=float,
-                        help='warmup 风机动作 clip 下界 (默认 0.05)')
-    parser.add_argument('--warmup_wt_hi', default=WT_HI, type=float,
-                        help='warmup 风机动作 clip 上界 (默认 0.45)')
+                        help='warmup 期%s调度: fixed=%s 起每块随机小步 + 信号维恒 0 '
+                             '(本方案); random=旧的 random_action() 对照臂' % (txt, txt))
+    parser.add_argument('--warmup_wt_start', default=d_start, type=float, help=h_start)
+    parser.add_argument('--warmup_wt_step', default=d_step, type=float, help=h_step)
+    parser.add_argument('--warmup_wt_lo', default=d_lo, type=float, help=h_lo)
+    parser.add_argument('--warmup_wt_hi', default=d_hi, type=float, help=h_hi)
     parser.add_argument('--warmup_bess', default='rule', choices=['rule', 'random'],
                         help='BESS-RL 项目 warmup 期下层行为: rule=RBB窗口+SOC目标跟踪'
                              ' (规则行为体, 无随机); random=旧的 agent_L.random_action()')

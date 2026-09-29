@@ -2,13 +2,16 @@
 # -*- coding: utf-8 -*-
 """warmup 调度 + critic bias 触发修复 的单元测试 —— 不需要 MATLAB。
 
-验证五件事:
+验证七件事:
   1. `first_trigger_step` / `BiasInitTracker`：**修复了旧触发条件**
      （`step == warmup` 落在块首 ⇒ 默认 warmup=200 永不触发），且在首次策略更新前生效
   2. `WarmupSchedule`：起始点、步长、clip 带、可复现性、信号维 = 0（⇔ soc_target = 3）
   3. `WarmupBessRule`：与各项目 `SocTracker.act` **逐位同语义**
   4. `fill_bess_transition`：真实 transition 入池 + 计数（BESS-RL 项目的"事后填入"）
   5. 旧触发条件的反例（warmup=200 下 `step == warmup` 与块末永不同时成立）
+  6. **偏航带契约**（yawflor，P2）：起点 = 0、界内、步长 = 带宽 10%、两端可达、
+     信号维恒 0 —— **不断言任何"最优/效率"**（风场最优是策略要学的函数）
+  7. **满带越界罚等值**（P2）：旧 `400×0.5` == 新 `100×2` == 200 元；下层 1 维不变
 """
 import os
 import sys
@@ -316,5 +319,89 @@ sched_b, rule_b, stats_b = hw.build_from_args(ns_r, _HStub(), object())
 assert rule_b is None and sched_b.action() is None          # random 对照臂
 assert hw.build_from_args(ns, _HStub(), None)[2] is None    # 无 L agent ⇒ 无填入统计
 print('--warmup_sched/--warmup_bess/--warmup_soc_target/--warmup_wt_* 默认(中性宽带领先验)与对照臂 ✓')
+
+# ---------------------------------------------------------------- 6) 偏航带 (P2)
+# 判据 = **纯契约**（起点/界内/步长/两端可达/信号维），与旧环境的第 2 节同构：
+#   * 起点 = 单机最优点（旧 a = 1/3 / 新 n = 0）；
+#   * 带宽：旧 0.5（[0.05,0.45]）→ 新 2（[−1,+1]）；
+#   * 步长与探索噪声 = **带宽的 10%**（旧 0.05 / 新 0.2）—— 这是"按占带宽比例平移"的
+#     唯一含义，绝不编码任何"风场最优在哪"（那是策略要学的函数，见 yawflor/README.md §4）。
+print('--- 6) yawflor 偏航带契约（纯契约；不断言最优/效率）---')
+Y_START, Y_STEP, Y_LO, Y_HI = hw.yaw_band()
+band_y = Y_HI - Y_LO
+assert (Y_START, Y_LO, Y_HI) == (0.0, -1.0, 1.0), (Y_START, Y_LO, Y_HI)
+assert abs(Y_STEP - 0.10 * band_y) < 1e-12, ('步长必须 = 带宽的 10%', Y_STEP, band_y)
+assert abs(hw.YAW_WT_NOISE - 0.10 * band_y) < 1e-12, hw.YAW_WT_NOISE
+# 旧带必须**未被改动**（9 个既有方法的行为逐位不变）
+assert (hw.WT_START, hw.WT_STEP, hw.WT_LO, hw.WT_HI) == (1.0 / 3, 0.05, 0.05, 0.45)
+
+ap_y = argparse.ArgumentParser()
+hw.add_warmup_args(ap_y, yaw=True)
+dy = ap_y.parse_args([])
+assert (dy.warmup_wt_start, dy.warmup_wt_step, dy.warmup_wt_lo, dy.warmup_wt_hi) == \
+    (0.0, 0.2, -1.0, 1.0), vars(dy)
+# 不带 yaw 的默认值不受影响（9 个 main 的调用点）
+ap_o = argparse.ArgumentParser()
+hw.add_warmup_args(ap_o)
+do = ap_o.parse_args([])
+assert (do.warmup_wt_start, do.warmup_wt_step, do.warmup_wt_lo, do.warmup_wt_hi) == \
+    (1.0 / 3, 0.05, 0.05, 0.45)
+
+ns_y = argparse.Namespace(**{**vars(dy), 'seed': 7, 'rbb_rated_power': 10.0})
+sched_y, rule_y, _ = hw.build_from_args(ns_y, _HStub(), object())
+a0y = sched_y.action()
+assert a0y.shape == (6,) and np.allclose(a0y[:5], 0.0) and a0y[5] == 0.0, a0y
+Ay = np.array([a0y] + [sched_y.action() for _ in range(120)])
+assert Ay.shape == (121, 6)
+assert Ay[:, :5].min() >= Y_LO - 1e-12 and Ay[:, :5].max() <= Y_HI + 1e-12
+assert np.all(Ay[:, 5] == 0.0), '信号维必须恒 0（⇔ soc_target = 3）'
+dy_steps = np.diff(Ay[:, :5], axis=0)
+assert np.all(np.abs(dy_steps) <= Y_STEP + 1e-12), np.abs(dy_steps).max()
+short_y = np.abs(dy_steps) < Y_STEP - 1e-12
+wall_y = np.isclose(Ay[:, :5], Y_LO) | np.isclose(Ay[:, :5], Y_HI)
+assert np.all((wall_y[:-1] | wall_y[1:])[short_y]), '截断只应发生在贴墙处'
+assert Ay[:, :5].min() <= Y_LO + 0.2 and Ay[:, :5].max() >= Y_HI - 0.2, \
+    '满带必须被真正走到两端 (seed=7 实测 min=-1 / max=+1)'
+print('121 块（偏航带）: n∈[{:.3f},{:.3f}] 步长 |Δ|∈[{:.3f},{:.3f}] 起点 {:.1f} '
+      '信号维恒 0 ✓'.format(Ay[:, :5].min(), Ay[:, :5].max(), np.abs(dy_steps).min(),
+                            np.abs(dy_steps).max(), a0y[0]))
+# 独立 RNG 流（与旧调度同一条约定）
+st0 = np.random.get_state()
+_ = [hw.WarmupSchedule(5, 6, start=Y_START, step=Y_STEP, lo=Y_LO, hi=Y_HI,
+                       seed=3).action() for _ in range(50)]
+st1 = np.random.get_state()
+assert st0[0] == st1[0] and np.array_equal(st0[1], st1[1]) and st0[2:] == st1[2:]
+
+# ---------------------------------------------------------------- 7) 越界罚等值 (P2)
+# "满带越界 = 200 元"是**经济口径**：旧环境 400 元/单位 × 带宽 0.5 = 200；
+# 新环境带宽 2 ⇒ 系数必须 ÷4 = 100。等比例越界（带宽的 25%）罚也必须相同。
+print('--- 7) 满带越界罚 = 200 元（与旧环境等值）---')
+import td3per.td3per_myfunc as old_mf          # noqa: E402
+import yawflor.yawflor_myfunc as new_mf        # noqa: E402
+
+assert old_mf.PENALTY_NN_H_COEF == 400.0, old_mf.PENALTY_NN_H_COEF
+assert new_mf.PENALTY_NN_H_COEF == 100.0, new_mf.PENALTY_NN_H_COEF
+assert abs(new_mf.PENALTY_NN_H_COEF * 2.0 - 200.0) < 1e-12
+# 满带越界（越界量恰好 = 带宽）
+_a, p_old_full = old_mf.CheckAction(np.array([0.5 + 0.5, 0., 0., 0., 0., 0.]))
+_a, p_new_full = new_mf.CheckAction(np.array([1.0 + 2.0, 0., 0., 0., 0., 0.]))
+assert p_old_full == 200.0 and p_new_full == 200.0, (p_old_full, p_new_full)
+# 等比越界（带宽的 25%）= 50 元 两臂相同；下界越界同理（旧带宽 0.5 ⇒ −0.125；新带宽 2 ⇒ −1.5）
+_a, p_old_q = old_mf.CheckAction(np.array([0., 0., 0., 0., -0.125, 0.]))
+_a, p_new_q = new_mf.CheckAction(np.array([0., 0., 0., 0., -1.5, 0.]))
+assert abs(p_old_q - 50.0) < 1e-12 and abs(p_new_q - 50.0) < 1e-12, (p_old_q, p_new_q)
+# 夹带：偏航维必须夹到 [−1,+1]（旧环境夹到 [0,0.5]）
+ap_new, _p = new_mf.CheckAction(np.array([5.0, -5.0, 0.0, 0.0, 0.0, 0.9]))
+assert np.allclose(ap_new, np.array([1.0, -1.0, 0.0, 0.0, 0.0, 0.5])), ap_new
+# 下层 1 维动作**保持旧口径**（±10 MW；200 元/单位，不进 r2）
+assert abs(new_mf.PENALTY_NN_L_COEF - old_mf.PENALTY_NN_L_COEF) < 1e-12
+al, pl = new_mf.CheckAction(np.array([12.0]))
+assert np.allclose(al, np.array([10.0])) and pl == 400.0, (al, pl)
+# --viol_derate 的越界量带也必须跟着动作带换（默认关 ⇒ 恒 1.0）
+assert abs(new_mf.violation_derate(np.array([1.5, 0., 0., 0., 0.]), 1.0) -
+           np.exp(-1.0 * 0.5)) < 1e-12
+assert abs(new_mf.violation_derate(np.array([1.0, 0., 0., 0., 0.]), 1.0) - 1.0) < 1e-12
+assert abs(new_mf.violation_derate(np.array([9.9, 0., 0., 0., 0.]), 0.0) - 1.0) < 1e-12
+print('旧 400×0.5 = 新 100×2 = 200 元；等比 50 元；夹带 [−1,+1]；下层 ±10 不变 ✓')
 
 print('TEST OK')

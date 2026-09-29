@@ -193,7 +193,8 @@ WIND_CSV = 'FFC_speed_noise_1.csv'
 
 PROJECT_ORDER = ['per', 'prrbb', 'prle',
                  'td3per', 'td3prrbb', 'td3prle',
-                 'td3prrlrb', 'td3perrb', 'td3leprrlrb']
+                 'td3prrlrb', 'td3perrb', 'td3leprrlrb',
+                 'yawflor']
 
 # 每天的三项核心指标（CSV 列名 = TensorBoard tag 末级）
 DAY_METRICS = ('viol_count', 'viol_excess_mw', 'profit_rmb')
@@ -345,6 +346,35 @@ PROJECTS = {
                      rated_power=RATED_POWER),
         soc_random=True,
         ref='td3leprrlrb/td3leprrlrb_main.py',
+    ),
+    # ------------------------------------------------------------------
+    # 方法 10: YAWFLOR —— 偏航 + FLORIS 环境（第二个动作空间 / 第二个物理引擎）
+    #   基线 = td3per，除"动作带 + 物理引擎"外逐字克隆（见 yawflor/README.md 与
+    #   `agentutil/port_yawflor.py` 的替换表）。这里与 td3per 的差异只有三处：
+    #     ① `env` / `env_physics`：FLORIS 后端（**不需要 MATLAB**，matlab=False）
+    #     ② h_kwargs 的 `wt_noise` = 0.2（偏航满带 [-1,+1] 的 10%）
+    #     ③ 动作带由 `env.nominal()`（=0）与 myfunc 的 CheckAction([-1,+1]) 决定
+    #   ⚠ 跨引擎的 profit **不可直接比较**（FLORIS 绝对电平是 WFSim 的 1.74×，
+    #     见 yawflor/README.md §3）⇒ 只同轨比较或比归一化指标（MWh / 超限率）。
+    # ------------------------------------------------------------------
+    'yawflor': dict(
+        label='YAWFLOR',
+        residual=True,          # 下层 = 残余动作 (命令 = hst.rule_action + Δ)
+        agent=('yawflor.yawflor_ddpg', 'SP_TD3'),
+        myfunc='yawflor.yawflor_myfunc',
+        rule_bess=('rbb.rbb_rule_bess', 'RuleBasedBESS'),
+        lower='rl', l_obs='distilled', h_obs='normalize_H',
+        env=('yawflor.yawflor_env', 'WindBatteryYaw'),
+        env_physics=('yawflor.yawflor_env', 'FlorisPhysicsYaw', {}),
+        matlab=False,           # 纯 FLORIS：评测时不启 MATLAB 引擎
+        h_kwargs={**_EMA, **_TD3_H, 'lam_max': 100.0, 'lam_min': 3.0,
+                  'record_update_stats': True,
+                  'wt_noise': 0.2, 'sig_noise_max': 0.2, 'sig_noise_min': 0.05},
+        h_lam=5.0,
+        l_kwargs={**_EMA_L, **_TD3_L, 'lam_max': 500.0, 'lam_min': 10.0},
+        l_cost_limit=0.1,   # = 生产 agent_L.cost_limit (L 口径 ÷100)
+        soc_random=True,
+        ref='yawflor/yawflor_main.py',
     ),
 }
 
@@ -586,8 +616,18 @@ class ProjectRunner:
         self.agent_H, self.agent_L = agent_H, agent_L
 
         # ---- 环境（每项目一个，避免状态串味）----
-        from env import WindBattery
-        self.env = WindBattery(MAX_E, NB_TURBINE, False, engine)
+        # 环境类**按项目注册表解析**（默认仍是 `env.WindBattery` ⇒ 9 个既有方法
+        # 的调用点与行为逐位不变）；`env_physics` 非空时走新物理后端
+        # （yawflor = `FlorisPhysicsYaw`，FLORIS 引擎，不需要 MATLAB）。
+        env_mod_name, env_cls_name = self.spec.get('env', ('env', 'WindBattery'))
+        env_cls, _ = _resolve((env_mod_name, env_cls_name))
+        phy_spec = self.spec.get('env_physics')
+        if phy_spec:
+            phy_cls, _ = _resolve((phy_spec[0], phy_spec[1]))
+            physics = phy_cls(nt=NB_TURBINE, **(phy_spec[2] or {}))
+            self.env = env_cls(MAX_E, NB_TURBINE, False, engine, physics=physics)
+        else:
+            self.env = env_cls(MAX_E, NB_TURBINE, False, engine)
 
         if verbose:
             print('    [{}] 权重 OK: H nb_states={} phase_mode={} '
@@ -623,7 +663,9 @@ class ProjectRunner:
         env.count_wind = 0
         env.u = float(wind_series.iloc[0])
         obs[1] = env.u
-        a_temp = np.ones(env.num_turbine) * 0.3333
+        # 标称动作 = `env.nominal()`（旧环境 = 5 维轴向因子 0.3333；yawflor = 偏航 n=0）。
+        # 旧路径 `np.ones(nt)*0.3333` 与 `WindBattery.nominal_action_value=0.3333` **逐位相同**。
+        a_temp = env.nominal()
         temp = env.PowerOutput(env.u, a_temp)
         env.P_G_prev = temp                   # 波动基准 = 当日首分钟出力
         obs[-1] = temp
@@ -1162,7 +1204,15 @@ def main():
               .format(i + 1, d['iloc'], d['col'], s.mean(), s.min(), s.max()))
 
     # ---- 4. MATLAB 引擎（env.PowerOutput 需要，全脚本共用一个）----
-    engine = ensure_engine()
+    # 只有所选方法里有"走 MATLAB 后端"的项目时才启动（`matlab=False` 的项目 =
+    # yawflor：物理引擎是 FLORIS，纯 Python）⇒ 单测 yawflor 不需要 MATLAB。
+    need_matlab = [k for k in keys if PROJECTS[k].get('matlab', True)]
+    if need_matlab:
+        engine = ensure_engine()
+    else:
+        engine = None
+        print('  跳过 MATLAB 引擎（所选项目全部为纯 Python 后端: {}）'
+              .format(', '.join(PROJECTS[k]['label'] for k in keys)))
 
     out_dir = os.path.abspath(args.output)
     os.makedirs(out_dir, exist_ok=True)
