@@ -29,6 +29,35 @@
 
 **未做**：官方示例复现核对（§6 P0-2）、生产环境实现、训练。
 
+### 0.1 已采纳的决策登记表（**冻结清单**，逐项可追溯到指令/实测/文件）
+
+| # | 项 | **采纳值** | 依据 | 依据细节 |
+|---|---|---|---|---|
+| 1 | 基线方法 | **`td3per`**（上层 TD3 + 下层 RL BESS） | 用户指令 | 双层 RL 都在，可同时检验下层在新电平下的表现 |
+| 2 | 物理引擎 | **FLORIS 4.6.6**（稳态） | 用户指令 | 已装入 `llmenhancedwsis`，无版本冲突 |
+| 3 | **口径优先级** | **① WFSim 给了值 → 用 WFSim 的值 ② 否则用 FLORIS 默认 ③ 都没有 → 官方示例/文献惯例** | 用户指令 | §2.0 |
+| 4 | 动作 | 5 维偏航角 **γ ∈ [−25°, +25°]** + 1 维 SOC 信号；**a 固定 1/3** | 用户指令 | ±25° 是文献众数（Fleming 2017 硬安全限 / King 2021 / Howland 2022） |
+| 5 | 动作单位 | 网络用**无量纲 `n∈[−1,1]`**，env 内 `γ = 25°·n` | 方案默认（工作假设） | §4 换算表；若改物理角度，整表按 25 倍重算 |
+| 6 | 空气密度 | **1.20**（`air_density` = `table.ref_air_density`） | 规则① | WFSim `meshing.m: Rho = 1.20` |
+| 7 | 转子 | **D = 100 m**、`hub_height = 100`、`TSR = 8` | 规则① | WFSim `Drotor=100`（2D 无高度维 ⇒ hub 取 D，无影响） |
+| 8 | 布局 | 单排 **5 台**、**5D** 间距、`y=0` | 规则① | WFSim `Crx = [1,6,11,16,21]·D`、`Cry = 2D`（绝对 y 偏移无意义） |
+| 9 | 功率曲线 | **常数** `Cp_eff = 4a(1−a)²×0.95 = 0.56296`（a≡1/3）、`CT = 8/9`、**无量定上限** | 规则① | WFSim `WFSim_port.m` 的 `c_prime` 与 `meshing.m` 的 `powerscale=0.95` |
+| 10 | `forcescale = 1.5` | **不采用**（保持 CT=8/9） | 实测 | WFSim 隐含 CT=1.3333，FLORIS 夹在 ≤0.9999 且 β 在 CT→1 发散 ⇒ 照搬使基线 +11.8%、增益 −13 pp（更远离 WFSim）；§2.0 裁决 1 |
+| 11 | `Control.phi`（偏航输入） | **不算 WFSim 参数**（`env.py` 恒传 0 ⇒ 通道 100% 休眠） | 代码取证 | §2.0 裁决 2；`Actuator.m` 的 `if input.phi~=0` 分支从不进入 |
+| 12 | 偏航损失指数 | **主臂 1.88**（FLORIS 默认）；**`cos³=3.0` 作敏感性行** | 规则②+文献 | 依据是 Howland 2022 测过 cos³，**与 WFSim 无关**；实测 +37.41% → +26.15% |
+| 13 | 尾流模型 | **GCH**：`gauss`/`gauss`/`crespo_hernandez`/`sosfs` + 三开关全 `true` | 规则② | 随包 `default_inputs.yaml`（`name: GCH`）+ 官方 `gch.yaml` |
+| 14 | 尾流/湍流模型参数 | **随包默认**（含 `crespo` 那套**历史惯性值**） | 规则② | 与论文值不同的对照已实测（−21.2 pp），写进论文声明 |
+| 15 | `solver` | **`turbine_grid` / `turbine_grid_points = 3`** | 规则② | 数值参数但一阶（1/2/3 ⇒ +58.2/+29.0/+38.0%）；**必须在论文里报告** |
+| 16 | 风切变 | **0.12** | 规则② | WFSim 没给；官方 `gch.yaml`/`default_inputs.yaml` 都是 0.12（一阶项，见 §2.2(b)） |
+| 17 | TI / 风向 | **0.06** / **270°** | 规则③ | 引擎默认是空列表 ⇒ 取官方 `gch.yaml`；风向另有 WFSim 对齐（`wind_angle=0` ⇒ 沿 +x ⇒ 270°） |
+| 18 | 更新周期 | H 每 **5 步 = 5 min** | 项目设定 | 与既有 Δt=1 min / 块结构一致（比现场惯例 10 min~2.5 h 快一档，须声明） |
+| 19 | 主目标与指标顺序 | **波动控制优先**：`viol_count → viol_excess_mw → profit_rmb` | 用户指令 | 与 `test_five_days.py` 的 `DAY_METRICS` 一致 |
+| 20 | 基线臂 | **B1 `s≡0` / B2 `s≡1` / B3 `s≡0.5` / B4 块级规则调度** + **P5 平面支配判据** | 方案 | 门槛 = B4：**117.486 MWh / 超限 15.98%**（§7） |
+| 21 | 速率感知对照臂 | 按 **Wang et al. 2026** 开 `YAW_RATE_MAX_DEG_PER_BLOCK` 并报告**执行器占空比** | 文献 | 默认关；这是"执行器现实性"的已发表做法 |
+| 22 | λ 口径 | `LAM_MIN` **不重标定**（"每 MW"口径与风场电平无关）；只**核查 `LAM_MAX` 饱和** | 方案 | §7 附加项 |
+| 23 | 口径冻结 | **`agentutil/test_yawflor_config.py` 42 项断言 + `--json` 快照** | 已实现 | 首跑抓出 2 个问题（含"表自变量是 `u_eff`"的真实陷阱） |
+| 24 | 明确不做 | 载荷/疲劳、偏航速率与一阶延迟（默认关）、输运延迟（默认关）、额定上限、风向时变、FAST.Farm/SOWFA | 用户指令+文献惯例 | §8 |
+
 ---
 
 ## 1. 核心张力：能量与波动**同比放大**（本方案的立论）
@@ -154,20 +183,15 @@ hybrid model (GCH)"`）与官方示例输入 `examples/inputs/gch.yaml`，加上
 > 这既是换引擎的正当理由，也说明两套环境在"偏航"这件事上**没有可比物**：
 > 跨环境只能比"波动控制下的盈利"，不能比"偏航增益"。
 
-**按规则 ② 逐行结账**（WFSim 没给的项）：
+**按三条规则逐行结账**（判据 = 这一项 WFSim 有没有给、FLORIS 有没有默认）：
 
-| 分类 | 行数 | 具体 |
-|---|---|---|
-| **照用引擎默认（一字未改）** | **11** | 引擎版本、四个模型名、三个 `enable_*`、尾流模型参数（含 `crespo` 那套历史值）、`solver`、`cosine_loss_exponent_yaw=1.88`、`wind_shear=0.12` |
-| 取**官方示例**值（引擎默认是空列表，官方 `gch.yaml` 给了值） | 2 | `TI=0.06`、`wind_directions=270` |
-| 由**本题算例**决定（FLORIS 的默认值用不了） | 5 | 机型（D/hub/TSR）、常数 Cp/CT 功率曲线、无额定上限、单排 5 台 5D 布局、固定 `a=1/3` |
-| 无默认值（引擎只给机制） | 2 | 动作域 `±25°`、更新周期 `5 min` ⇒ 按文献惯例取值 |
-| **WFSim 给了值 ⇒ 按规则 ① 覆盖 FLORIS 默认** | **3** | `air_density=1.20`、`rotor_diameter=100`、布局 5D 单排 |
-
-⇒ **结论**：新环境的口径 = **WFSim 给了的照用 WFSim（3 项）** + **FLORIS 有默认的照用默认（11 项）
-+ 官方示例（2 项）+ 引擎默认用不了的算例项（5 项）+ 引擎无默认的惯例项（2 项）**；
-唯二的"WFSim 有值但不采用"是 `forcescale`（不可映射且照搬更差，已给实测）与 `phi` 的
-cos³（与"用默认"冲突，作敏感性行）。
+| 规则 | 行数 | 具体 | 备注 |
+|---|---|---|---|
+| **① WFSim 给了值 ⇒ 用 WFSim 的** | **8** | `Rho=1.20`、`Drotor=100`、布局（5 台 5D 单排）、`NT=5`、`powerscale=0.95`、`c_prime=4a(1−a)²`（⇒ 常数 Cp 表）、`a≡1/3`、**风向对齐**（`wind_angle=0` ⇒ 沿 +x，FLORIS 里等价 `wind_directions=270`） | 其中"风向"是**约定映射**（WFSim 给的是 0°，FLORIS 用气象来向） |
+| **② WFSim 没给、FLORIS 有默认 ⇒ 用 FLORIS 默认** | **11** | 引擎版本、四个模型名、三个 `enable_*`、尾流模型参数（含 `crespo` 历史值）、`solver`（含 `turbine_grid_points=3`）、`cosine_loss_exponent_yaw=1.88`、`wind_shear=0.12` | 论文里声明"采用随包默认" |
+| **③ 两者都没给 ⇒ 官方示例 / 文献惯例** | **4** | `TI=0.06`、`wind_directions` 的**数值** 270、动作域 `±25°`、更新周期 `5 min` | 前两项引擎默认是**空列表**；后两项引擎只给机制 |
+| **WFSim 给了但不采用**（逐条有实测理由） | **2** | `forcescale=1.5`（裁决 1：不可映射且照搬更差）、`Control.phi`（裁决 2：休眠通道，不是有效参数） | §2.0 两条裁决 |
+| 引擎默认值用不了的算例项 | 1 | `hub_height=100`（WFSim 是 2D、无高度维；取 =D，对结果无影响） | 声明即可 |
 
 **但"取默认"≠"有出处"** —— 逐条追到随包源码后，官方默认值本身可分五类
 （`agentutil/probe_floris_yaw_structure.py` 第 12 节把每类的杠杆都量了）：
@@ -467,9 +491,9 @@ yawflor/
 | # | 任务 | 交付物 | 验收判据 |
 |---|---|---|---|
 | **P0** | 口径冻结与示例核对 | ① §2 表冻结（**已完成：`agentutil/test_yawflor_config.py` 42 项断言全绿 + 快照落盘**）；② 复现 FLORIS 官方示例 `001_opt_yaw_single_ws.py`（3 台 5D 单排、D=126 m、8 m/s、TI 0.06、GCH）的本地等价版 | ① 契约测试退出码 0；② 示例的基线/最优风场功率与官方页面一致（±1%）⇒ 证明我们的配置没有接错 |
-| **P1** | 环境实现 | `env.py` 三处最小改造 + `yawflor/yawflor_env.py` + `yawflor_turbine.py` | `agentutil/test_yaw_env_contract.py` 全绿：① 契约同形（6 维动作截断、`3.5≤u≤25` 守卫、`P_G_prev` 基准、obs 布局）；② **逐块预取路径与直算路径逐位相同**；③ 确定性/无记忆；④ NaN 不传染（全场 ≥45° 时返回有限值）；⑤ **旧环境默认路径逐位不变**（对 stub engine） |
+| **P1** | 环境实现 | `env.py` 三处最小改造 + `yawflor/yawflor_env.py` + `yawflor_turbine.py` | `agentutil/test_yaw_env_contract.py` 全绿：① 契约同形（6 维动作截断、`3.5≤u≤25` 守卫、`P_G_prev` 基准、obs 布局）；② **逐块预取路径与直算路径逐位相同**；③ 确定性/无记忆；④ NaN 不传染（全场 ≥45° 时返回有限值）；⑤ **旧环境默认路径逐位不变**（对 stub engine）。**实现细节（已实测定死）**：`yawflor_env.py` 必须 ⓵在 `import floris` **之前**设 `os.environ.setdefault('MPLCONFIGDIR', <ROOT>/output/_mplcache)`（floris 会间接 import matplotlib，后者要写 `~/.matplotlib`，受限沙箱下报 `Permission denied`）；⓶**逐块预取**（块首把该块 5 个风速一次向量化算完，块内 5 步直接查表）—— 单条 40 ms vs 批量 0.58 ms/条 ⇒ 58.3 s/episode → ~0.3 s/episode；⓷NaN 守卫（`gauss` 挠曲在**全场同时 ≥45°** 时 `wake_deflection/gauss.py:189` 的 `sqrt` 出 NaN） |
 | **P2** | 动作口径与先验 | 按 §4 表改 `hsrl_warmup`（新增偏航带常量，保持"单一真源"）+ `init_wt_action_bias` + `CheckAction` | `agentutil/test_warmup_schedule.py` 扩一条偏航带契约（起点=0、界内、步长=带宽 10%、两端可达、**不断言任何"最优/效率"**）；满带越界罚 = 200 元（与旧环境等值） |
-| **P3** | 方法克隆（基线 `td3per`） | `yawflor/{__init__,yawflor_main,yawflor_ddpg,yawflor_myfunc}.py` | ① diff 清单证明"除动作带与 env 外无差异"；② `--steps 3000` 冒烟不 NaN、日志增量落盘正常 |
+| **P3** | 方法克隆（基线 `td3per`） | `yawflor/{__init__,yawflor_main,yawflor_ddpg,yawflor_myfunc}.py` | ① diff 清单证明"除动作带与 env 外无差异"；② `--steps 3000` 冒烟不 NaN、日志增量落盘正常。⚠ **克隆基线以当前 HEAD 为准**：`td3per/td3per_main.py` 已被并行提交 `50de2d7` 改过默认值（hidden **64/128**、critic lr **1e-3**、bsize **256**）⇒ 新方法必须复制**新**默认，否则与基线不可比 |
 | **P4** | 评测接线 | `test_five_days.py` 的 env 解析 + `'yawflor'` 注册项 | ① 能跑完 5 天评测；② **回归**：同一 seed 下旧 9 个方法之一的评测结果与改动前逐位一致 |
 | **P5** | 训练与评测（**波动优先**） | ≥3 个 run + 4 条基线臂 + 报告 | 见 §7 的完整验收协议 |
 | **P6** | 文档 | 本文件补"实测结果"节 + 根 `README.md` 增"方法 10：YAWFLOR" | 口径表 / 引用 / 范围声明 / 敏感性表四件齐全 |
@@ -525,14 +549,19 @@ yawflor/
 
 ---
 
-## 9. 证据索引（只读探针，11 节）
+## 9. 证据索引（只读探针，12 节）
 
 | 文件 | 内容 |
 |---|---|
-| `agentutil/probe_floris_yaw_structure.py` | 探针源码（11 节：①单机标定 ②均匀族扫描 ③逐台最优 ④带内权限 ⑤不变量 ⑥耗时拆解 ⑥b 结构诊断 ⑦模型/指数敏感性 ⑧真实序列波动量级 ⑨一天最优轨迹+速率限制代价 ⑩输运延迟代理 ⑪波动-能量折中） |
-| `output/probe_floris_yaw.log` | ①–⑧ 主报告 |
+| `agentutil/probe_floris_yaw_structure.py` | 探针源码（12 节：①单机标定 ②均匀族扫描 ③逐台最优 ④带内权限 ⑤不变量 ⑥耗时拆解 ⑥b 结构诊断 ⑦模型/指数敏感性 ⑧真实序列波动量级 ⑨一天最优轨迹+速率限制代价 ⑩输运延迟代理 ⑪波动-能量折中 ⑫**引擎默认值的来源类型与杠杆**）。口径开关：`--wind-shear`（0.12 = 官方，主臂）、`--yaw-rate`、`--skip-*` |
+| `output/probe_floris_yaw.log` | ①–⑧ 主报告（`wind_shear = 0` 口径） |
 | `output/probe_floris_yaw_day.log` | ⑨⑩（轨迹跳变、速率限制代价、输运延迟） |
 | `output/probe_floris_yaw_fluct.log` | ⑪（**表 A/B/C 的来源**） |
+| `output/probe_yaw_shear012.log` | **官方口径 `wind_shear = 0.12` 下的锚表**（§1 表 A/B/C 与 §7 基线臂的实测来源） |
+| `output/probe_yaw_shear012_sens.log` | 同一口径下的模型敏感性（§2.2(a)） |
+| `output/probe_yaw_defaults.log` | 第 12 节：**引擎默认值的来源类型与杠杆**（§2.2(e)） |
+| `output/yawflor_config_snapshot.json` | **口径快照**（复现性 artifact，由契约测试落盘） |
+| `agentutil/test_yawflor_config.py` | **口径冻结契约**（42 项断言 + 6 条静默失效陷阱） |
 | `output/probe_floris_yaw*.json` | 同上的机器可读版本 |
 | `agentutil/floris_reproducibility_survey.md` | **11 篇论文的口径字段逐篇对照**（含读取/受阻台账、众数值、最常省略字段排序、以及"理想化常数 Cp 有无先例"的专项结论）—— §2.3 的依据 |
 
@@ -547,18 +576,25 @@ python agentutil/probe_floris_yaw_structure.py --skip-opt --skip-sens --skip-dia
 
 ---
 
-## 10. 待拍板的开放项
+## 10. 决策状态（**已定 / 仅剩**）
 
-1. **目录名** `yawflor/` 是否沿用？
-2. **主臂尾流模型**：GCH 主臂 + jensen+jimenez 敏感性（推荐），还是反过来？
-3. **归一化动作**（`n∈[−1,1]`，env 内 ×25°）是否采用（推荐）？替代方案是网络直接用"度"，
-   则 §4 的 `WT_STEP/wt_noise/罚系数` 要整表按 25 倍重算。
-4. **对称化**：主臂不做（推荐，保持与文献同口径）+ 预留开关，可否？
-5. **λ1 饱和**若发生，是否允许在新环境下重设 `LAM_MAX`（旧环境口径不变）？
-6. **`wind_shear` 由 0 改 0.12**（对齐官方 `gch.yaml` / `default_inputs.yaml`）—— 本轮已按
-   官方口径重测全部锚表与 §7 基线臂；若你要保留 `wind_shear = 0`（更贴近 2D 的 WFSim），
-   说一声即可回退（探针 `--wind-shear 0`，数字见 §2.2(b)）。
-7. **主臂是否保留理想化常数 Cp（a≡1/3）**：调研确认它在 FLORIS 文献里**查无先例**
-   （§2.3(c)）。本方案建议保留 + **从第一性原理说明** + 附 NREL 5MW 敏感性（差 2.5 pp）；
-   若你希望主臂就用文献众数机型（`nrel_5MW`），改动只需 `yawflor_turbine.py` 一处，
-   但 §1 锚表要整体重测。
+**已定，不再讨论**（全部落在 §0.1 登记表；此处只列"曾经是开放项、现已关闭"的）：
+
+| 曾开放 | 关闭方式 | 结论 |
+|---|---|---|
+| 空气密度 1.20 vs 1.225 | 规则①（WFSim 给了 `Rho=1.20`） | **1.20** |
+| `wind_shear` 0 vs 0.12 | 规则②（WFSim 没给；官方默认 0.12） | **0.12**，锚表已按此重测 |
+| 主臂机型：常数 Cp vs `nrel_5MW` | 规则①（功率曲线也是 WFSim 给的）+ 调研"常数 Cp 无先例"⇒ 保留 + 敏感性 | **常数 Cp**；`nrel_5MW` 作敏感性（差 2.5 pp） |
+| 偏航损失指数 1.88 vs 3.0 | 裁决 2：`phi` 是休眠通道 ⇒ 规则② | **1.88**；3.0 作敏感性 |
+| `forcescale` 是否照搬 | 裁决 1：实测照搬更远离 WFSim | **不采用** |
+| 主臂尾流模型 | 规则②（随包默认即 GCH）+ 调研 | **GCH**；jensen 作敏感性 |
+| 是否对称化（消除 ±2% 人工左右偏置） | 用户的"用默认"原则 ⇒ 保持 FLORIS 原口径 | **主臂不对称化**；`--yaw_symmetrize` 作对照开关 |
+| 目录名 | 已按 `yawflor/` 落地且无异议 | **`yawflor/`** |
+| 口径表形式与四张入场券 | 用户："按已有论文的标准走" | §2 已冻结 + 契约锁定 |
+
+**仅剩 2 项真正开放**（都不阻塞 P0/P1）：
+
+1. **动作单位**：网络用无量纲 `n∈[−1,1]`（推荐，env 内 ×25°，§4 换算表可按"占带宽度比例"平移）
+   —— 还是网络直接用"度"（则 §4 的 `WT_STEP / wt_noise / 罚系数` 需整表按 25 倍重算）。
+2. **λ1 饱和后的策略**：若 P5 发现 λ1 长期顶在 `LAM_MAX=4.833`，是否允许**只在新环境**内重设
+   `LAM_MAX`（旧 9 个方法的口径保持不变）？
