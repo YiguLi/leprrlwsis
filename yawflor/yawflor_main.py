@@ -71,6 +71,7 @@ sys.path.insert(0, _HSRL_DIR)
 
 from yawflor.yawflor_env import FlorisPhysicsYaw, WindBatteryYaw
 from yawflor import yawflor_turbine as yturb
+from yawflor import yawflor_dual as ydual      # 双通道对偶（默认关 ⇒ 历史口径）
 from yawflor.yawflor_ddpg import SP_TD3
 from util import *
 from yawflor.yawflor_myfunc import (
@@ -455,7 +456,7 @@ def train(num_iterations_H,
             # H 层 EMA 对偶上升 —— 用块实际成本 sum_c1 更新 lam1 (与 d_block_H 同口径)
             if step > args.warmup:
                 agent_H.update_ema_cost(sum_c1)
-                hc.dual_update(agent_H, d_block_H)   # uniform=乘性 / legacy=加性
+                ydual.update(agent_H, d_block_H)     # ema=历史口径 / tail=双通道硬通道
             # L 层 EMA 对偶上升 —— 用块实际成本 sum_c2 更新 lam2 (与 d_block_L 同口径)
             if step > args.warmup:
                 agent_L.update_ema_cost(sum_c2)
@@ -664,6 +665,9 @@ def train(num_iterations_H,
                 'soc_delta': reward_details['soc_delta'],
                 'c1_fluct': reward_details['c1_fluct'],
                 'penalty_NN_H': penalty_NN_H,
+                'exc_tot': reward_details.get('exc_tot', 0.0),
+                'exc_inev': reward_details.get('exc_inev', 0.0),
+                'soft_pen': reward_details.get('soft_pen', 0.0),
                 'penalty_NN_L': penalty_NN_L,
                 'SOC': reward_details['SOC'],
                 'P_F': P_F,
@@ -1092,10 +1096,12 @@ if __name__ == "__main__":
     parser.add_argument('--max_steps', default=0, type=int,
                         help='>0 时覆盖 train_iter_H, 用于短程 A/B')
     hwarm.add_warmup_args(parser, yaw=True)   # 偏航带 [−1,+1] / 起点 0 / 步长 0.2
+    ydual.add_args(parser)                    # 双通道对偶开关（默认 ema = 历史口径）
     args = parser.parse_args()
     hc.set_mode(args.c1_mode)
     hc.set_value_scale(args.value_scale)   # 值函数回归空间归一化 (单一真源)
     hc.set_cost_scale(args.cost_scale)   # cost 通道缩放 (λ 自动跟随)
+    ydual.configure(args)                # 双通道对偶（默认 ema ⇒ 逐位不变）
     _HCFG = hc.h_settings()
     prCyan(hc.summary())
     args.output = get_output_folder(args.output, args.env)

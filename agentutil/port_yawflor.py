@@ -45,6 +45,51 @@ sys.path.insert(0, _HERE)
 DD3_EDITS = []                       # ddpg：**逐字复制，不改**
 
 MYFUNC_EDITS = [
+    # ---- 双通道开关常量（默认关 ⇒ 与历史逐位一致；由 yawflor_dual.configure() 设定）----
+    (
+        '# 退化系数 (元/MWh): 放电侧; 充电侧可以取更小 (k_c = 0 表示只在放电计退化)\n'
+        'DEG_COST_DISCHARGE = 490.0\n'
+        'DEG_COST_CHARGE = 0.0',
+        '# 退化系数 (元/MWh): 放电侧; 充电侧可以取更小 (k_c = 0 表示只在放电计退化)\n'
+        'DEG_COST_DISCHARGE = 490.0\n'
+        'DEG_COST_CHARGE = 0.0\n'
+        '\n'
+        '# ---- yawflor 双通道开关（默认关 ⇒ 与历史逐位一致；由 yawflor_dual.configure() 设定）----\n'
+        '#   规则: ">3 MW 波动绝对不允许" + "<3 MW 原则上不管、可为 Q 平缓适当妥协"\n'
+        '#   硬通道: C1_TAIL_ONLY=True ⇒ c1 := max(0, P_F−3) − W_INEV·exc_inev（只装越限）\n'
+        '#   软通道: r1 -= KAPPA_SOFT·P_F（固定小价，进 r1 而非 c1 ⇒ 不与自适应 λ 混通道）\n'
+        'C1_TAIL_ONLY = False       # False ⇒ c1 保持历史口径 (P_F + 20(P_F−3)⁺)\n'
+        'KAPPA_SOFT = 0.0           # 软通道固定价 [元/(MW·step)]（0 = 关）\n'
+        'W_INEV = 0.0               # 越限中"电池侧不可避"部分的排除权重（0 = 全算）',
+        1, '双通道开关常量（默认关）'),
+    # ---- c1 双通道分支 + 软通道进 r1 ----
+    (
+        '    c1 = c1 + W_GAP * unfeasible_gap\n'
+        '    c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样)\n',
+        '    c1 = c1 + W_GAP * unfeasible_gap\n'
+        '    c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样)\n'
+        '\n'
+        '    # ==== 双通道（yawflor；默认关 ⇒ 上面两行就是最终 c1，逐位不变）====\n'
+        '    #   硬通道 c1 := max(0, P_F − 3) [− W_INEV·exc_inev]  → 进 critic_c，由 λ_hard 自适应定价\n'
+        '    #   软通道 r1 -= KAPPA_SOFT·P_F                       → 固定小价，换 Q 平缓\n'
+        '    exc_tot = max(0.0, P_F - 3.0)\n'
+        "    exc_inev = float(rbb_info.get('inevitable_violation', 0.0) or 0.0)\n"
+        '    soft_pen = 0.0\n'
+        '    if C1_TAIL_ONLY:\n'
+        '        c1 = max(0.0, exc_tot - W_INEV * exc_inev)\n'
+        '        soft_pen = KAPPA_SOFT * P_F\n'
+        '        r1 -= soft_pen\n',
+        1, 'c1 双通道分支 + 软通道进 r1'),
+    # ---- details 增加三个审计列（纯新增键，不改动任何算术）----
+    (
+        "        'c1_fluct': c1,\n"
+        '    }',
+        "        'c1_fluct': c1,\n"
+        "        'exc_tot': exc_tot,\n"
+        "        'exc_inev': exc_inev,\n"
+        "        'soft_pen': soft_pen,\n"
+        '    }',
+        1, 'details 增加 exc_tot/exc_inev/soft_pen 审计列'),
     # ---- 模块 docstring：动作语义换成偏航 ----
     (
         '上层 H (RL, 6 维动作 = 5 台风机桨距 + 1 个 SOC 目标信号)\n'
@@ -173,8 +218,25 @@ MAIN_EDITS = [
         '\n'
         'from yawflor.yawflor_env import FlorisPhysicsYaw, WindBatteryYaw\n'
         'from yawflor import yawflor_turbine as yturb\n'
+        'from yawflor import yawflor_dual as ydual      # 双通道对偶（默认关 ⇒ 历史口径）\n'
         'from yawflor.yawflor_ddpg import SP_TD3',
         1, 'bootstrap + env/agent imports'),
+    (
+        '    hc.set_cost_scale(args.cost_scale)   # cost 通道缩放 (λ 自动跟随)',
+        '    hc.set_cost_scale(args.cost_scale)   # cost 通道缩放 (λ 自动跟随)\n'
+        '    ydual.configure(args)                # 双通道对偶（默认 ema ⇒ 逐位不变）',
+        1, 'hc.set_cost_scale 后接线 ydual.configure'),
+    (
+        '                hc.dual_update(agent_H, d_block_H)   # uniform=乘性 / legacy=加性',
+        '                ydual.update(agent_H, d_block_H)     # ema=历史口径 / tail=双通道硬通道',
+        1, 'λ1 对偶：hc.dual_update → ydual.update'),
+    (
+        "                'penalty_NN_H': penalty_NN_H,",
+        "                'penalty_NN_H': penalty_NN_H,\n"
+        "                'exc_tot': reward_details.get('exc_tot', 0.0),\n"
+        "                'exc_inev': reward_details.get('exc_inev', 0.0),\n"
+        "                'soft_pen': reward_details.get('soft_pen', 0.0),",
+        1, 'CSV 增加 exc_tot/exc_inev/soft_pen 三列'),
     (
         'from td3per.td3per_myfunc import (',
         'from yawflor.yawflor_myfunc import (',
@@ -280,8 +342,9 @@ MAIN_EDITS = [
     # ---- warmup 带参 ----
     (
         '    hwarm.add_warmup_args(parser)',
-        '    hwarm.add_warmup_args(parser, yaw=True)   # 偏航带 [−1,+1] / 起点 0 / 步长 0.2',
-        1, 'add_warmup_args(yaw=True)'),
+        '    hwarm.add_warmup_args(parser, yaw=True)   # 偏航带 [−1,+1] / 起点 0 / 步长 0.2\n'
+        '    ydual.add_args(parser)                    # 双通道对偶开关（默认 ema = 历史口径）',
+        1, 'add_warmup_args(yaw=True) + 双通道开关'),
     # ---- env 构造：FLORIS 后端 ----
     (
         '    env = WindBattery(max_E, args.nb_turbine, upload, engine)\n'

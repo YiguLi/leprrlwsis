@@ -1,0 +1,89 @@
+{
+  "note": "改动前（HEAD 93be291）的 yawflor Cal_Rew_RB / hc.dual_update 基准；生成脚本见 agentutil/_scratch/gen_legacy_fixture.py",
+  "c1_mode": "uniform",
+  "value_scale": 1000.0,
+  "cost_scale": 100.0,
+  "lam_scale": 0.1,
+  "lam_min": 0.9666666666666667,
+  "lam_max": 4.833333333333333,
+  "d_block": 15.0,
+  "penalty_coef": 100.0,
+  "cal_rew": [
+    {
+      "case": 0,
+      "r1": "0x1.a2aaaaaaaaaacp+4",
+      "c1": "0x1.0000000000000p+1",
+      "turbine_profit": "0x1.d000000000000p+5",
+      "bess_profit": "-0x1.3555555555555p+4",
+      "degradation": "0x0.0p+0",
+      "P_F": "0x1.0000000000000p+1",
+      "pen": 12.5,
+      "gap": 0.0
+    },
+    {
+      "case": 1,
+      "r1": "0x1.0400000000000p+4",
+      "c1": "0x1.2147ae147ae14p+0",
+      "turbine_profit": "0x1.5000000000000p+4",
+      "bess_profit": "0x1.e000000000000p+2",
+      "degradation": "0x1.8800000000000p+3",
+      "P_F": "0x1.2147ae147ae14p+0",
+      "pen": 0.0,
+      "gap": 0.0
+    },
+    {
+      "case": 2,
+      "r1": "0x1.b466666666666p+6",
+      "c1": "0x1.8a3d70a3d70a8p+0",
+      "turbine_profit": "0x1.3655555555555p+7",
+      "bess_profit": "-0x1.a222222222222p+3",
+      "degradation": "0x0.0p+0",
+      "P_F": "0x1.8a3d70a3d70a8p+0",
+      "pen": 33.0,
+      "gap": 0.4
+    },
+    {
+      "case": 3,
+      "r1": "0x1.a955555555555p+5",
+      "c1": "0x1.1c28f5c28f5c0p+0",
+      "turbine_profit": "0x1.a955555555555p+5",
+      "bess_profit": "-0x0.0p+0",
+      "degradation": "0x0.0p+0",
+      "P_F": "0x1.1c28f5c28f5c0p+0",
+      "pen": 0.0,
+      "gap": 0.0
+    }
+  ],
+  "dual": [
+    {
+      "lam0": 0.0966667,
+      "ema": 5.0,
+      "lam1": "0x1.8bf258bf258c0p-4"
+    },
+    {
+      "lam0": 0.0966667,
+      "ema": 15.0,
+      "lam1": "0x1.8bf261b1cbbf8p-4"
+    },
+    {
+      "lam0": 0.2,
+      "ema": 60.0,
+      "lam1": "0x1.b2eda1c1c69dap-3"
+    },
+    {
+      "lam0": 0.4833333,
+      "ema": 15.0,
+      "lam1": "0x1.eeeeecb245621p-2"
+    },
+    {
+      "lam0": 0.3,
+      "ema": 0.0,
+      "lam1": "0x1.2d1df5d685a9dp-2"
+    },
+    {
+      "lam0": 0.1,
+      "ema": 3.0,
+      "lam1": "0x1.93193a979482cp-4"
+    }
+  ]
+}

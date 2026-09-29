@@ -111,6 +111,14 @@ SOC_TARGET_MIN, SOC_TARGET_MAX = 0.5, 5.5
 DEG_COST_DISCHARGE = 490.0
 DEG_COST_CHARGE = 0.0
 
+# ---- yawflor 双通道开关（默认关 ⇒ 与历史逐位一致；由 yawflor_dual.configure() 设定）----
+#   规则: ">3 MW 波动绝对不允许" + "<3 MW 原则上不管、可为 Q 平缓适当妥协"
+#   硬通道: C1_TAIL_ONLY=True ⇒ c1 := max(0, P_F−3) − W_INEV·exc_inev（只装越限）
+#   软通道: r1 -= KAPPA_SOFT·P_F（固定小价，进 r1 而非 c1 ⇒ 不与自适应 λ 混通道）
+C1_TAIL_ONLY = False       # False ⇒ c1 保持历史口径 (P_F + 20(P_F−3)⁺)
+KAPPA_SOFT = 0.0           # 软通道固定价 [元/(MW·step)]（0 = 关）
+W_INEV = 0.0               # 越限中"电池侧不可避"部分的排除权重（0 = 全算）
+
 
 def get_wT(wind_level, price_level):
     """Turbine revenue weight. 非分段 ⇒ 恒为 W_TURBINE (=1.0)."""
@@ -296,6 +304,17 @@ def Cal_Rew_RB(observation, observation2, action_rbb, rbb_info,
     c1 = c1 + W_GAP * unfeasible_gap
     c1 = hc.c1_apply(c1, P_F)   # uniform: 波动当量替换 (legacy: 原样)
 
+    # ==== 双通道（yawflor；默认关 ⇒ 上面两行就是最终 c1，逐位不变）====
+    #   硬通道 c1 := max(0, P_F − 3) [− W_INEV·exc_inev]  → 进 critic_c，由 λ_hard 自适应定价
+    #   软通道 r1 -= KAPPA_SOFT·P_F                       → 固定小价，换 Q 平缓
+    exc_tot = max(0.0, P_F - 3.0)
+    exc_inev = float(rbb_info.get('inevitable_violation', 0.0) or 0.0)
+    soft_pen = 0.0
+    if C1_TAIL_ONLY:
+        c1 = max(0.0, exc_tot - W_INEV * exc_inev)
+        soft_pen = KAPPA_SOFT * P_F
+        r1 -= soft_pen
+
     # ==== details ====
     w_wind = get_wT(wind_level, price_level)
     w_bess = get_wB(price_level, wind_level, SOC_decision)
@@ -333,6 +352,9 @@ def Cal_Rew_RB(observation, observation2, action_rbb, rbb_info,
         'inevitable_violation': rbb_info.get('inevitable_violation', 0.0),
         'penalty_NN_H': penalty_NN_H,
         'c1_fluct': c1,
+        'exc_tot': exc_tot,
+        'exc_inev': exc_inev,
+        'soft_pen': soft_pen,
     }
 
     return r1, c1, details
