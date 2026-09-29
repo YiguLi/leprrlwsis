@@ -157,13 +157,85 @@ hybrid model (GCH)"`）与官方示例输入 `examples/inputs/gch.yaml`，加上
 ⇒ **"理想化常数 Cp"（最无文献先例的一行）对本结论只值 2.5 pp**，而模型选型值 50 pp。
 论文里用一行敏感性即可回答这个质疑。
 
-### 2.3 引用清单（**入场券**，逐条落到论文）
+**（d）间距**（本方案 D=100、TI=0.06、`wind_shear 0.12`、前 4 台 +25°/末台 0°）——
+**这是第二个一阶项，且它决定了我们的增益能不能与文献数字相比**：
+
+| 间距 | u=10 基线 | u=10 固定模式 | **增益** | u=8 增益 |
+|---|---|---|---|---|
+| 4D | 5.0456 MW | 7.4471 | +47.6% | +49.3% |
+| **5D（本方案，= WFSim `meshing.m`）** | 5.9423 | 8.2004 | **+38.0%** | +37.2% |
+| 6D（King 2021 的 5 台排） | 6.7475 | 8.7177 | +29.2% | +29.6% |
+| **7D（King 2021 的 3 台排）** | 7.3931 | 9.1147 | **+23.3%** | +22.9% |
+| 8D | 7.9515 | 9.4257 | +18.5% | +18.4% |
+| 10D | 8.8849 | 9.9178 | +11.6% | +12.0% |
+
+⇒ 文献里"单排 3~5 台 6~8D"的模态间距对应 **+18%~+29%**；我们的 **+38% 是 5D 紧间距的直接结果**，
+**引用文献数字时必须同时给出间距**，否则不可比。
+
+### 2.3 与已发表实践对照（依据：`agentutil/floris_reproducibility_survey.md`）
+
+**（a）我们的表**超过**已发表实践**。逐篇核对 11 篇论文（King 2021 / Fleming 2017 / Fleming 2019 /
+Howland 2022 / Lillgrund-LongSim(Siguenza 2026) / WFCRL(NeurIPS 2024) / WindGym / Wang 2026 /
+Dittmer 2024 / Hulsman 2026 …）后的事实：
+
+| 字段 | 已发表实践的实际情况 | 我们 |
+|---|---|---|
+| FLORIS **版本号** | **读完的 4 篇经典论文里只有 1 篇给了**（Fleming 2019 = v1.0.0） | 给（4.6.6） |
+| **湍流模型** | **任何一篇都没有点名**（King 2021 甚至只说"需要更严格的湍流模型"而没说用了哪个） | 给（crespo_hernandez） |
+| **combination/叠加模型** | 从不点名（只有一篇专文研究它） | 给（sosfs） |
+| **三个 `enable_*` 开关** | 从不报告 | 给 |
+| **空气密度** | 从不给数值 | 给（1.20，并注明官方 1.225） |
+| **偏航速率/执行器动力学** | 顶多是定性描述 | 给（常量位置 + 显式声明不建模） |
+| **控制更新周期** | 现场是 1 h（Fleming 2017/2019）、2.5 h（Howland 2022）、10 min（Lillgrund） | 给（5 min） |
+| **稳态假设的显式声明** | 少数（WFCRL、Fleming 2017、Lillgrund 有） | 给（范围声明） |
+
+⇒ 结论：**"审稿人不会问'你凭什么'"这件事我们是超额满足的** —— 表格照 §2.0/§2.2 做即可。
+
+**（b）众数与我们的差异（逐项裁决）**
+
+| 字段 | 文献众数 | 我们 | 裁决 |
+|---|---|---|---|
+| velocity / deflection | Gaussian(Bastankhah) / Jimenez→GCH | gauss+gauss(GCH) | ✅ 众数 |
+| TI | **6% 与 10%**（King 2021） | 0.06 | ✅ 众数 |
+| 单点风速 | **8 m/s** | 用真实 1440 min 序列（3.5~15.1） | ✅ 更强 |
+| 偏航上限 | **20°**（Fleming 2019，载荷驱动）与 **25°**（Fleming 2017 硬安全限；King 2021 5 台排；Howland 2022 ±25°） | **±25°** | ✅ 恰好是众数之一，且有"硬安全限"先例 |
+| 机型与曲线 | 仿真研究用 **NREL 5MW**；曲线一律是**真实查表**（FAST/Bladed/厂家），**从不用解析式** | 常数 Cp（a≡1/3） | ⚠️ **唯一真正的缺口**，见下 |
+| 布局 | 单排 3~5 台、**6~8D** | 单排 5 台、**5D** | ⚠️ 比众数紧 ⇒ 增益偏高（§2.2(d) 已量化） |
+| 更新周期 | 现场 1~2.5 h / 10 min；RL 论文按 step | 5 min | ⚠️ **比所有现场先例都快**；但实测最优轨迹几乎时不变（§2.2 之外，见 §8 R6），慢下来几乎不损失 |
+
+**（c）两个真缺口，各自的处置**
+
+1. **理想化常数 Cp（a≡1/3）在 FLORIS 文献里查无先例**（调研结论 D）：相邻传统只有
+   `cos^p(γ)` 偏航损失模型（Fleming 2017 拟合 p=1.41；Howland 2022 测 cos³γ）——但那是乘在
+   **真实功率曲线**上的；以及 LES 里的**固定诱导执行器盘理想化**与解析风场模型里的常数 Ct 机。
+   **处置**：① 主臂保留（它同时满足"与旧环境同算例"和"把动作变量隔离为唯一变量"两条），
+   但必须**从第一性原理说明**（理想 Betz 执行器盘、定桨距 a=1/3）而**不是引用**；
+   ② 附 §2.2(c) 的 NREL 5MW 敏感性（**只差 2.5 pp**）作为答复；
+   ③ 预留逃生门：主臂整体切 `turbine_type=['nrel_5MW']` 只需改一处（`yawflor_turbine.py`），
+   代价是 §1 锚表全部重测（一次 2.5 min 的探针运行）。
+2. **5D 间距**（比模态 6~8D 紧）：不是缺陷而是**算例定义**（来自 `meshing.m`），
+   但**引用文献增益时必须并列间距**；§2.2(d) 的表就是为此准备的。
+
+### 2.4 引用清单（**入场券**，逐条落到论文）
 
 * FLORIS 软件本体（NLR/NREL，BSD-3；`https://github.com/NatLabRockies/floris`，v4.6.6）。
 * GCH / 二次转向效应：**King, Fleming, King, Martínez-Tossas, WES 6:701–714 (2021)**，doi:10.5194/wes-6-701-2021。
 * 高斯尾流模型：Bastankhah & Porté-Agel (2014), *Renewable Energy*。
-* 现场验证：Fleming et al., WES (2017) 现场测试；Howland et al., PNAS (2019)（**卷期投稿前自行核对**）。
-* FLORIS 用于 RL / 风场控制：NLR 的 DRL 风场控制工作、以及 RL-based wake steering 系列（见 §9 检索线索）。
+* 现场验证：**Fleming et al., WES 2:229–239 (2017)**（偏航上限 25° 的硬安全限出处）与
+  **Fleming et al., WES 4:273–285 (2019)**（偏航上限 20°、更新周期 1 h、显式"steady state"）；
+  Howland et al., PNAS 116(29) (2019) 与 **Howland et al., Nat. Energy (2022), arXiv:2202.06683**
+  （±25°、"|γ|>25° 未做载荷验证"、偏航迟滞与 5° 分辨率）。
+* **最接近的"RL + FLORIS 环境"先例（必须对标）**：**WFCRL**（Bizon Monroc et al., NeurIPS 2024
+  Datasets & Benchmarks, arXiv:2501.13592；含 Horns Rev 1/2、NREL 5MW、10 种布局、
+  显式稳态声明、以及"FLORIS 里 θᵢ 恒等于执行器当前值 ⇒ 无执行器动力学"的原话）。
+* **带执行器速率约束的 FLORIS 控制先例**：**Wang, Dong & Zhao, J. Phys. Conf. Ser. 3224:032066 (2026)**
+  （MAPPO + FLORIS + "realistic actuator rate constraints"，13.00% vs 12.00% 增益，并报告执行器占空比）。
+* 尾流模型/叠加方式的**可复现对照**：Siguenza-Alvarado et al., *Wind Energy* 29:e70126 (2026)
+  （Lillgrund + LongSim，逐工况 TI/切变/veer 表）；Dittmer et al., IET Wind & Solar Integration
+  Workshop (2024)（Jensen 与 Bastankhah 并列）。
+* 偏航死区先例：Hulsman et al., J. Phys. Conf. Ser. 3224:032115（风洞，yaw deadband ±5°）。
+
+> 逐篇字段对照与本清单的原始依据见 `agentutil/floris_reproducibility_survey.md`（11 篇，含读取/受阻台账）。
 
 ### 范围声明（**入场券**，写进环境章节开头，一字不改）
 
@@ -310,7 +382,7 @@ yawflor/
 | R3 | 全场同向 \|γ\| ≥ 45° 时 `gauss` 挠曲模型出 **NaN**（`wake_deflection/gauss.py:189`） | env 必须做有限性守卫（P1 验收④）；±25° 带内安全 |
 | R4 | 绝对电平 ×1.74 ⇒ 跨引擎 profit 不可比；3 MW 限值相对更紧 | 文档红字声明；跨轨只比归一化指标（MWh、超限率） |
 | R5 | "常数最优偏航就能拿 +46%" ⇒ RL 贡献被质疑 | §7 的 B1–B4 四条臂；贡献落在"**能量×波动×电池退化**的时序权衡"上，不落在"找到转向最优" |
-| R6 | 稳态假设忽略渐变（执行器 18 s / 输运 200~333 s / 尾流重建） | 默认不建模（与文献口径一致）；**量化已做**：最优命令后移 10D/U(2.17 min)/20D/U(4.33 min) 电量只差 **−0.00% / −0.01%**（因最优偏航几乎时不变）；仅当策略把偏航当快速执行器来回摆时该假设才变弱 ⇒ P5 用策略自身偏航序列复算该偏差 |
+| R6 | 稳态假设忽略渐变（执行器 18 s / 输运 200~333 s / 尾流重建） | 默认不建模（**与全部已发表 FLORIS 论文一致**：调研确认**没有任何 FLORIS 论文在模型内部建模偏航速率**，约束一律放在控制器/优化器层，见 `agentutil/floris_reproducibility_survey.md` §E；WFCRL 的原话是"FLORIS 里 θᵢ 恒等于执行器当前值"）；**量化已做**：最优命令后移 10D/U(2.17 min)/20D/U(4.33 min) 电量只差 **−0.00% / −0.01%**。**新增对照臂**：按 Wang 2026 的做法开 `YAW_RATE_MAX_DEG_PER_BLOCK` 并报告**执行器占空比**，作为"速率感知"臂 |
 
 **明确不做**：结构载荷/疲劳建模、偏航执行器一阶延迟（默认关）、尾流输运延迟（默认关）、
 额定功率上限、风向时变（风剪切/风向序列）、FAST.Farm/SOWFA 类动态求解器、
@@ -327,6 +399,7 @@ yawflor/
 | `output/probe_floris_yaw_day.log` | ⑨⑩（轨迹跳变、速率限制代价、输运延迟） |
 | `output/probe_floris_yaw_fluct.log` | ⑪（**表 A/B/C 的来源**） |
 | `output/probe_floris_yaw*.json` | 同上的机器可读版本 |
+| `agentutil/floris_reproducibility_survey.md` | **11 篇论文的口径字段逐篇对照**（含读取/受阻台账、众数值、最常省略字段排序、以及"理想化常数 Cp 有无先例"的专项结论）—— §2.3 的依据 |
 
 复现命令（**不需要 MATLAB**；需 `pip install floris`）：
 
@@ -350,3 +423,7 @@ python agentutil/probe_floris_yaw_structure.py --skip-opt --skip-sens --skip-dia
 6. **`wind_shear` 由 0 改 0.12**（对齐官方 `gch.yaml` / `default_inputs.yaml`）—— 本轮已按
    官方口径重测全部锚表与 §7 基线臂；若你要保留 `wind_shear = 0`（更贴近 2D 的 WFSim），
    说一声即可回退（探针 `--wind-shear 0`，数字见 §2.2(b)）。
+7. **主臂是否保留理想化常数 Cp（a≡1/3）**：调研确认它在 FLORIS 文献里**查无先例**
+   （§2.3(c)）。本方案建议保留 + **从第一性原理说明** + 附 NREL 5MW 敏感性（差 2.5 pp）；
+   若你希望主臂就用文献众数机型（`nrel_5MW`），改动只需 `yawflor_turbine.py` 一处，
+   但 §1 锚表要整体重测。
