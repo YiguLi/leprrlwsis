@@ -302,21 +302,25 @@ def add_warmup_args(parser, yaw=False):
     """
     if yaw:
         d_start, d_step, d_lo, d_hi = YAW_START, YAW_STEP, YAW_LO, YAW_HI
-        txt = ('偏航指令 n (yawflor: γ = 25°·n)')
+        # ⚠ help 文本会被 argparse 做一次 `% params` 展开 ⇒ 字面百分号必须写 `%%`
+        #   （否则 `--help` 直接 ValueError: unsupported format character）
+        sched_help = ('warmup 期上层动作调度: fixed=偏航 5 维从 **0** 起每块随机 ±0.2 并 '
+                      'clip 到 [−1,+1] + 信号维恒 0 (本方案); '
+                      'random=旧的 random_action() 对照臂')
         h_start = 'warmup 偏航动作起始值 (默认 0 = 单机最优点 γ=0°)'
-        h_step = 'warmup 偏航动作每块随机步长 (默认 ±0.2 = 满带宽 2 的 10%)'
+        h_step = 'warmup 偏航动作每块随机步长 (默认 ±0.2 = 满带宽 2 的 10%%)'
         h_lo = 'warmup 偏航动作 clip 下界 (默认 −1)'
         h_hi = 'warmup 偏航动作 clip 上界 (默认 +1)'
     else:
         d_start, d_step, d_lo, d_hi = WT_START, WT_STEP, WT_LO, WT_HI
-        txt = '上层动作'
+        sched_help = ('warmup 期上层动作调度: fixed=1/3 起每块±0.05 clip[0.05,0.45]'
+                      ' + 信号维恒 0 (本方案); random=旧的 random_action() 对照臂')
         h_start = 'warmup 风机动作起始值 (默认 1/3 = 单机 Cp 最优)'
         h_step = 'warmup 风机动作每块随机步长 (默认 ±0.05)'
         h_lo = 'warmup 风机动作 clip 下界 (默认 0.05)'
         h_hi = 'warmup 风机动作 clip 上界 (默认 0.45)'
     parser.add_argument('--warmup_sched', default='fixed', choices=['fixed', 'random'],
-                        help='warmup 期%s调度: fixed=%s 起每块随机小步 + 信号维恒 0 '
-                             '(本方案); random=旧的 random_action() 对照臂' % (txt, txt))
+                        help=sched_help)
     parser.add_argument('--warmup_wt_start', default=d_start, type=float, help=h_start)
     parser.add_argument('--warmup_wt_step', default=d_step, type=float, help=h_step)
     parser.add_argument('--warmup_wt_lo', default=d_lo, type=float, help=h_lo)
