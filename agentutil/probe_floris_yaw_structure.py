@@ -518,8 +518,93 @@ def sec_sensitivity(us):
 
 
 # ---------------------------------------------------------------------------
-# 8. 真实风速序列下的波动量级
+# 8b. 真实一天的最优偏航轨迹 → 速率限制的代价（回答"5 min 一次 / 一次能调多少度"）
 # ---------------------------------------------------------------------------
+def sec_day_trajectory(delta_max_list=(2.5, 5.0, 10.0, 20.0, 1e9), col=1, n_steps=1440,
+                       block=5, yaw_rate_deg_s=0.3, block_seconds=300.0):
+    """按"每个 5 min 块重新求一次最优偏航"造出一天的最优轨迹，量 |Δγ*| 的分布，
+    再对若干 Δmax 做速率限制、比较全天电量。
+
+    这是"5 min 调一次现不现实 / 一次最多调多少度"的定量依据：
+    * **执行器上限**（速率口径）= `yaw_rate × block_seconds`；取 NREL 5MW 参考机的
+      yaw rate 0.3 °/s（见本函数参数）⇒ 300 s 内可转 **90°**，远超 ±25° 带宽。
+    * 于是现实约束**不是速率**，而是偏航载荷/占空比（每小时偏航次数）。真正要问的是
+      "**最优轨迹本身需要多快移动**"：|Δγ*| 小 ⇒ 速率限制不咬人。
+    """
+    import pandas as pd
+
+    series = pd.read_csv('FFC_speed_noise_1.csv').iloc[:n_steps, col].values.astype(float)
+    nb = n_steps // block
+    u_blk = series[::block]
+    f, _ = build_model()
+
+    ys = np.zeros((nb, NT))
+    for i, u in enumerate(u_blk):
+        y, _, _ = serial_refine(f, float(u),
+                                passes=((0, 6.25, 12.5, 18.75, 25), (0, 1.5, 3.0, 6.25)))
+        ys[i] = y
+
+    def day_power(Yblk):
+        p, _ = eval_batch(f, series, np.repeat(Yblk, block, axis=0))
+        return p
+
+    def energy_mwh(p):
+        return float(np.sum(p) / 60.0)          # 1 min 一步 ⇒ MW·(1/60 h)
+
+    p0 = day_power(np.zeros((nb, NT)))
+    ps = day_power(ys)
+    d = np.abs(np.diff(ys, axis=0))                          # (nb-1, NT)
+    dmax_blk = d.max(axis=1)                                 # 每块里最大的一维跳变
+
+    print('  执行器速率口径：%.2f °/s × %.0f s = **%.0f°**/块（本环境带宽只有 %.0f°）'
+          % (yaw_rate_deg_s, block_seconds, yaw_rate_deg_s * block_seconds, 2 * GAMMA_MAX))
+    print('  逐块最优偏航的跳变 |Δγ*|（%d 块 × %d 维）：' % (nb - 1, NT))
+    print('    全体      p50 %.2f  p90 %.2f  p99 %.2f  max %.2f  mean %.3f 度'
+          % (np.percentile(d, 50), np.percentile(d, 90), np.percentile(d, 99),
+             d.max(), d.mean()))
+    print('    每块最大维 p50 %.2f  p90 %.2f  p99 %.2f  max %.2f 度'
+          % (np.percentile(dmax_blk, 50), np.percentile(dmax_blk, 90),
+             np.percentile(dmax_blk, 99), dmax_blk.max()))
+    print('    需要动（|Δγ|>1°）的块占比 %.1f%%；>5° 的块占比 %.1f%%；>10° 的 %.1f%%'
+          % (100 * (dmax_blk > 1).mean(), 100 * (dmax_blk > 5).mean(),
+             100 * (dmax_blk > 10).mean()))
+
+    print('\n  速率限制的代价（全天电量，%d 步 = 24 h）：' % n_steps)
+    print('    γ≡0 基线            %8.3f MWh' % energy_mwh(p0))
+    print('    逐块最优(无限制)     %8.3f MWh   %+.2f%%' % (energy_mwh(ps),
+                                                          100 * (energy_mwh(ps) / energy_mwh(p0) - 1)))
+    out = dict(yaw_rate_deg_s=float(yaw_rate_deg_s),
+               actuator_max_per_block_deg=float(yaw_rate_deg_s * block_seconds),
+               base_mwh=energy_mwh(p0), unconstrained_mwh=energy_mwh(ps),
+               unconstrained_gain_pct=float(100 * (energy_mwh(ps) / energy_mwh(p0) - 1)),
+               dgamma_p50=float(np.percentile(d, 50)), dgamma_p90=float(np.percentile(d, 90)),
+               dgamma_p99=float(np.percentile(d, 99)), dgamma_max=float(d.max()),
+               dgamma_mean=float(d.mean()),
+               frac_blocks_move_gt_1deg=float((dmax_blk > 1).mean()),
+               frac_blocks_move_gt_5deg=float((dmax_blk > 5).mean()),
+               limits={})
+    for dmax in delta_max_list:
+        Y = np.zeros((nb, NT))
+        prev = np.zeros(NT)
+        for i in range(nb):
+            Y[i] = np.clip(ys[i], prev - dmax, prev + dmax)
+            prev = Y[i]
+        p = day_power(Y)
+        e = energy_mwh(p)
+        n_hit = int((np.abs(Y - ys).max(axis=1) > 1e-9).sum())
+        need_s = dmax / yaw_rate_deg_s
+        tag = '∞（=无限制）' if dmax > 1e8 else '%.1f°/块' % dmax
+        print('    Δmax = %-11s %8.3f MWh   %+.2f%% (相对无限制 %+.2f%%)  '
+              '受限块数 %3d   转过该角度需 %.0f s（预算 %.0f s）'
+              % (tag, e, 100 * (e / energy_mwh(p0) - 1), 100 * (e / energy_mwh(ps) - 1),
+                 n_hit, need_s, block_seconds))
+        out['limits'][tag] = dict(mwh=e, gain_vs_base_pct=float(100 * (e / energy_mwh(p0) - 1)),
+                                  loss_vs_unconstrained_pct=float(100 * (e / energy_mwh(ps) - 1)),
+                                  n_blocks_clipped=n_hit, actuator_seconds=float(need_s))
+    return out
+
+
+
 def sec_wind_series(col=1, n_steps=1440):
     hdr('[8] 真实风速序列（FFC_speed_noise_1.csv 第 %d 列，前 %d 步）下的波动量级'
         % (col, n_steps))
@@ -565,6 +650,9 @@ def main():
     ap.add_argument('--skip-series', action='store_true', help='跳过真实风速序列一节')
     ap.add_argument('--skip-sens', action='store_true', help='跳过口径敏感性一节')
     ap.add_argument('--skip-diag', action='store_true', help='跳过结构诊断一节')
+    ap.add_argument('--skip-day', action='store_true', help='跳过"一天最优轨迹/速率限制"一节')
+    ap.add_argument('--yaw-rate', default=0.3, type=float,
+                    help='偏航角速度 [°/s]，默认 0.3（NREL 5MW 参考机口径）')
     ap.add_argument('--json', default=None, help='把全部结果写入该 JSON 路径')
     ap.add_argument('--log', default=None, help='把报告（UTF-8）同时写入该文本路径')
     args = ap.parse_args()
@@ -600,6 +688,8 @@ def main():
         res['sensitivity'] = sec_sensitivity(us)
     if not args.skip_series:
         res['wind_series'] = sec_wind_series()
+    if not args.skip_day:
+        res['day_trajectory'] = sec_day_trajectory(yaw_rate_deg_s=args.yaw_rate)
     res['elapsed_s'] = time.perf_counter() - t_start
 
     hdr('汇总')
