@@ -329,6 +329,12 @@ yawflor/
    ③ 标称动作抽成类属性 `nominal_action`（默认 `1/3` 向量）。
 2. `test_five_days.py`：L563 的 `from env import WindBattery` 改为按
    `PROJECTS[key].get('env', ('env', 'WindBattery'))` 解析；加 `'yawflor'` 注册项。
+   ⚠ 2026-09-29 该文件已被并行改动（`50de2d7`）：新增 `_detect_hidden(model_dir)` 从
+   `actor_6.pkl` 的 fc1/fc2 权重**反推网络宽度**，`_build_args(..., hidden=...)` 覆写默认值。
+   ⇒ 对 P4 是**利好**（新方法网络宽度与既有方法不同也能被正确识别），但两条判据要随之更新：
+   ① P4 的"回归逐位一致"参照必须**用新默认（hidden 64/128、critic lr 1e-3、bsize 256）重跑一次**
+   作为基线；② 需确认**下层 `actor_1.pkl`** 也被同一逻辑覆盖（`td3per` 的 H/L 共用
+   `--hidden1/--hidden2`，故宽度一致；`yawflor` 沿用同一约定，预期无风险，但要在 P4 里实测确认）。
 
 **不改**：`test_compare_projects.py`（只覆盖 PER/PRRBB/PRLE，本次不扩展）。
 
