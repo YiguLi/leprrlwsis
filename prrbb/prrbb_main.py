@@ -293,31 +293,37 @@ def train_prrbb(num_iterations_H,
         # ================================================================
         if step > args.warmup:
             if episode_steps % 5 == 4:
-                update_num = 0
-                while update_num < 5:
+                # H/L 层更新频率(UTD): H 每块 args.utd_h 次、L 每块 args.utd_l 次 (默认 5/5)
+                _n_both, _n_h, _n_l = hc.utd_plan(args.utd_h, args.utd_l)
+                for _ in range(_n_both):
                     agent_H.update_policy()
                     agent_L.update_policy()
-                    update_num += 1
+                for _ in range(_n_h):
+                    agent_H.update_policy()
+                for _ in range(_n_l):
+                    agent_L.update_policy()
 
-                    # Track consecutive satisfaction for curriculum learning
-                    # H: EMA 方案 — 判据为实际成本 EMA ≤ d_block
-                    if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
-                        consecutive_satisfied_H += 1
-                    else:
-                        consecutive_satisfied_H = 0
-                    # L: EMA 方案 — 判据为实际成本 EMA ≤ d_block
-                    if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
-                        consecutive_satisfied_L += 1
-                    else:
-                        consecutive_satisfied_L = 0
+                # curriculum 计数: **每层每块各 1 次**(与 UTD 解耦)。
+                #   本 arm 历史上 H/L 都是每块 5 次计数(阈值 100) ⇒ 减半需 20 块:
+                #   H 用 hc.H_CURRICULUM_BLOCKS_5X; L 走"影子电价"支、不在 hsrl_soctarget
+                #   的 SOC 家族口径内, 用 hc.L_CURRICULUM_BLOCKS_SHADOW(=20)。
+                #   EMA 成本每块只在块末更新一次 ⇒ 块内重复检查结论相同。
+                if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
+                    consecutive_satisfied_H += 1
+                else:
+                    consecutive_satisfied_H = 0
+                if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
+                    consecutive_satisfied_L += 1
+                else:
+                    consecutive_satisfied_L = 0
 
                 # Curriculum convergence: tighten constraint targets when
-                # satisfied for 100 consecutive policy updates (EMA: halve d_block)
-                if consecutive_satisfied_H >= 100:
+                # satisfied for the declared number of consecutive blocks (EMA: halve d_block)
+                if consecutive_satisfied_H >= hc.H_CURRICULUM_BLOCKS_5X:
                     d_block_H = max(d_block_H / 2, d_block_H_min)
                     consecutive_satisfied_H = 0
                     prGreen('H: d_block halved to {}'.format(d_block_H))
-                if consecutive_satisfied_L >= 100:
+                if consecutive_satisfied_L >= hc.L_CURRICULUM_BLOCKS_SHADOW:
                     d_block_L = max(d_block_L / 2, d_block_L_min)
                     consecutive_satisfied_L = 0
                     prGreen('L: d_block_L halved to {}'.format(d_block_L))
@@ -620,6 +626,11 @@ if __name__ == "__main__":
                         help='hidden num of first fully connect layer')
     parser.add_argument('--hidden2', default=100, type=int,
                         help='hidden num of second fully connect layer')
+    # ---- UTD（每块 update_policy 次数）: 启动指令可调; 默认 = 历史口径, 逐位不变 ----
+    parser.add_argument('--utd_h', default=5, type=int,
+                        help='H 层每块 update_policy 次数 (默认 5 = 历史口径; 调整它不再改变 d_block_H 的减半节奏)')
+    parser.add_argument('--utd_l', default=5, type=int,
+                        help='L 层每块 update_policy 次数 (默认 5 = 历史口径; 与 H 交替)')
     parser.add_argument('--rate', default=0.01, type=float, help='learning rate')
     parser.add_argument('--prate', default=0.0001, type=float,
                         help='policy net learning rate (only for DDPG)')

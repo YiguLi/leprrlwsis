@@ -269,4 +269,63 @@ print('  EMA=d_block ⇒ 不动; 比值 11 ⇒ {} 块到上限 {:.1f}; 比值 0.
 print('  同比值不同刻度 ⇒ 同一乘子 (无量纲); ema 未建立 ⇒ 不动; 任意比值恒在 [0.5, 2] 内')
 
 print('=' * 84)
+print('F. UTD 可从启动指令调整 + H 层 curriculum 计数与 UTD 解耦 (全仓 11 个 arm)')
+print('=' * 84)
+import hsrl_cost as hc                                              # noqa: E402
+assert (hc.H_CURRICULUM_BLOCKS, hc.H_CURRICULUM_BLOCKS_5X) == (50, 20), \
+    (hc.H_CURRICULUM_BLOCKS, hc.H_CURRICULUM_BLOCKS_5X)
+assert hc.L_CURRICULUM_BLOCKS_SHADOW == 20, hc.L_CURRICULUM_BLOCKS_SHADOW
+# utd_plan 默认值必须逐位复现历史循环: 交织 arm 的 (2, 10) ⇒ 交替 2 + 补 8
+assert hc.utd_plan(2, 10) == (2, 0, 8), hc.utd_plan(2, 10)
+assert hc.utd_plan(5, 5) == (5, 0, 0), hc.utd_plan(5, 5)
+assert hc.utd_plan(5, 10) == (5, 0, 5), hc.utd_plan(5, 10)
+assert hc.utd_plan(4, 3) == (3, 1, 0), hc.utd_plan(4, 3)
+assert hc.utd_plan(2, 10, interleaved=False) == (0, 2, 10)
+
+#: 项目 -> (main, 是否有 L 层, H 层 curriculum 块数, --utd_h 默认值)
+#:   ⚠ "块数"与"默认 UTD"是**两件事**：块数来自**历史计数节奏**，默认 UTD 来自
+#:   **历史每块更新次数**。td3prle 就是两者分离的例子 —— 它每块只更新 H 2 次
+#:   (--utd_h 默认 2)，但历史上把计数循环写成每块 5 次(阈值 100) ⇒ 减半需 20 块。
+UTD_MAINS = {
+    'td3per': ('td3per/td3per_main.py', True, 50, 2),
+    'aifflor': ('aifflor/aifflor_main.py', True, 50, 2),
+    'yawflor': ('yawflor/yawflor_main.py', True, 50, 2),
+    'td3prrbb': ('td3prrbb/td3prrbb_main.py', True, 50, 2),
+    'td3prle': ('td3prle/td3prle_main.py', True, 20, 2),
+    'prle': ('prle/prle_main.py', True, 20, 5),
+    'prrbb': ('prrbb/prrbb_main.py', True, 20, 5),
+    'per': ('PER_main0.py', True, 20, 5),
+    'td3perrb': ('td3perrb/td3perrb_main.py', False, 50, 2),
+    'td3prrlrb': ('td3prrlrb/td3prrlrb_main.py', False, 50, 2),
+    'td3leprrlrb': ('td3leprrlrb/td3leprrlrb_main.py', False, 50, 2),
+}
+for proj, (mp, has_l, h_blocks, utd_h) in UTD_MAINS.items():
+    mt = src(mp)
+    # ① UTD 必须能从启动指令调整（--utd_h 对所有 arm; --utd_l 只对含 L 层的 arm）
+    assert re.search(r"add_argument\('--utd_h'", mt), \
+        (proj, '缺少 --utd_h（UTD 不可从启动指令调整）')
+    assert bool(re.search(r"add_argument\('--utd_l'", mt)) == bool(has_l), \
+        (proj, '--utd_l 的有无与该 arm 是否有 L 层不一致')
+    assert re.search(r"add_argument\('--utd_h', default=%d," % utd_h, mt), \
+        (proj, '--utd_h 默认值不是历史口径 %d' % utd_h)
+    # ② 更新次数必须走参数
+    assert re.search(r'range\(args\.utd_h\)|hc\.utd_plan\(args\.utd_h', mt), \
+        (proj, 'H 层更新次数未接 --utd_h')
+    if has_l:
+        assert re.search(r'range\(args\.utd_l\)|hc\.utd_plan\(args\.utd_h', mt), \
+            (proj, 'L 层更新次数未接 --utd_l')
+    # ③ H 层 curriculum 计数每块恰好一次、阈值按"块数"（不再随 UTD 漂移）
+    n_cnt = mt.count('consecutive_satisfied_H += 1')
+    assert n_cnt == 1, (proj, 'H curriculum 计数出现 %d 次 ⇒ 仍嵌在按 UTD 计数的循环里' % n_cnt)
+    assert re.search(r'consecutive_satisfied_H >= hc\.H_CURRICULUM_BLOCKS%s\b'
+                     % ('' if h_blocks == 50 else '_5X'), mt), \
+        (proj, 'H curriculum 未按"块数"计量')
+    assert not re.search(r'consecutive_satisfied_H >= 100', mt), \
+        (proj, 'H curriculum 仍用"更新次数"阈值 100')
+print('  {} 个 arm: 均有 --utd_h（默认 = 各自历史口径）; {} 个含 L 层的均有 --utd_l'
+      .format(len(UTD_MAINS), sum(1 for _m, l, _b, _u in UTD_MAINS.values() if l)))
+print('  H 计数每块恰好 1 次、阈值用块数常量 ⇒ 调 --utd_h 不再改变 d_block_H 的减半节奏')
+print('  utd_plan: (2,10)→(2,0,8) / (5,5)→(5,0,0) / (5,10)→(5,0,5) 与历史循环逐位等价')
+
+print('=' * 84)
 print('TEST OK')

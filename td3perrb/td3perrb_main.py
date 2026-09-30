@@ -340,15 +340,19 @@ def train(num_iterations_H,
         if step > args.warmup:
             #--------------------Update----------------------
             if episode_steps % 5 == 4:
-                # H 层更新频率: 每块 2 次
-                for _ in range(2):
+                # H 层更新频率(UTD): 每块 args.utd_h 次 (默认 2 = 历史口径)
+                for _ in range(args.utd_h):
                     agent_H.update_policy()
-                    if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
-                        consecutive_satisfied_H += 1
-                    else:
-                        consecutive_satisfied_H = 0
 
-                if consecutive_satisfied_H >= 100:
+                # H 层 curriculum 计数: **每块 1 次**(与 UTD 解耦; EMA 成本每块只更新一次
+                # ⇒ 块内重复检查等价)。阈值 = 块数 hc.H_CURRICULUM_BLOCKS(=50, 等价于
+                # 历史的"2 次/块 × 阈值 100")。
+                if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
+                    consecutive_satisfied_H += 1
+                else:
+                    consecutive_satisfied_H = 0
+
+                if consecutive_satisfied_H >= hc.H_CURRICULUM_BLOCKS:
                     d_block_H = max(d_block_H / 2, d_block_H_min)
                     consecutive_satisfied_H = 0
                     prGreen('H: d_block_H halved to {}'.format(d_block_H))
@@ -817,6 +821,10 @@ if __name__ == "__main__":
                         help='β退火增量/次更新')
     parser.add_argument('--nb_turbine', default=5, type=int,
                         help='number of turbines')
+
+    # ---- UTD（每块 update_policy 次数）: 启动指令可调; 默认 = 历史口径 ----
+    parser.add_argument('--utd_h', default=2, type=int,
+                        help='H 层每块 update_policy 次数 (默认 2 = 历史口径; 本 arm 无 L 层)')
 
     # ---- TD3 specific ----
     parser.add_argument('--policy_delay', default=2, type=int,

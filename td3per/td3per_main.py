@@ -469,20 +469,24 @@ def train(num_iterations_H,
         if step > args.warmup:
             #--------------------Update----------------------
             if episode_steps % 5 == 4:
-                # H 层更新频率: 每块 2 次 (td3perrb 口径)
-                for _ in range(2):
+                # H 层更新频率(UTD): 每块 args.utd_h 次 (默认 2 = td3perrb 口径)
+                for _ in range(args.utd_h):
                     agent_H.update_policy()
-                    # Track consecutive satisfaction for H (EMA 实际成本判据)
-                    if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
-                        consecutive_satisfied_H += 1
-                    else:
-                        consecutive_satisfied_H = 0
 
-                # L 层更新频率: 每块 10 次 (td3per 口径, L 只有 1 维动作)
-                for _ in range(10):
+                # H 层 curriculum 计数: **每块 1 次**(与 UTD 解耦)。
+                #   EMA 成本每块只在块末更新一次 ⇒ 块内重复检查结论相同, 只是把计数多推
+                #   几次。故显式改成每块一次, 阈值改用块数 hc.H_CURRICULUM_BLOCKS(=50,
+                #   等价于历史的"2 次/块 × 阈值 100 = 50 块"), 调 --utd_h 不再漂移节奏。
+                if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
+                    consecutive_satisfied_H += 1
+                else:
+                    consecutive_satisfied_H = 0
+
+                # L 层更新频率(UTD): 每块 args.utd_l 次 (默认 10 = td3per 口径, L 只有 1 维动作)
+                for _ in range(args.utd_l):
                     agent_L.update_policy()
 
-                if consecutive_satisfied_H >= 100:
+                if consecutive_satisfied_H >= hc.H_CURRICULUM_BLOCKS:
                     d_block_H = max(d_block_H / 2, d_block_H_min)  # H: 收紧块预算
                     consecutive_satisfied_H = 0
                     prGreen('H: d_block_H halved to {}'.format(d_block_H))
@@ -998,6 +1002,12 @@ if __name__ == "__main__":
                         help='β退火增量/次更新')
     parser.add_argument('--nb_turbine', default=5, type=int,
                         help='number of turbines')
+
+    # ---- UTD（每块 update_policy 次数）: 启动指令可调; 默认 = 历史口径, 逐位不变 ----
+    parser.add_argument('--utd_h', default=2, type=int,
+                        help='H 层每块 update_policy 次数 (默认 2 = 历史口径; 调整它不再改变 d_block_H 的减半节奏)')
+    parser.add_argument('--utd_l', default=10, type=int,
+                        help='L 层每块 update_policy 次数 (默认 10 = 历史口径)')
 
     # ---- TD3 specific ----
     parser.add_argument('--policy_delay', default=2, type=int,

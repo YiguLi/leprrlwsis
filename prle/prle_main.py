@@ -368,23 +368,27 @@ def train_prle(num_iterations_H,
         # ================================================================
         if step > args.warmup:
             if episode_steps % 5 == 4:
-                update_num = 0
-                while update_num < 5:
+                # H/L 层更新频率(UTD): H 每块 args.utd_h 次、L 每块 args.utd_l 次 (默认 5/5)
+                #   两者交织在同一循环 ⇒ 由 hc.utd_plan 拆成"交替 + 各自补足"。
+                _n_both, _n_h, _n_l = hc.utd_plan(args.utd_h, args.utd_l)
+                for _ in range(_n_both):
                     agent_H.update_policy()
                     agent_L.update_policy()
-                    update_num += 1
-
-                    # Track consecutive satisfaction for curriculum learning
-                    # H/L: EMA 方案 — 判据为实际成本 EMA ≤ d_block
-                    if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
-                        consecutive_satisfied_H += 1
-                    else:
-                        consecutive_satisfied_H = 0
+                for _ in range(_n_h):
+                    agent_H.update_policy()
+                for _ in range(_n_l):
+                    agent_L.update_policy()
                     # (L 的 curriculum 计数已移到块末: 每块 1 次, 阈值 hst.L_CURRICULUM_BLOCKS)
 
-                # Curriculum convergence: tighten constraint targets when
-                # satisfied for 100 consecutive policy updates (EMA: halve d_block)
-                if consecutive_satisfied_H >= 100:
+                # H 层 curriculum 计数: **每块 1 次**(与 UTD 解耦)。
+                #   历史每块 5 次计数(阈值 100) ⇒ 减半需 20 块 ⇒ hc.H_CURRICULUM_BLOCKS_5X。
+                if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
+                    consecutive_satisfied_H += 1
+                else:
+                    consecutive_satisfied_H = 0
+
+                # curriculum 收敛: EMA 成本连续满足 ⇒ d_block_H 减半
+                if consecutive_satisfied_H >= hc.H_CURRICULUM_BLOCKS_5X:
                     d_block_H = max(d_block_H / 2, d_block_H_min)
                     consecutive_satisfied_H = 0
                     prGreen('H: d_block_H halved to {}'.format(d_block_H))
@@ -773,6 +777,11 @@ if __name__ == "__main__":
                         help='hidden num of first fully connect layer')
     parser.add_argument('--hidden2', default=100, type=int,
                         help='hidden num of second fully connect layer')
+    # ---- UTD（每块 update_policy 次数）: 启动指令可调; 默认 = 历史口径, 逐位不变 ----
+    parser.add_argument('--utd_h', default=5, type=int,
+                        help='H 层每块 update_policy 次数 (默认 5 = 历史口径; 调整它不再改变 d_block_H 的减半节奏)')
+    parser.add_argument('--utd_l', default=5, type=int,
+                        help='L 层每块 update_policy 次数 (默认 5 = 历史口径; 与 H 交替)')
     parser.add_argument('--rate', default=0.01, type=float, help='learning rate')
     parser.add_argument('--prate', default=0.0001, type=float,
                         help='policy net learning rate (only for DDPG)')

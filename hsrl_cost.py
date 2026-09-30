@@ -50,6 +50,20 @@ LAM_INIT = LAM_MIN
 ETA_LAM = 0.02            # 乘性对偶步长
 ALPHA_EMA = 0.02          # 块成本 EMA 系数（与各 main 一致）
 
+# ---------------------------------------------------------------- H 层 curriculum 计量
+#: `d_block_H` 减半所需的**连续满足块数**（计数每块 1 次 ⇒ 与 `--utd_h` 解耦）。
+#:
+#: 历史口径是"连续满足的**更新次数** ≥ 100"，而该计数原先嵌在按 UTD 计数的更新
+#: 循环里 ⇒ 同一个 100 在不同 arm 里对应不同块数，调 UTD 会**静默改变**预算减半的
+#: 节奏，把"更新比"混进方法对比。L 层已先修（见 `hsrl_soctarget.L_CURRICULUM_BLOCKS`），
+#: 这里把 H 层改成同一形式：各 arm 按自己的历史块数显式声明。
+H_CURRICULUM_BLOCKS = 50        # 历史每块 2 次更新（TD3 全系列：100 次 ÷ 2）
+H_CURRICULUM_BLOCKS_5X = 20     # 历史每块 5 次更新（td3prle / prle / prrbb / PER_main0：100 ÷ 5）
+#: "影子电价支"（prrbb / PER_main0）的 **L 层** curriculum 块数：这两个 arm 的 L 不在
+#: `hsrl_soctarget` 的 SOC 家族口径内（自有 d_block_L / 地板），历史同样是每块 5 次计数
+#: ⇒ 阈值 100 = 20 块。计数改每块一次后按本常量声明，行为逐位不变。
+L_CURRICULUM_BLOCKS_SHADOW = 20
+
 W_GAP = 10.0              # 追踪偏好固定价 (元/MWh)，进 r1
 SOC_TOL = 0.1             # 块末残差豁免 (MWh)
 
@@ -61,6 +75,28 @@ COST_SCALE = 1000.0       # s_c: c1 → 值函数回归空间的缩放（cost �
 #   值 Q_p/1000≈5.0 vs Q_c/100≈3.6 (旧 s_c=1000 时 Q_c/s_c≈0.36 ⇒ 14× 失衡, cost critic
 #   的回归目标被压到 fc3 初值尺度上 ⇒ 塌成常数)。λ 由 lam_scale() 自动重标, 见下。
 COST_SCALE_TD3 = 100.0
+
+
+# ---------------------------------------------------------------- UTD（每块更新次数）
+def utd_plan(utd_h, utd_l, interleaved=True):
+    """把"H 层每块 `utd_h` 次 / L 层每块 `utd_l` 次"分解成三段循环计数。
+
+    背景：部分 arm（td3prrbb / td3prle / prle / prrbb / PER_main0）的 H 与 L 共用
+    **同一个**更新循环（交替各更新一次），此时"各自总数"必须拆开算：
+
+        n_both   = min(utd_h, utd_l)   # H、L 各更新一次
+        n_h_only = utd_h − n_both      # 只更新 H
+        n_l_only = utd_l − n_both      # 只更新 L
+
+    返回 `(n_both, n_h_only, n_l_only)`。默认值（2/10）恒为 `(2, 0, 8)`
+    ⇒ 与历史循环逐位等价；非交错 arm 传 `interleaved=False` ⇒ `(0, utd_h, utd_l)`。
+
+    ⚠ 本函数只算"次数"，不碰任何状态；curriculum 的满足计数**不**在这里推进
+    （它必须每块恰好一次，见 `H_CURRICULUM_BLOCKS`）。
+    """
+    n_h, n_l = int(utd_h), int(utd_l)
+    n_both = min(n_h, n_l) if interleaved else 0
+    return n_both, n_h - n_both, n_l - n_both
 
 
 # ---------------------------------------------------------------- 模式开关

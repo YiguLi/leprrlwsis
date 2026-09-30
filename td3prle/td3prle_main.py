@@ -506,33 +506,29 @@ def train(num_iterations_H,
         if step > args.warmup:
             #--------------------Update----------------------
             if episode_steps % 5 == 4:
-                # Curriculum convergence: halve d_block when EMA cost
-                # <= d_block for 100 consecutive policy updates
-                # H 层本轮实验: 更新频率 5 → 2 次/块 (块内前 2 次与 L 交替);
-                # L 层维持每块 10 次 (UTD 2:1)。
-                update_num = 0
-                while update_num < 2:
+                # H/L 层更新频率(UTD): H 每块 args.utd_h 次、L 每块 args.utd_l 次
+                #   (默认 2 / 10; L 维持每块 10 次 = UTD 2:1)。块内前段与 L 交替,
+                #   余量单独补足 L ⇒ 由 hc.utd_plan 拆分。
+                _n_both, _n_h, _n_l = hc.utd_plan(args.utd_h, args.utd_l)
+                for _ in range(_n_both):
                     agent_H.update_policy()
                     agent_L.update_policy()
-                    update_num += 1
-
-                # L 层补足至每块 10 次 (while 内已 2 次, 此处再 8 次; UTD 2:1)
-                for _ in range(8):
+                for _ in range(_n_h):
+                    agent_H.update_policy()
+                for _ in range(_n_l):
                     agent_L.update_policy()
-
-                # curriculum 计数保持原节奏 (每块 5 次 × 两 agent):
-                # EMA 成本每块只在块末更新一次, 块内多次检查结果一致、仅推进计数器,
-                # 故判定阈值 100 不变时, d_block 减半所需"满足块数"与改动前相同
-                # (不随 H 更新次数下调而变化)。
-                for _ in range(5):
-                    # Track consecutive satisfaction for H (EMA 实际成本判据)
-                    if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
-                        consecutive_satisfied_H += 1
-                    else:
-                        consecutive_satisfied_H = 0
                     # (L 的 curriculum 计数已移到块末: 每块 1 次, 阈值 hst.L_CURRICULUM_BLOCKS)
 
-                if consecutive_satisfied_H >= 100:
+                # H 层 curriculum 计数: **每块 1 次**(与 UTD 解耦)。
+                #   历史为每块 5 次计数(阈值 100) ⇒ 减半需 20 块, 故用
+                #   hc.H_CURRICULUM_BLOCKS_5X(=20) 保持等价。
+                #   EMA 成本每块只在块末更新一次 ⇒ 块内重复检查结论相同。
+                if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
+                    consecutive_satisfied_H += 1
+                else:
+                    consecutive_satisfied_H = 0
+
+                if consecutive_satisfied_H >= hc.H_CURRICULUM_BLOCKS_5X:
                     d_block_H = max(d_block_H / 2, d_block_H_min)  # H: 收紧块预算
                     consecutive_satisfied_H = 0
                     prGreen('H: d_block_H halved to {}'.format(d_block_H))
@@ -1085,6 +1081,12 @@ if __name__ == "__main__":
                         help='β退火增量/次更新: 0.6/20000次更新 → 10k env步内 0.4→1 (100k预算)')
     parser.add_argument('--nb_turbine', default=5, type=int,
                         help='number of turbines')
+
+    # ---- UTD（每块 update_policy 次数）: 启动指令可调; 默认 = 历史口径, 逐位不变 ----
+    parser.add_argument('--utd_h', default=2, type=int,
+                        help='H 层每块 update_policy 次数 (默认 2 = 历史口径; 调整它不再改变 d_block_H 的减半节奏)')
+    parser.add_argument('--utd_l', default=10, type=int,
+                        help='L 层每块 update_policy 次数 (默认 10 = 历史口径; 与 H 交替 + 补足)')
 
     # ---- TD3 specific ----
     parser.add_argument('--policy_delay', default=2, type=int,
