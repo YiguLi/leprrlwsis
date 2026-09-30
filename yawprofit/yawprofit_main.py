@@ -389,22 +389,24 @@ def train(num_iterations_H,
         # ------------------------------ episode -----------------------------
         if done:
             agent_H.save_model(output)
-            n_blocks = max(1, episode_steps // 5)
+            # ⚠ 分母是**步数**不是块数：`episode_yaw_deg` 每个环境步累加一次（块内 5 步相同），
+            #   除以块数会把均值放大 5 倍（曾写成 n_blocks ⇒ 打印出 72° 这种不可能值）。
+            n_steps = max(1, episode_steps)
             prGreen('##########{}: episode_reward:{:.1f} episode_profit:{:.1f} '
                     'penalty:{:.1f} energy:{:.2f} MWh P_F_mean:{:.3f} MW viol_steps:{} '
                     'yaw|γ|mean:{:.2f}° step:{}'.format(
                         episode, episode_reward, episode_profit, episode_penalty,
-                        episode_energy, episode_PF_sum / max(1, episode_steps),
-                        episode_viol, episode_yaw_deg / n_blocks, step))
+                        episode_energy, episode_PF_sum / n_steps,
+                        episode_viol, episode_yaw_deg / n_steps, step))
 
             if upload:
                 writer.add_scalar('episode/reward', episode_reward, episode)
                 writer.add_scalar('episode/profit', episode_profit, episode)
                 writer.add_scalar('episode/penalty_NN_H', episode_penalty, episode)
                 writer.add_scalar('episode/energy_MWh', episode_energy, episode)
-                writer.add_scalar('episode/P_F_mean', episode_PF_sum / max(1, episode_steps), episode)
+                writer.add_scalar('episode/P_F_mean', episode_PF_sum / n_steps, episode)
                 writer.add_scalar('episode/viol_steps', episode_viol, episode)
-                writer.add_scalar('episode/yaw_deg_mean', episode_yaw_deg / n_blocks, episode)
+                writer.add_scalar('episode/yaw_deg_mean', episode_yaw_deg / n_steps, episode)
                 writer.add_scalar('wind_day', env.j, episode)
 
             if use_csv:
@@ -414,9 +416,9 @@ def train(num_iterations_H,
                     'episode_profit': episode_profit,
                     'episode_penalty_NN_H': episode_penalty,
                     'episode_energy_MWh': episode_energy,
-                    'episode_PF_mean': episode_PF_sum / max(1, episode_steps),
+                    'episode_PF_mean': episode_PF_sum / n_steps,
                     'episode_viol_steps': episode_viol,
-                    'episode_yaw_deg_mean': episode_yaw_deg / n_blocks,
+                    'episode_yaw_deg_mean': episode_yaw_deg / n_steps,
                     'wind_day': env.j,
                 })
                 df_episode_written = flush_csv_append_batch(
