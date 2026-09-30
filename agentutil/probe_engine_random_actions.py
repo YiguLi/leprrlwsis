@@ -69,6 +69,11 @@ _U_GRID = np.arange(0.0, 41.0, 1.0)
 _A_SET = None                  # 逐台 a（(n, NT)）由主流程注入
 _CUR_I = None                  # 当前机组序号（solver 层注入）
 
+#: CT 夹带区间 —— **必须与 FLORIS 原厂口径一致**
+#: （`floris/core/turbine/operation_models.py:134/:250` 的 `np.clip(ct, 0.0001, 0.9999)`）。
+#: 下界 0.0001 把高斯尾流的可去奇点 `uR = u·CT/(2(1−√(1−CT)))`（CT=0 时 0/0）挡在门外。
+CT_LO, CT_HI = 0.0001, 0.9999
+
 
 # ===========================================================================
 # 1. 采样（固定种子；两引擎共用同一组）
@@ -159,10 +164,31 @@ def register_op_model():
         return NAME
 
     def _a_sel(velocities):
+        """按 `velocities` 的**实际形状**取出对应的逐台 `a`。
+
+        ⚠ 为什么不能只看全局 `_CUR_I`（这里修过一个真 bug）：
+        引擎在两条路径上调用本操作模型，形状不同：
+          * `power(velocities=(n, nt, g, g))`   —— **不筛选**，累加器形状 (n, nt)
+            （`floris_model._get_turbine_powers` 直接调，无 `ix_filter`）；
+          * `thrust_coefficient` / `axial_induction` —— solver 逐台循环，
+            进本函数时 `velocities` **已被按 `ix_filter` 缩到 (n, 1, g, g)**，
+            累加器形状 (n, 1)。
+        若无条件用 `_CUR_I` 切片，`power` 路径会拿到**上一次 `run()` 残留的陈旧索引**
+        （`_CUR_I` 只在 `run()` 期间有效，`get_turbine_powers()` 是之后才调用的）
+        ⇒ 只算一台的功率。实测症状：逐台 `a=[0,1/3,1/3,1/3,1/3]` 时风场功率
+        给出 3.237 MW（= 只有 T1），而"全场 a=0"给出 0.000 MW —— 两者自相矛盾。
+        修法：`tgt = shape(velocities)[0:2]`，只按 `tgt[1]` 选列 ⇒ 与调用点无关。
+        """
         a = np.asarray(_A_SET, dtype=float)
         tgt = np.shape(velocities)[0:2]
-        if _CUR_I is not None and a.ndim == 2 and a.shape[1] > int(_CUR_I):
-            a = a[:, int(_CUR_I):int(_CUR_I) + 1]
+        if a.ndim == 1:
+            a = a.reshape(1, -1)
+        nt = int(tgt[1]) if len(tgt) > 1 else int(a.shape[1])
+        if a.shape[1] != nt:
+            if _CUR_I is not None and a.shape[1] > int(_CUR_I):
+                a = a[:, int(_CUR_I):int(_CUR_I) + 1]
+            if a.shape[1] > nt:
+                a = a[:, :nt]
         return np.broadcast_to(a, tgt).copy()
 
     class PerTurbineA(OM.BaseOperationModel):
@@ -177,12 +203,38 @@ def register_op_model():
 
         @staticmethod
         def thrust_coefficient(velocities=None, **_):
+            """CT = 4a(1−a)，并**按 FLORIS 原厂口径夹到 [CT_LO, CT_HI]**。
+
+            ⚠ 为什么必须夹（2026 实测，`aifflor` 训练崩 `PER assert priority>0` 的根因）：
+            FLORIS 随包路径在 `operation_models.py:134/:250` 有
+                `np.clip(thrust_coefficient, 0.0001, 0.9999)`
+            ⇒ 原厂 CT **永远不会恰好是 0**。而本算子为做**逐台 `a`** 自己算 CT，
+            若不夹，`a = 0 ⇒ CT = 0`，就会命中高斯尾流的可去奇点：
+                `wake_velocity/gauss.py:76`  `uR = u·CT/(2(1−√(1−CT)))` 是 **0/0**
+                （`wake_deflection/gauss.py:143` 同款）
+            ⇒ NaN → `ptur` → 观测 → TD 误差 → PER 优先级 → 崩溃（实测坏点率 4.37%）。
+            夹到 0.0001 后：`uR/u = 0.999975`、`u0/u = 0.99995`、`σ0 → 0.3536D`，
+            即"几乎无尾流"的**正确**极限（解析式验证：`uR/u ≡ 1−a` 在 CT≥0.0001 逐位成立）。
+            """
             a = _a_sel(velocities)
-            return np.broadcast_to(4.0 * a * (1.0 - a), np.shape(velocities)[0:2]).copy()
+            ct = 4.0 * a * (1.0 - a)
+            ct = np.clip(ct, CT_LO, CT_HI)          # 与 FLORIS 原厂同口径
+            return np.broadcast_to(ct, np.shape(velocities)[0:2]).copy()
 
         @staticmethod
         def axial_induction(velocities=None, **_):
-            return _a_sel(velocities)
+            """引擎内的 `a`（由 CT 反解，恒等式上等于动作 `a`）。
+
+            ⚠ **符号取 `+a`**：`agentutil/probe_floris_a_per_turbine.py` 的自校验
+            （"逐台 a≡1/3 必须与生产 `yawflor` 基线逐位一致"，实测相对差 1.5e-16）
+            是在返回 `+a` 下通过的；返回 `−a` 会让尾流恢复过快、对不上基线。
+            这里用 CT 反解（而不是直接回传动作 `a`）是为了与被夹过的 CT 自洽：
+            `a_eng = ½(1−√(1−CT_clipped))`。
+            """
+            a = _a_sel(velocities)
+            ct = np.clip(4.0 * a * (1.0 - a), CT_LO, CT_HI)
+            a_eng = 0.5 * (1.0 - np.sqrt(np.clip(1.0 - ct, 0.0, None)))
+            return np.broadcast_to(a_eng, np.shape(velocities)[0:2]).copy()
 
     PerTurbineA.__name__ = 'PerTurbineA'
     TT.TURBINE_MODEL_MAP['operation_model'][NAME] = PerTurbineA
