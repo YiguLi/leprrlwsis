@@ -53,6 +53,16 @@ os.chdir(ROOT)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, _HERE)
 
+# ---- 必须在任何 floris/matplotlib import 之前 ----
+# ① 解释器不对 ⇒ 立刻给出可照抄的命令（否则只会看到 pyexpat 的 DLL 报错）
+# ② 清掉"其它 Python 安装"注入 sys.path 的路径
+from floris_import_guard import check_interpreter as _chk, sanitize as _sanitize  # noqa: E402
+_chk()
+_SANITIZED = _sanitize()
+if _SANITIZED:
+    print('[guard] 已剔除污染 sys.path 的 %d 条路径（基础 conda 环境）: %s'
+          % (len(_SANITIZED), _SANITIZED))
+
 import numpy as np  # noqa: E402
 
 import yawflor.yawflor_turbine as YT  # noqa: E402
