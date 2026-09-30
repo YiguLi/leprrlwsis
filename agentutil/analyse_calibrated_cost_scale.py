@@ -99,13 +99,14 @@ def main():
     print('口径: c1 = P_F + %.0f·(P_F−%.0f)⁺  |  d_block = %.0f  |  s_p=%g  s_c(TD3)=%g'
           % (hc.K_V, hc.P_F_LIMIT, hc.D_BLOCK, hc.VALUE_SCALE, hc.COST_SCALE_TD3))
 
-    # ---- 用标定后的 θ* 算 FLORIS 逐样本出力 ----
+    # ---- 两个模型：随包默认（对照） vs 标定后（生产默认） ----
     R.register_op_model()
-    m = R.build_floris_model()
-    PF_cal = C.floris_eval(m, vu, vA, theta=theta)
-    # 顺便算默认参数（对照）
+    m_stock = R.build_floris_model(stock=True)     # FLORIS 随包默认参数
+    m_cal = R.build_floris_model(stock=False)      # 标定后的参数（现行默认）
+    PF_cal = C.floris_eval(m_cal, vu, vA, theta=theta)
+    # 顺便算随包默认（对照）。theta0 即随包默认值，显式施加到 stock 模型上。
     theta0 = np.array([p[4] for p in C.PARAMS], dtype=float)
-    PF_def = C.floris_eval(m, vu, vA, theta=theta0)
+    PF_def = C.floris_eval(m_stock, vu, vA, theta=theta0)
 
     print('\n' + '=' * 96)
     print('验证集上的出力对齐度')

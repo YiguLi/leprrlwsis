@@ -7,7 +7,42 @@
 
 ---
 
-## 0. 结论（三句话）
+## 0. 现行默认参数（已经落地为代码默认）
+
+标定后的尾流参数**已设为默认**，单一真源在
+`agentutil/floris_calibrated_defaults.py`：
+
+| 参数 | 标定值 | FLORIS 随包默认 |
+|---|---|---|
+| `wake.wake_velocity_parameters['gauss'].ka` | **0.05000** | 0.38 |
+| `...kb` | **0.00208** | 0.004 |
+| `...alpha` | **0.14456** | 0.58 |
+| `...beta` | **0.09134** | 0.077 |
+| `wake.wake_turbulence_parameters['crespo_hernandez'].ai` | **1.65503** | 0.8 |
+| `...constant` | **0.58031** | 0.5 |
+
+**生效范围**：`probe_engine_random_actions.build_floris_model()` 现在**默认**施加这组参数；
+传 `stock=True` 可退回随包默认（供"默认 vs 标定"对照用，例如
+`analyse_calibrated_cost_scale.py`）。
+
+**适用域（有守卫断言）**：仅 **5 台 5D 单排 + `a` 通道 + `γ≡0`**。
+`build_floris_model` 在 `n_turbines != 5` 且非 stock 时直接报错。
+
+**标定效果（对 WFSim）**：
+
+| | MAPE | 常数重标定后 MAPE | 比值 std |
+|---|---|---|---|
+| FLORIS 随包默认 | 66.891% | 67.946% | 0.1360 |
+| **标定后（现行默认）** | **4.448%** | **1.098%** | **0.0558** |
+
+自校验（每次 `run_floris` 都会打）：
+* `stock=True`：与生产 `yawflor` 基线逐位一致（相对差 **1.71e-16**）；
+* 标定模型：与"stock + 同一组 θ"逐位一致（`max|Δ| = 0.000e+00`）。
+  ⚠ 标定模型**故意不等于** `yawflor` 基线 —— 那正是标定要消掉的 66.9%。
+
+---
+
+## 1. 结论（三句话）
 
 1. **标定是有效的**：FLORIS 默认参数对 WFSim 的 MAPE **66.9%**；标定后验证集
    常数重标定后 MAPE **1.1%**（相对误差均值）/ MedAPE **3.5%**，比值 std 0.136 → **0.056**。

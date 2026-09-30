@@ -117,16 +117,34 @@ def _power_table(a):
     return YT.POWER_SCALE * 0.5 * YT.RHO * YT.AREA * cp * _U_GRID ** 3 / 1e3
 
 
+_INTERP_CACHE = {}                 # a(round 12) -> interp1d（标定时会被调用上万次）
+
+
+def _interp_for(a_val):
+    """按 `a` 取（并缓存）功率插值器 —— 复刻 `SimpleTurbine.power` 的 `interp1d` 口径。
+
+    缓存是**纯性能**优化：同一个 `a` 的插值器与逐次重建逐位等价（同样的
+    `_U_GRID` 与表值），但标定时 `floris_eval` 会被调上百次 × 每次上百样本
+    ⇒ 不缓存会反复重建同一个插值器。
+    """
+    from scipy.interpolate import interp1d
+    key = round(float(a_val), 12)
+    f = _INTERP_CACHE.get(key)
+    if f is None:
+        f = interp1d(_U_GRID, _power_table(float(key)), fill_value=0.0,
+                     bounds_error=False)
+        _INTERP_CACHE[key] = f
+    return f
+
+
 def _power_of_u(a, u, ref_rho):
     """逐台 a、逐点 u → 功率 [W]，复刻 SimpleTurbine.power 的插值口径。"""
-    from scipy.interpolate import interp1d
     a = np.asarray(a, dtype=float)
     u = np.asarray(u, dtype=float)
     out = np.zeros_like(u, dtype=float)
     for av in np.unique(a):
-        f = interp1d(_U_GRID, _power_table(float(av)), fill_value=0.0, bounds_error=False)
         sel = (a == av)
-        out[sel] = np.asarray(f(u[sel]), dtype=float) * 1e3
+        out[sel] = np.asarray(_interp_for(av)(u[sel]), dtype=float) * 1e3
     return out
 
 
@@ -197,9 +215,21 @@ def _solver_hook():
     return ctx
 
 
-def build_floris_model():
+def build_floris_model(stock=False, verbose=False):
+    """构造"逐台 a"的 FLORIS 模型。
+
+    Parameters
+    ----------
+    stock : bool
+        `False`（**默认**）⇒ 施加 `floris_calibrated_defaults` 里标定好的尾流参数
+            （对 WFSim 的验证集误差：常数重标定后 1.098%）；
+        `True` ⇒ 用 FLORIS **随包默认**参数（对它自己的基线，如
+            `analyse_calibrated_cost_scale.py` 的"默认 vs 标定"对照）。
+    """
     import yawflor.yawflor_turbine as YT
     from floris import FlorisModel
+    from floris_calibrated_defaults import (apply_calibrated_wake_params,
+                                            describe)
     name = register_op_model()
     m, _ = YT.build_model(turbine_type=None)
     m.set(turbine_type=[dict(
@@ -215,6 +245,19 @@ def build_floris_model():
     ])
     m.set(wind_shear=YT.WIND_SHEAR, reference_wind_height=YT.HUB_HEIGHT,
           air_density=YT.RHO)
+    if not stock:
+        apply_calibrated_wake_params(m)
+        if verbose:
+            print(describe())
+    else:
+        if verbose:
+            print('[stock] 使用 FLORIS 随包默认尾流参数（仅用于对照；对 WFSim 差 66.9%）')
+    # 适用域守卫：标定参数只在"5 台 5D 单排 + a 通道 + γ≡0"下有效
+    if not stock and (m.core.farm.n_turbines != NT):
+        raise ValueError(
+            '标定后的 FLORIS 参数只在 %d 台 5D 单排 + a 通道 + γ≡0 下标定过；'
+            '当前 n_turbines=%d ⇒ 请用 stock=True 或重新标定。'
+            % (NT, m.core.farm.n_turbines))
     return m
 
 
@@ -233,22 +276,50 @@ def _run_batch(m, us, A):
     return turb.sum(axis=1), turb
 
 
-def run_floris(us, A, verbose=True):
+def run_floris(us, A, verbose=True, stock=False):
     import yawflor.yawflor_turbine as YT
-    m = build_floris_model()
-    info = dict(floris_version=_floris_version())
+    m = build_floris_model(stock=stock)
+    info = dict(floris_version=_floris_version(), stock=bool(stock))
     if verbose:
-        print('[FLORIS] %s 就绪（逐台 a 自定义 operation model），算 %d 条 ...'
-              % (info['floris_version'], len(us)), flush=True)
-    # ---- 自校验：逐台 a≡1/3 必须复现生产基线 ----
-    prod, _ = YT.build_model()
-    ref = YT.farm_power(prod, float(us[0]), [0.0] * NT)
-    farm0, _ = _run_batch(m, us, np.full((len(us), NT), 1.0 / 3.0))
-    chk = float(farm0[0])
-    rel = abs(chk - ref) / ref if np.isfinite(chk) else float('inf')
-    if verbose:
-        print('[FLORIS] 自校验 a≡1/3: 本模型 %.9f MW vs 生产 %.9f MW  相对差 %.2e  %s'
-              % (chk, ref, rel, 'OK' if rel < 1e-12 else '**不一致**'), flush=True)
+        print('[FLORIS] %s 就绪（逐台 a 自定义 operation model，参数=%s），算 %d 条 ...'
+              % (info['floris_version'], '随包默认' if stock else '标定后',
+                 len(us)), flush=True)
+
+    # ---- 自校验 ----
+    # 仅对 **stock** 模型有意义：它应与生产 `yawflor`（同样随包默认）逐位一致。
+    # 标定后的模型**故意**不等于 yawflor 基线 —— 那正是标定要做的事
+    # （对 WFSim：66.9% → 1.1%）。此时改做"逐位可复现性"自校验：
+    # 标定模型上显式施加同一组 θ 后，应逐位复现 stock 模型 + 该 θ。
+    if stock:
+        prod, _ = YT.build_model()
+        ref = YT.farm_power(prod, float(us[0]), [0.0] * NT)
+        farm0, _ = _run_batch(m, us, np.full((len(us), NT), 1.0 / 3.0))
+        chk = float(farm0[0])
+        rel = abs(chk - ref) / ref if np.isfinite(chk) else float('inf')
+        if verbose:
+            print('[FLORIS] 自校验(stock) a≡1/3: 本模型 %.9f vs yawflor %.9f  '
+                  '相对差 %.2e  %s' % (chk, ref, rel,
+                                       'OK' if rel < 1e-12 else '**不一致**'),
+                  flush=True)
+    else:
+        from floris_calibrated_defaults import calibrated_theta
+        th = np.asarray(calibrated_theta(), dtype=float)
+        A33 = np.full((len(us), NT), 1.0 / 3.0)
+        # ⚠ 两条路径都必须走 `_run_batch`（它内部装 `_solver_hook` 维护 `_CUR_I`）。
+        #   若其中一条改走 `C.floris_eval`（自己装 hook），另一条会拿到未更新的
+        #   `_CUR_I`，`_a_sel` 就会返回未切片的全宽数组 ⇒ 形状广播报错。
+        f_cal, _ = _run_batch(m, us, A33)                       # 标定模型
+        m_stock = build_floris_model(stock=True)
+        # stock 模型 + 同一组 θ ⇒ 应与标定模型逐位相同（验证"默认值 = 那组 θ"这条链）
+        from agentutil.calib_floris_to_wfsim import _apply_theta as _at
+        _at(m_stock, th)
+        f_ref, _ = _run_batch(m_stock, us, A33)
+        d = float(np.max(np.abs(f_cal - f_ref)))
+        if verbose:
+            print('[FLORIS] 自校验(标定) 逐位可复现性: 与 stock+同一 θ 的 max|Δ| = %.3e  %s'
+                  % (d, 'OK' if d < 1e-12 else '**不一致**'), flush=True)
+            print('[FLORIS] 提示: 标定模型**故意**不等于 yawflor 基线'
+                  '（对 WFSim 的验证集误差 66.9% → 1.1%）。', flush=True)
 
     # ---- 正式：逐台随机 a（整批 → 对 NaN 逐条重试 → 仍 NaN 则丢弃） ----
     t0 = time.time()
