@@ -7,7 +7,9 @@
      `update_policy` 的 target 聚合 (`--target_agg`) 与按条 `_disc`;
      `_push_transition`/`_emit_nstep` + 滑窗版 `observe_jump`。
   2. `*_main.py`: `--nstep` (默认 5) / `--target_agg` (默认 min) 开关 + 构造接线;
-     `--rmsize` 默认 80000 → 20000 (与 td3per 口径一致: n=5 时 1 条 = 5n 环境步)。
+     `--rmsize` 默认 80000 → 20000 (与 td3per 口径一致)。⚠ 本行原写"n=5 时 1 条 = 5n
+     环境步" —— 那是分块聚合口径的遗留说法: 滑窗 stride-1 下 1 条 = 1 块 = 5 环境步,
+     覆盖环境步 = rmsize x 5, **与 n 无关** (见 README 的 --rmsize 行)。
   3. 两个 PRLE 项目 (`td3prle`/`td3leprrlrb`) 的 `observe_jump(context=...)` 变体:
      折叠块的 context **拼接**保留, 供 LLM 阈值变更时的 relabel 重算;
      并让 `PRLEBuffer.relabel_all(..., discount=gamma)` **按块**加 γ 权重

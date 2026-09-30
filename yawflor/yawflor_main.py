@@ -945,17 +945,17 @@ if __name__ == "__main__":
     parser.add_argument('--bsize', default=128, type=int,
                         help='minibatch size')
     # ---- memory 容量 ----
-    #   ⚠ 口径随 nstep 变: 滑窗下 1 条 = n 个块 = 5n 个环境步, 所以"条数"要按
-    #   env-step 读: rmsize x 5n = 覆盖的环境步。
-    #   默认 20000 (生产口径, 与 run12/run13 一致): n=5 ⇒ 500k 步 ≈ 1.8 epoch ≈ 347 天,
-    #     即"最近 ~1.8 个 epoch 的滚动窗口"; ≤60k 步的 run 里仍填不满 (12,000 条)。
-    #   复现历史 run1~run10 (1-step) 请传 --rmsize 80000 (= 400k 步, 且与当时一致)。
-    #   其它五个方法没有 n 步 ⇒ 维持 80000 不动 (见 agentutil/test_phase_uniform.py 的例外表)。
+    #   ⚠ 口径**与 nstep 无关**。滑窗 stride-1 = 逐步延后 n-1 步采样: 每来一个新块就
+    #   结算队首那一条 (不是"每 n 块聚合一条") ⇒ 条目数与块数 1:1: 1 条 = 1 个块
+    #   = 5 个环境步, 覆盖环境步 = **rmsize x 5**。旧写法 "rmsize x 5 x nstep" 已作废。
+    #   默认 20000 ⇒ 100k 环境步 ≈ 69 天 ≈ 0.36 epoch (1 epoch = 193 天 = 277,920 步);
+    #     ≤60k 步的 run 里仍填不满 (12,000 条)。
+    #   复现历史 run1~run10 (1-step) 请传 --rmsize 80000 (= 400k 步, 与当时一致)。
     parser.add_argument('--rmsize',
                         default=20000,
                         type=int,
-                        help='H 层 memory 条数 (覆盖环境步 = rmsize x 5 x nstep; '
-                             '默认 20000 = 生产口径; 复现 run1~run10 传 80000)')
+                        help='H 层 memory 条数 (覆盖环境步 = rmsize x 5, 与 nstep 无关; '
+                             '默认 20000 ⇒ 100k 步; 复现 run1~run10 传 80000)')
     parser.add_argument('--window_length', default=1, type=int, help='')
     parser.add_argument('--tau',
                         default=0.001,

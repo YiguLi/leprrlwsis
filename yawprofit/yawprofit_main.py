@@ -486,7 +486,8 @@ if __name__ == "__main__":
                         help='twin profit-critic 的 target 聚合 (min = TD3 原口径)')
     parser.add_argument('--bsize', default=128, type=int, help='minibatch size')
     parser.add_argument('--rmsize', default=20000, type=int,
-                        help='H 层 memory 条数 (覆盖环境步 = rmsize x 5 x nstep)')
+                        help='H 层 memory 条数 (覆盖环境步 = rmsize x 5, 与 nstep 无关; '
+                             '默认 20000 ⇒ 100k 步)')
     parser.add_argument('--window_length', default=1, type=int, help='')
     parser.add_argument('--tau', default=0.001, type=float, help='moving average for target network')
     parser.add_argument('--ou_theta', default=0.15, type=float, help='noise theta')
