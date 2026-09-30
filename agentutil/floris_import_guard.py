@@ -25,6 +25,13 @@
 2. `sanitize()` —— 在任何 `import floris` **之前**调用：把"其它 Python 安装"的路径
    从 `sys.path` 里剔除（次要防线；`sys.path[0]` 与空串保留，否则 `agentutil`
    内部互相 import 会断）。
+3. **换机器时的退路**（2026-09-30 新增，本机实测触发）：
+   * `EXPECTED_PYTHON` 可用环境变量 **`FLORIS_PYTHON`** 覆盖 ⇒ 换环境不必改源码；
+   * 期望解释器路径在本机**不存在**时（例如仓库被复制到没有 `F:` 盘的机器），
+     路径判据本身失效 ⇒ **自动退回功能判据**：直接 `import pyexpat`，
+     成功即放行（这才是本守卫真正要挡的东西），失败才报错退出。
+     退回时会在报告中写明 `fallback`，不会静默改变判据。
+   ⚠ 路径**存在但不等**（同一台机器上用错解释器）时行为不变：仍然硬失败。
 
 用法（放在所有第三方 import 之前）
 ----------------------------------
@@ -38,31 +45,56 @@
 import os
 import sys
 
-# 本项目的官方解释器（agentutil/README.md 记载）
-EXPECTED_PYTHON = r'F:\anaconda\envs\wsis\python.exe'
+# 本项目的官方解释器（agentutil/README.md 记载）。
+#   * 可用环境变量 FLORIS_PYTHON 覆盖（换机器/换虚拟环境时无需改源码）；
+#   * 该路径在本机不存在时 ⇒ 路径判据不可用，自动退回"功能判据"（见 check_interpreter）。
+_DEFAULT_PYTHON = r'F:\anaconda\envs\wsis\python.exe'
+EXPECTED_PYTHON = os.environ.get('FLORIS_PYTHON') or _DEFAULT_PYTHON
 _REMOVED = []
 
 
 def check_interpreter(expected=EXPECTED_PYTHON, fatal=True, verbose=False):
     """判断当前解释器是不是本项目的环境；不是则给出可直接照抄的命令。
 
+    判据两档（顺序固定）：
+      ① **路径判据**：`sys.executable` 与 `expected` 逐字相同（期望路径存在时用这档）；
+      ② **功能判据**：期望路径在本机不存在（换机器/仓库被复制）时退回 —— 只验
+         `import pyexpat` 能否成功。3.12.x 之间的 ABI 不匹配正是它失败的原因，
+         所以这档仍能挡住本守卫真正要挡的故障，只是不再要求路径逐字相同。
+
     Returns
     -------
-    dict(ok, reason, executable, version, expected, has_floris)
+    dict(ok, reason, executable, version, expected, fallback, has_floris)
+        fallback=True ⇒ 本机没有期望解释器，结论来自功能判据 ②（非路径判据）。
     """
     exe = os.path.normcase(os.path.abspath(sys.executable))
     exp = os.path.normcase(os.path.abspath(expected)) if expected else None
     ver = sys.version.split()[0]
     ok = (exp is None) or (exe == exp)
+    fallback = False
     reason = None
     if not ok:
-        reason = ('当前解释器不是本项目环境。\n'
-                  '    当前 : %s  (Python %s)\n'
-                  '    应为 : %s\n'
-                  '  3.12.x 之间的扩展模块（pyexpat.pyd 等）**ABI 不兼容**，用错解释器会报\n'
-                  '  "ImportError: DLL load failed while importing pyexpat"。' %
-                  (sys.executable, ver, expected))
-    if ok:
+        expected_missing = (exp is not None) and (not os.path.exists(expected))
+        if expected_missing:
+            fallback = True
+            try:
+                import pyexpat  # noqa: F401
+                ok = True
+            except Exception as e:                      # pragma: no cover
+                reason = ('期望解释器 %s 在本机不存在，退回功能判据后仍失败：\n'
+                          '    当前 : %s  (Python %s)\n'
+                          '    %s: %s\n'
+                          '  请用 FLORIS_PYTHON=<本项目解释器> 显式指定，或清掉 '
+                          'PYTHONHOME/PYTHONPATH。'
+                          % (expected, sys.executable, ver, type(e).__name__, e))
+        else:
+            reason = ('当前解释器不是本项目环境。\n'
+                      '    当前 : %s  (Python %s)\n'
+                      '    应为 : %s\n'
+                      '  3.12.x 之间的扩展模块（pyexpat.pyd 等）**ABI 不兼容**，用错解释器会报\n'
+                      '  "ImportError: DLL load failed while importing pyexpat"。' %
+                      (sys.executable, ver, expected))
+    if ok and not fallback:
         try:
             import pyexpat  # noqa: F401
         except Exception as e:                      # pragma: no cover
@@ -70,8 +102,8 @@ def check_interpreter(expected=EXPECTED_PYTHON, fatal=True, verbose=False):
                                  '  多半是 PYTHONHOME/PYTHONPATH 指向了别的安装。'
                                  % (type(e).__name__, e))
     info = dict(ok=ok, reason=reason, executable=sys.executable, version=ver,
-                expected=expected)
-    if verbose or not ok:
+                expected=expected, fallback=fallback)
+    if verbose or not ok or fallback:
         report(info)
     if not ok and fatal:
         print('\n' + '=' * 80)
@@ -81,6 +113,7 @@ def check_interpreter(expected=EXPECTED_PYTHON, fatal=True, verbose=False):
         print('\n若已经在用正确的解释器，请先清掉这两个环境变量再试:')
         print('    set PYTHONPATH=')
         print('    set PYTHONHOME=')
+        print('  也可以直接用 FLORIS_PYTHON=<你的解释器> 指定本项目环境。')
         print('=' * 80)
         raise SystemExit(3)
     return info
@@ -148,7 +181,21 @@ def sanitize(verbose=False):
 
 def report(info=None):
     """打印诊断信息（出问题时让用户一眼看出是解释器问题还是路径污染）。"""
-    print('[floris_import_guard] 期望解释器  : %s' % EXPECTED_PYTHON)
+    if info is None:
+        info = check_interpreter(fatal=False)
+    if info.get('fallback'):
+        # 紧凑报告：本机没有期望解释器 ⇒ 结论来自功能判据（pyexpat），不刷整块诊断
+        print('[floris_import_guard] 期望解释器 : %s（**本机不存在**）'
+              % info.get('expected'))
+        print('[floris_import_guard] 当前解释器 : %s  (Python %s)'
+              % (info['executable'], info['version']))
+        print('[floris_import_guard] ⇒ 退回功能判据: pyexpat 加载%s ⇒ %s'
+              '（需要精确锁定环境时用 FLORIS_PYTHON=<解释器>）'
+              % ('成功' if info['ok'] else '失败', '放行' if info['ok'] else '中止'))
+        if info.get('reason'):
+            print(info['reason'])
+        return
+    print('[floris_import_guard] 期望解释器  : %s' % (info.get('expected') or EXPECTED_PYTHON))
     print('[floris_import_guard] 当前解释器  : %s' % sys.executable)
     print('[floris_import_guard] Python 版本 : %s' % sys.version.split()[0])
     print('[floris_import_guard] sys.prefix  : %s' % sys.prefix)

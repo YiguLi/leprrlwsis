@@ -99,9 +99,18 @@ cd "C:\Users\SCP Site19\Desktop\llm enhanced wsis\leprrlwsis"
 F:\anaconda\envs\wsis\python.exe aifflor\aifflor_main.py
 ```
 
-* **必须用 `F:\anaconda\envs\wsis\python.exe`**（FLORIS 4.6.6 装在那里；
-  3.12.x 之间的扩展模块不兼容，用 base 解释器会报 `pyexpat` DLL 错误）。
+* **解释器必须是装了 FLORIS 的那个环境**（原先唯一可用的路径是
+  `F:\anaconda\envs\wsis\python.exe`；3.12.x 之间的扩展模块 ABI 不兼容，
+  用 base 解释器会报 `pyexpat` DLL 错误）。2026-09-30 起
+  `agentutil/floris_import_guard.py` 给了换机器的退路：
+  ① `FLORIS_PYTHON=<解释器>` 显式指定；② 该路径在本机**不存在**时自动退回
+  **功能判据**（`import pyexpat` 成功即放行，真正要挡的是 ABI 不匹配）。
+  ⇒ 在**没有 `F:` 盘**的机器上直接用本机环境即可，例如
+  `C:\Users\yigul\anaconda3\envs\llmenhancedwsis\python.exe`
+  （FLORIS 4.6.6 + torch 2.12.0+cpu）。路径**存在但不等**时仍硬失败（判据未被削弱）。
 * **不启 MATLAB**（`aifflor_main` 已把 `import matlab` / `start_matlab()` 整段移除）。
+* ⚠ **把 stdout 重定向到文件/管道时**要 `set PYTHONIOENCODING=utf-8`：`hc.summary()`
+  里的 `−`(U+2212) 在 GBK 代码页下会 `UnicodeEncodeError`（直接跑在终端里不会）。
 
 ### TensorBoard 标签：**scalar tag 刻意不改**，run 名改了
 
