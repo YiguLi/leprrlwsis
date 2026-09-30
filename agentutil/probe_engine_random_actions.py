@@ -74,6 +74,13 @@ _CUR_I = None                  # 当前机组序号（solver 层注入）
 #: 下界 0.0001 把高斯尾流的可去奇点 `uR = u·CT/(2(1−√(1−CT)))`（CT=0 时 0/0）挡在门外。
 CT_LO, CT_HI = 0.0001, 0.9999
 
+#: **CT 倍率旋钮**（默认 1.0 = 用 `CT = 4a(1−a)`）。
+#: ⚠ 这是"**功率/动量解耦**"的显式开关：功率走独立的 `Cp_eff` 表，所以
+#: 调大 `CT_SCALE` 会**加深尾流但不改变单机功率** —— 这正是 WFSim 自己做的事
+#: （` Cp = 4a(1−a)²` 而力用 `1.5×`，其有效 `CT/(1−a)` 达 1.333）。
+#: 供 `agentutil/probe_power_match_alternatives.py` 扫描"功率对得上但尾流合理"的替代解。
+CT_SCALE = 1.0
+
 
 # ===========================================================================
 # 1. 采样（固定种子；两引擎共用同一组）
@@ -217,7 +224,7 @@ def register_op_model():
             即"几乎无尾流"的**正确**极限（解析式验证：`uR/u ≡ 1−a` 在 CT≥0.0001 逐位成立）。
             """
             a = _a_sel(velocities)
-            ct = 4.0 * a * (1.0 - a)
+            ct = CT_SCALE * 4.0 * a * (1.0 - a)
             ct = np.clip(ct, CT_LO, CT_HI)          # 与 FLORIS 原厂同口径
             return np.broadcast_to(ct, np.shape(velocities)[0:2]).copy()
 
