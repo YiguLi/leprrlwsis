@@ -19,7 +19,8 @@
 | **动作语义** | 轴向因子 `a∈[0,0.5]`（5 维）+ SOC 信号 | **完全相同** |
 | **奖励 / 成本 / 对偶 / n 步 / 相位特征** | `td3per_myfunc` | **逐字复用（零改动）** |
 | 算法本体（TD3+PER） | `td3per_ddpg` | **逐字复用（零改动）** |
-| 输出目录 | `output/TD3PER-runNN` | **同名**（见 §4 注意） |
+| 输出目录 | `output/TD3PER-runNN` | **`output/AIFFLOR-runNN`**（`--env` 默认值已改） |
+| TB scalar tag / CSV 列 | 与 `td3per` 逐字同名 | **逐字同名**（方法区分靠目录名 + CSV 名 `df_aifflor.csv`） |
 | 训练预算 | 1000 episode = 1,440,000 步 | **相同**（未改，与 `yawflor` 不同） |
 
 **为什么 `myfunc` 可以一处不改**（这是与 `yawflor` 最大的区别）：
@@ -79,7 +80,7 @@
 |---|---|
 | `aifflor/aifflor_ddpg.py` | **逐字复制** `td3per/td3per_ddpg.py`（零改动） |
 | `aifflor/aifflor_myfunc.py` | **逐字复制** `td3per/td3per_myfunc.py`（**零改动**） |
-| `aifflor/aifflor_main.py` | `td3per/td3per_main.py` + 替换表（env 类 / 不启 MATLAB / 文案 / RUN_TAG） |
+| `aifflor/aifflor_main.py` | `td3per/td3per_main.py` + 替换表（env 类 / 不启 MATLAB / **输出目录名 `--env`** / 文案 / RUN_TAG） |
 | `aifflor/aifflor_turbine.py` | **新写**：I/O 映射表 / 口径 / 模型构造 / 向量化求值（单一真源） |
 | `aifflor/aifflor_env.py` | **新写**：`AifflorPhysics`（NaN 守卫 + 预取）+ `WindBatteryAIF` |
 
@@ -101,10 +102,17 @@ F:\anaconda\envs\wsis\python.exe aifflor\aifflor_main.py
 * **必须用 `F:\anaconda\envs\wsis\python.exe`**（FLORIS 4.6.6 装在那里；
   3.12.x 之间的扩展模块不兼容，用 base 解释器会报 `pyexpat` DLL 错误）。
 * **不启 MATLAB**（`aifflor_main` 已把 `import matlab` / `start_matlab()` 整段移除）。
-* ⚠ **输出目录仍叫 `output/TD3PER-runNN`**（与 `yawflor` 一致）。原因是下游分析脚本
-  （`compare_*` / `test_five_days.py` / `analyse_lam1.py`）按 `output/TD3PER-*` 找。
-  **代价：`td3per` 与 `aifflor` 同时跑会撞目录** —— 别并行跑这两者。
-  产物里的 CSV 是 `df_aifflor.csv`（`RUN_TAG` 已改），可用于人工区分。
+* **输出目录 = `output/AIFFLOR-runNN`**（`--env` 默认值由 `TD3PER` 改为 `AIFFLOR`，
+  与 `yawflor` 用 `YAWFLOR` 同一套命名惯例）⇒ 与 `td3per` 的 `output/TD3PER-runNN`
+  **完全分开**。
+  * 产物 CSV = `df_aifflor.csv`（`RUN_TAG='aifflor'`）。
+  * TB 的 scalar tag 与 `td3per` **逐字同名**（这是刻意的，便于跨 run 对齐比较）；
+    方法区分靠目录名 + CSV 名。
+  * ⚠ **run 编号是全局递增的**（`util.get_output_folder` 扫 `output/` 下所有
+    `-runN` 取最大 +1）⇒ 首个 aifflor run 会是 `AIFFLOR-run26` 之类的数，
+    不是从 0 开始。这不是 bug，是既有约定。
+  * ⚠ 下游分析脚本（`compare_*` / `test_five_days.py` / `analyse_lam1.py`）若按
+    `output/TD3PER-*` 匹配，需要**显式传目录名**才能找到 aifflor 的 run。
 
 ### 已实测（2026）
 
@@ -112,5 +120,6 @@ F:\anaconda\envs\wsis\python.exe aifflor\aifflor_main.py
 |---|---|
 | 契约测试 `test_aifflor_contract.py` | **全部通过**（myfunc 逐位相同 / 动作语义 / 标定生效 / 不引入 matlab / 观测与守卫 / 预取确定性） |
 | 端到端训练 60 步 | 跑通，**10.4 s**；预取 25 次（批量 25 / 单条 25 / **命中 48**），NaN 守卫 **0** 次 |
+| 输出目录 | **`output/AIFFLOR-runNN`** ✅（产物 `df_aifflor.csv` + tfevents） |
 | 外部验证（6 随机日 × 100 分钟，每步随机动作） | 非有限值 **0** 条 |
 | `u=10, a=1/3` 单点 | **3.294116 MW**（标定后现值，作为回归锚） |

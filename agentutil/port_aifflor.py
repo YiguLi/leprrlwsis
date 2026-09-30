@@ -122,6 +122,21 @@ MAIN_EDITS = [
         '        prCyan(env.summary())\n'
         '        prCyan(env_test.summary())',
         1, '训练收尾打印物理调用统计'),
+    # ---- 输出目录名：output/TD3PER-runNN → output/AIFFLOR-runNN ----
+    #   `args.env` 只用于两处：`get_output_folder(args.output, args.env)` 与
+    #   resume 默认路径。改成 'AIFFLOR' ⇒ 产物落在 output/AIFFLOR-runNN，
+    #   与 td3per 的 output/TD3PER-runNN 分开（否则两者会撞目录）。
+    #   大小写与 `yawflor` 的 'YAWFLOR' 保持一致（`yawflor/README.md` 的命名惯例：
+    #   TB 的 scalar tag 与 td3per 逐字同名，**方法区分靠目录名 + CSV 名**）。
+    #   ⚠ 下游分析脚本若按 `output/TD3PER-*` 匹配，需要显式传目录名。
+    (
+        "    parser.add_argument('--env',\n"
+        "                        default='TD3PER',",
+        "    # aifflor: 输出目录前缀改为 'AIFFLOR'（产物 output/AIFFLOR-runNN，与 td3per 的\n"
+        "    #   output/TD3PER-runNN 分开；下游分析脚本需按目录名显式传入）。\n"
+        "    parser.add_argument('--env',\n"
+        "                        default='AIFFLOR',",
+        1, "--env 默认 TD3PER → AIFFLOR（输出目录名）"),
 ]
 
 #: `myfunc` **逐字复制、零改动**（见模块 docstring 的论证）

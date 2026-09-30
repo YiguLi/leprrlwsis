@@ -858,8 +858,10 @@ if __name__ == "__main__":
                         default='train',
                         type=str,
                         help='support option: train/test')
+    # aifflor: 输出目录前缀改为 'AIFFLOR'（产物 output/AIFFLOR-runNN，与 td3per 的
+    #   output/TD3PER-runNN 分开；下游分析脚本需按目录名显式传入）。
     parser.add_argument('--env',
-                        default='TD3PER',
+                        default='AIFFLOR',
                         type=str,
                         help='open-ai gym environment')
     parser.add_argument('--hidden1',
