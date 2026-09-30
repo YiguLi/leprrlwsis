@@ -28,7 +28,8 @@ C. `td3leprrlrb` 与统一口径**语义等价**（代表分钟映射相同；�
 D. 接线契约（静态扫描）：
    * 六个 main 都有 `--phase_feat default=1 choices=[0,1,2]`；
      五个统一 main 的 `nb_states_H = 4 + PHASE_DIM[...]`（旧口径为 `4 + _phase_dim`）；
-   * 六个 main 的 `--bsize 128` / `--rmsize 20000`（六个 TD3 方法已统一）；
+   * 六个 TD3 main 的 `--bsize 256` / `--rmsize 20000` / `--nstep 2`（2026-09-30 超参调节口径；
+     yawflor 本次未随之调参 ⇒ 仍为 `128 / 20000 / 5`）；
    * 两个接收方（td3prrbb/td3prle）的 `nine_case_test` **接受** phase_mode/phase_table、
      **调用** `Normalize_H`、且函数体内**不再有** `Normalize(obs)` / `Normalize(obs2)`；
      main 向 `nine_case_test` 传 `phase_mode=phase_mode, phase_table=phase_table`；
@@ -170,20 +171,27 @@ print('=' * 100)
 print('D. 接线契约（静态扫描）')
 print('=' * 100)
 P_MAIN = {k: os.path.join(k, '%s_main.py' % k) for k in ALL6}
-# --bsize / --rmsize 默认 = 128 / 20000 (**六个 TD3 方法已统一**; 均启用 H 层 n 步滑窗,
-# 1 条 = n 块 = 5n 环境步 ⇒ 20000 条 ≈ 500k 环境步。更早的 "其余五方法 80000" 例外表
-# 已在批次 2 取消)。
-BSIZE_DEFAULT = 128
-RMSIZE_DEFAULT = 20000
+# --bsize / --nstep / --rmsize 默认 = 256 / 2 / 20000 (**六个 TD3 方法已统一**;
+# 均启用 H 层 n 步滑窗, 1 条 = n 块 = 5n 环境步 ⇒ 20000 条 ≈ 200k 环境步。
+# 2026-09-30 超参调节: nstep 5->2, bsize 128->256 (rmsize 未动 ⇒ 覆盖步数
+# 由 500k 降到 200k)。更早的 "其余五方法 80000" 例外表已在批次 2 取消)。
+# ⚠ yawflor 是 td3per 的克隆 (2026-09-30 起在本测试的 ALL6 里), 本次**未**随之
+#   调参 ⇒ 仍为 5 / 128; 期望值按项目分开写, 避免"把它一并改掉"或"静默不检查"。
+#   若要与克隆基线 (td3per) 可比, 需同步改 yawflor/yawflor_main.py —— 见
+#   yawflor/README.md 的 P3/P4 口径要求。
+DEFAULTS_6 = dict(bsize=256, nstep=2, rmsize=20000)
+DEFAULTS_BY_PROJ = {'yawflor': dict(bsize=128, nstep=5, rmsize=20000)}
 for k in ALL6:
     src = read_text(P_MAIN[k])
+    exp = DEFAULTS_BY_PROJ.get(k, DEFAULTS_6)
     check("'--phase_feat', default=1, type=int, choices=[0, 1, 2]" in src,
           '%s: --phase_feat 默认 1 / choices [0,1,2]' % k)
-    check("'--bsize', default=%d" % BSIZE_DEFAULT in src
-          and 'default=%d,' % RMSIZE_DEFAULT in src,
-          '%s: --bsize %d / --rmsize %d' % (k, BSIZE_DEFAULT, RMSIZE_DEFAULT))
-    check("'--nstep', default=5" in src and "'--target_agg', default='min'" in src,
-          '%s: --nstep 默认 5 / --target_agg 默认 min' % k)
+    check("'--bsize', default=%d" % exp['bsize'] in src
+          and 'default=%d,' % exp['rmsize'] in src,
+          '%s: --bsize %d / --rmsize %d' % (k, exp['bsize'], exp['rmsize']))
+    check("'--nstep', default=%d" % exp['nstep'] in src
+          and "'--target_agg', default='min'" in src,
+          '%s: --nstep 默认 %d / --target_agg 默认 min' % (k, exp['nstep']))
     check('nstep=args.nstep, target_agg=args.target_agg' in src,
           '%s: H 层构造接线 nstep/target_agg' % k)
 for k in UNIFORM:
