@@ -60,6 +60,23 @@ A_IND = _YT.A_IND                # 1/3（单机 Cp 最优点）
 POWER_SCALE = _YT.POWER_SCALE    # 0.95
 CP_EFF = _YT.CP_EFF              # 0.56296
 CT_EFF = _YT.CT_EFF              # 8/9
+
+#: **出口电平系数**（`FLORIS 电场出力 → 与 WFSim 对齐的常数倍率`）。
+#:
+#: 由来（实测，`agentutil/analyse_stock_vs_calibrated.py`）：用 **FLORIS 随包默认**
+#: 尾流参数时，FLORIS 的电场出力系统性**低于** WFSim 约 40%，而且这个偏差几乎是一个
+#: **纯常数倍率**（100 步真实风速序列上 `corr = 0.999980`、比值 `std = 0.0103`）。
+#: ⇒ 用**一个**显式系数即可对齐电平和波动，**不需要**改任何尾流参数。
+#:
+#: 取值 = `1/k*`，其中 `k* = ⟨P_W, P_F⟩/⟨P_W, P_W⟩` 由全域 350 点
+#: （3–20 m/s、0.5 m/s 粒度、每档 10 个随机行为）拟合：
+#:     `k* = 1.6696`  ⇒  `1/k* = 0.598947`
+#:
+#: ⚠ 适用域（必须声明）：该系数在**全域平均**意义上最优，但逐点比值范围是
+#: **1.311–2.149**，且分歧**由动作强度驱动**（`corr(r, min(a)) = −0.658`）
+#: ⇒ 在**强降载 / 动作异质**区的偏差最大。详见 `aifflor/README.md` §3.7.1。
+LEVEL_REF_K = 1.6696
+LEVEL_COEF = 1.0 / LEVEL_REF_K   # ≈ 0.5989471
 NT = _YT.NT                      # 5
 SPACING_D = _YT.SPACING_D        # 5D
 WIND_DIR_ALIGNED = _YT.WIND_DIR_ALIGNED   # 270°
@@ -108,7 +125,8 @@ def build_model(nt=NT, calibrated=True, verbose=False):
     ----------
     nt : int            机组台数（主臂 5；≠5 时若 `calibrated=True` 会报错）
     calibrated : bool   `True`（默认）施加 `floris_calibrated_defaults` 的标定尾流参数；
-                        `False` 用 FLORIS 随包默认（仅供"标定前/后"对照，**不要用于生产**）
+                        `False` 用 FLORIS 随包默认（**"只用电平系数"模式**用这个；
+                        此时必须配 `AifflorPhysics(power_scale=LEVEL_COEF)` 才与 WFSim 对齐）
     """
     import agentutil.probe_engine_random_actions as _R
     _R.register_op_model()
@@ -123,6 +141,7 @@ def build_model(nt=NT, calibrated=True, verbose=False):
         layout='single_row_5D', rotor_diameter=D_ROTOR, hub_height=HUB_HEIGHT,
         rho=RHO, wind_shear=WIND_SHEAR, ti=TI, wind_direction=WIND_DIR_ALIGNED,
         cp_eff=CP_EFF, ct_eff=CT_EFF, power_scale=POWER_SCALE,
+        level_ref_k=LEVEL_REF_K, level_coef=LEVEL_COEF,
         wake_params=(dict(CALIBRATED_WAKE_PARAMS) if calibrated else None),
         theta=(calibrated_theta() if calibrated else None),
     )

@@ -43,24 +43,32 @@ from aifflor import aifflor_turbine as AT                     # noqa: E402  （�
 # 1. FLORIS 物理后端
 # ===========================================================================
 class AifflorPhysics:
-    """FLORIS 后端（轴向因子 `a` 通道）：非有限值守卫 + 可选预取。
+    """FLORIS 后端（轴向因子 `a` 通道）：非有限值守卫 + 可选预取 + 出口电平系数。
 
     Parameters
     ----------
     nt : int                机组台数（主臂 5）
-    calibrated : bool       `True`（默认）施加标定后的尾流参数
+    calibrated : bool       `True`（默认）施加标定后的尾流参数；
+                            `False` 用随包默认 + `power_scale=LEVEL_COEF`（"只用电平系数"模式）
     cache_enabled : bool    `True`（默认）允许 `prefetch` 填充查表缓存
-    **model_kw :            透传（保留给将来；主臂不传）
+    power_scale : float     **出口电平系数**（**最后**施加，在守卫/兜底之后）。
+                            `1.0`（默认）⇒ 保持历史行为**逐位不变**；
+                            `AT.LEVEL_COEF` ≈ 0.59895 ⇒ 把 FLORIS 的电场出力整体抬到
+                            WFSim 电平（配合 `calibrated=False` 使用）。
+                            见 `AT.LEVEL_COEF` 的论证与 `aifflor/README.md` §3.7.1。
+    verbose : bool
 
-    统计量：`n_batch` / `n_direct` / `n_hit` / `n_nonfinite`，供 `summary()` 打印。
+    统计量：`n_batch` / `n_direct` / `n_hit` / `n_nonfinite` / `n_cache_bad`，供 `summary()`。
     """
 
-    def __init__(self, nt=AT.NT, calibrated=True, cache_enabled=True, verbose=False):
+    def __init__(self, nt=AT.NT, calibrated=True, cache_enabled=True,
+                 power_scale=1.0, verbose=False):
         self.model, self.info = AT.build_model(nt=nt, calibrated=calibrated,
                                                verbose=verbose)
         self.nt = int(nt)
         self.calibrated = bool(calibrated)
         self.cache_enabled = bool(cache_enabled)
+        self.power_scale = float(power_scale)
         self._cache = {}
         self.n_batch = 0
         self.n_direct = 0
@@ -106,6 +114,8 @@ class AifflorPhysics:
         acts = np.tile(a, (us.size, 1))
         farm, _ = AT.eval_batch(self.model, us, acts)
         self.n_batch += 1
+        # 电平系数是**严格线性**的 ⇒ 预取时施加与逐点施加等价（且缓存里存的是终值）
+        farm = np.asarray(farm, dtype=float) * self.power_scale
         self._cache = {}
         for i in range(us.size):
             v = float(farm[i])
@@ -151,7 +161,8 @@ class AifflorPhysics:
         farm = self._compute(u, a)
         if not np.isfinite(farm):
             farm = self._fallback(u)
-        return float(farm)
+        # 电平系数在**最后**施加：保证兜底值也被同倍率缩放（否则守卫会改变倍率语义）
+        return float(farm) * self.power_scale
 
     # ---------------- env 接口 ----------------
     def PowerOutput(self, u0, act_wind):
@@ -162,10 +173,12 @@ class AifflorPhysics:
     def summary(self):
         tot = self.n_batch + self.n_direct
         fs = AT.stats()
-        return ('[aifflor-physics] FLORIS {} | 标定={} | 批量 {} 次 / 单条 {} 次 / '
+        return ('[aifflor-physics] FLORIS {} | 标定={} | 电平系数={:.6f} | '
+                '批量 {} 次 / 单条 {} 次 / '
                 '命中 {} 次 | 单条占比 {:.1%} | 出口兜底 {} 次 / 坏缓存 {} 条 || '
                 'FLORIS 层: 评估点 {} | 坏点 {} ({:.3f}%) | 重试救回 {} | 退回标称 {}'
                 .format(self.info.get('floris_version', '?'), self.calibrated,
+                        self.power_scale,
                         self.n_batch, self.n_direct, self.n_hit,
                         (self.n_direct / tot if tot else 0.0), self.n_nonfinite,
                         self.n_cache_bad, fs['n_eval'], fs['n_bad_in_batch'],
