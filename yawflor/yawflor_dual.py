@@ -61,7 +61,14 @@ LAST = {}              # 最近一次更新诊断（供日志/CSV）
 
 DEFAULTS = dict(mode=MODE, eps=EPS, r_cap=R_CAP, eta_up=ETA_UP, eta_dn=ETA_DN,
                 lam_max_phys=LAM_MAX_PHYS, lam_min_phys=LAM_MIN_PHYS,
-                kappa_soft=KAPPA_SOFT, w_inev=W_INEV, c1_tail_only=False)
+                kappa_soft=KAPPA_SOFT, w_inev=W_INEV, c1_tail_only='auto')
+
+
+def _auto_int(s):
+    """`--c1-tail-only` 的三态解析：'auto' / 0 / 1。"""
+    if isinstance(s, str) and s.strip().lower() == 'auto':
+        return 'auto'
+    return int(s)
 
 
 def add_args(parser):
@@ -72,9 +79,10 @@ def add_args(parser):
     g.add_argument('--kappa-soft', default=DEFAULTS['kappa_soft'], type=float,
                    help='软通道固定价 κ [元/(MW·step)]：r1 -= κ·P_F（默认 0 = 关；'
                         '建议 0.2 ≈ 边际收益 2%%，实现"<3 MW 原则上不管"）')
-    g.add_argument('--c1-tail-only', default=0, type=int, choices=[0, 1],
-                   help='1 ⇒ c1 只装越限超出量 (P_F−3)⁺（硬通道）；0 ⇒ 历史 c1。'
-                        '给 --kappa-soft > 0 时自动按 1 处理')
+    g.add_argument('--c1-tail-only', default='auto', choices=['auto', 0, 1], type=_auto_int,
+                   help="c1 口径：auto（默认）= κ>0 或 --dual-mode tail 时只装越限 (P_F−3)⁺，否则走历史 c1；"
+                        "1 = 强制只装越限；**0 = 强制历史 c1**（与 --kappa-soft 组合可做"
+                        "'只加软价、不加硬通道'的对照臂，如 E2c）")
     g.add_argument('--w-inev', default=DEFAULTS['w_inev'], type=float,
                    help='越限中"电池侧不可避"（rbb_info.inevitable_violation）的排除权重：'
                         '0 = 全算（默认，保留 H 预留 SOC headroom 的动机）; 1 = 完全排除')
@@ -102,7 +110,14 @@ def configure(args, verbose=True):
     global MODE, EPS, R_CAP, ETA_UP, ETA_DN, LAM_MAX_PHYS, LAM_MIN_PHYS, KAPPA_SOFT, W_INEV
     MODE = str(getattr(args, 'dual_mode', DEFAULTS['mode']))
     kappa = float(getattr(args, 'kappa_soft', DEFAULTS['kappa_soft']))
-    tail_only = bool(int(getattr(args, 'c1_tail_only', 0))) or (kappa > 0.0)
+    # 三态：'auto'（默认）= κ>0 或 tail 模式 ⇒ 只装越限；0/1 = 显式覆盖
+    _cto = getattr(args, 'c1_tail_only', DEFAULTS['c1_tail_only'])
+    if isinstance(_cto, str):
+        tail_only = bool(kappa > 0.0) or (MODE == 'tail')
+        _cto_src = 'auto'
+    else:
+        tail_only = bool(int(_cto))
+        _cto_src = 'explicit'
     EPS = float(getattr(args, 'dual_eps', DEFAULTS['eps']))
     R_CAP = float(getattr(args, 'dual_rcap', DEFAULTS['r_cap']))
     ETA_UP = float(getattr(args, 'dual_eta_up', DEFAULTS['eta_up']))
@@ -126,15 +141,17 @@ def configure(args, verbose=True):
         prCyan('[yawflor-dual] ' + txt)
     return dict(mode=MODE, eps=EPS, r_cap=R_CAP, eta_up=ETA_UP, eta_dn=ETA_DN,
                 lam_max_phys=LAM_MAX_PHYS, lam_min_phys=LAM_MIN_PHYS,
-                kappa_soft=KAPPA_SOFT, w_inev=W_INEV, c1_tail_only=bool(_mf.C1_TAIL_ONLY))
+                kappa_soft=KAPPA_SOFT, w_inev=W_INEV, c1_tail_only=bool(_mf.C1_TAIL_ONLY),
+                c1_tail_only_src=_cto_src)
 
 
 def summary():
     kl = hc.lam_scale()
     lo_phys = hc.LAM_MIN if LAM_MIN_PHYS is None else LAM_MIN_PHYS
     if MODE != 'tail':
-        return ('mode=ema（历史口径 hc.dual_update，逐位不变）'
-                + ('；c1 只装越限 (κ=%.3g)' % KAPPA_SOFT if _mf.C1_TAIL_ONLY else ''))
+        return ('mode=ema（历史口径 hc.dual_update，逐位不变）；c1 = %s；软通道 κ = %.3g'
+                % ('**只装越限 (P_F−3)⁺**' if _mf.C1_TAIL_ONLY else '历史口径 P_F + 20(P_F−3)⁺',
+                   _mf.KAPPA_SOFT))
     return ('mode=tail | 硬通道 c1=(P_F−3)⁺%s | λ_phys ∈ [%.3f, %.3f] 元/(MW·step) '
             '(actor 空间 ×%.3g = [%.4f, %.4f]) | ε=%.3g MW·step r_cap=%.3g '
             'η_up/η_dn=%.3g/%.3g | 软通道 r1 −= %.3g·P_F'

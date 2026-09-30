@@ -189,13 +189,13 @@ for (u, pr, ptur, pb, pen, E, E2) in ((10.0, 580.0, 6.0, 0.0, 0.0, 3.0, 3.1),
               'P_F=%.1f inev=%.2f ⇒ c1=%.4f（=越限）且 r1 比基准少 κ·P_F=%.4f'
               % (P_F, inev, c1, det['soft_pen']))
 
-# configure 语义：--kappa-soft>0 自动打开 tail c1；默认不动常量
+# configure 语义：--c1-tail-only 三态（auto 默认 / 显式 1 / 显式 0）
 class _NS:
     pass
 
 
 ns = _NS()
-ns.dual_mode, ns.kappa_soft, ns.c1_tail_only = 'ema', 0.0, 0
+ns.dual_mode, ns.kappa_soft, ns.c1_tail_only = 'ema', 0.0, 'auto'
 ns.dual_eps, ns.dual_rcap, ns.dual_eta_up, ns.dual_eta_dn = 0.05, 10.0, 0.1, 0.01
 ns.dual_lammax, ns.dual_lammin, ns.w_inev = 200.0, None, 0.0
 mf.C1_TAIL_ONLY, mf.KAPPA_SOFT, mf.W_INEV = False, 0.0, 0.0
@@ -205,7 +205,21 @@ check(ydual.MODE == 'ema' and mf.C1_TAIL_ONLY is False and mf.KAPPA_SOFT == 0.0,
 ns.kappa_soft = 0.2
 ydual.configure(ns, verbose=False)
 check(mf.C1_TAIL_ONLY is True and mf.KAPPA_SOFT == 0.2,
-      'configure(--kappa-soft 0.2) 自动打开 c1 只装越限（C1_TAIL_ONLY=True）')
+      'configure(--kappa-soft 0.2, auto) 自动打开 c1 只装越限（C1_TAIL_ONLY=True）')
+# E2c 用到的格：显式 0 ⇒ 保留历史 c1，但仍加软价 κ（隔离"只加软价、不加硬通道"）
+ns.c1_tail_only = 0
+ydual.configure(ns, verbose=False)
+check(mf.C1_TAIL_ONLY is False and mf.KAPPA_SOFT == 0.2,
+      "configure(--c1-tail-only 0 --kappa-soft 0.2) ⇒ 历史 c1 + 软价（E2c 格可用）")
+# 显式 1 ⇒ 与 auto 同义
+ns.c1_tail_only = 1
+ydual.configure(ns, verbose=False)
+check(mf.C1_TAIL_ONLY is True, "configure(--c1-tail-only 1) ⇒ 只装越限")
+# tail 模式 + auto ⇒ 只装越限（即使 κ=0）
+ns.dual_mode, ns.c1_tail_only, ns.kappa_soft = 'tail', 'auto', 0.0
+ydual.configure(ns, verbose=False)
+check(ydual.MODE == 'tail' and mf.C1_TAIL_ONLY is True,
+      'configure(--dual-mode tail, auto, κ=0) ⇒ 只装越限（硬通道）')
 
 # 复原（避免影响同进程后续）
 mf.C1_TAIL_ONLY, mf.KAPPA_SOFT, mf.W_INEV = False, 0.0, 0.0
