@@ -53,6 +53,27 @@ EXPECTED_PYTHON = os.environ.get('FLORIS_PYTHON') or _DEFAULT_PYTHON
 _REMOVED = []
 
 
+def ensure_printable_streams():
+    """把 `stdout`/`stderr` 切到 UTF-8 + `errors='replace'`（幂等，可重复调用）。
+
+    ⚠ 为什么必须放在**库里**而不是只放在 `__main__` 里
+    ---------------------------------------------------
+    本守卫的报告含 `⇒`(U+21D2) / `⚠`(U+26A0) 等**非 GBK** 字符，而它是在**被 import
+    的那一刻**就被调用的（`agentutil/probe_engine_random_actions.py:53` 的 `_chk()`，
+    而该模块又是 `aifflor_turbine.build_model()` 的依赖）。此时进程通常不是 `__main__`，
+    没人替我们 reconfigure ⇒ **stdout 一旦不是真控制台**（被管道接走、
+    `> log.txt`、被父进程捕获）就退化成 cp936 严格编码，打印 `⇒` 直接抛
+    `UnicodeEncodeError` —— 守卫本身变成新的故障源（本机实测）。
+
+    真控制台下 Python 走 `WriteConsoleW`（encoding 本就是 utf-8），本函数等价于空操作。
+    """
+    for s in (sys.stdout, sys.stderr):
+        try:
+            s.reconfigure(encoding='utf-8', errors='replace')
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def check_interpreter(expected=EXPECTED_PYTHON, fatal=True, verbose=False):
     """判断当前解释器是不是本项目的环境；不是则给出可直接照抄的命令。
 
@@ -67,6 +88,7 @@ def check_interpreter(expected=EXPECTED_PYTHON, fatal=True, verbose=False):
     dict(ok, reason, executable, version, expected, fallback, has_floris)
         fallback=True ⇒ 本机没有期望解释器，结论来自功能判据 ②（非路径判据）。
     """
+    ensure_printable_streams()          # 先修流，再打印（否则报告里的 ⇒/⚠ 会崩）
     exe = os.path.normcase(os.path.abspath(sys.executable))
     exp = os.path.normcase(os.path.abspath(expected)) if expected else None
     ver = sys.version.split()[0]
@@ -181,6 +203,7 @@ def sanitize(verbose=False):
 
 def report(info=None):
     """打印诊断信息（出问题时让用户一眼看出是解释器问题还是路径污染）。"""
+    ensure_printable_streams()
     if info is None:
         info = check_interpreter(fatal=False)
     if info.get('fallback'):
@@ -218,10 +241,7 @@ def report(info=None):
 
 
 if __name__ == '__main__':
-    try:
-        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-    except AttributeError:
-        pass
+    ensure_printable_streams()
     _i = check_interpreter(fatal=False)
     sanitize()
     report(_i)
