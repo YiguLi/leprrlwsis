@@ -81,6 +81,13 @@ CT_LO, CT_HI = 0.0001, 0.9999
 #: 供 `agentutil/probe_power_match_alternatives.py` 扫描"功率对得上但尾流合理"的替代解。
 CT_SCALE = 1.0
 
+#: **多尾流组合的幂平均指数**（`agentutil/probe_custom_combination.py` 用）。
+#: `n = 2` ≡ FLORIS 现用的 SOSFS（`√(Σd²)`）；`n = 1` ≡ 线性/Katic 叠加。
+#: 这是"在 FLORIS 公式最对应位置乘系数"的落点 —— 非物理负速度的根源在**组合规则**
+#: （`u = hypot(wake, d·u_initial) − wake`，`wake > u_initial` 时 `u < 0`），
+#: 而不在单尾流形状。
+COMB_N = 2.0
+
 
 # ===========================================================================
 # 1. 采样（固定种子；两引擎共用同一组）
