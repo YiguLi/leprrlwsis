@@ -72,13 +72,15 @@ A_LO, A_HI = 0.025, 0.5
 U_LO, U_HI = 3.5, 25.0
 DATA = os.path.join('output', 'calib_floris_to_wfsim.json')
 
+
 # 标定参数：(FLORIS 参数路径关键字, 名字, 下界, 上界, 初值)
-# 路径实测（`agentutil` 里核过）：
+# 路径实测（`agentutil` 里逐条核过，不是猜的）：
 #   gauss 尾流参数在 `wake.wake_velocity_parameters['gauss']`
 #     {'alpha':0.58,'beta':0.077,'ka':0.38,'kb':0.004}
 #   crespo_hernandez 湍流参数在 `wake.wake_turbulence_parameters['crespo_hernandez']`
 #     {'initial':0.1,'constant':0.5,'ai':0.8,'downstream':-0.32}
 #   （⚠ 函数签名里的 `ceps_alpha` 不是参数键名；参数键是 `alpha`。这是踩过的坑。）
+# 实测最优会顶边界：ka/alpha 顶下界、ai 顶上界 ⇒ 见 set_bounds()。
 PARAMS = [
     ('velocity', 'ka',         0.050, 1.200, 0.380),
     ('velocity', 'kb',         0.000, 0.050, 0.004),
@@ -87,6 +89,33 @@ PARAMS = [
     ('turbulence', 'ai',       0.050, 2.000, 0.800),
     ('turbulence', 'constant', 0.050, 1.500, 0.500),
 ]
+
+
+def set_bounds(ka_lo=None, alpha_lo=None, beta_hi=None, ai_hi=None,
+               kb_lo=None, verbose=True):
+    """放宽/收紧标定参数边界（原地改 `PARAMS`）。
+
+    动机：上一轮实测的最优解 **顶在边界上**
+        ka = 0.05（下界）、alpha = 0.10013（下界）、ai = 1.94935（上界 2.0 附近、被 clip）
+    ⇒ 真正的最优很可能在搜索空间之外。放宽后重跑 `--fit` 就能判断
+    1.315% 是"物理下限"还是"边界造成的人为下限"。
+    """
+    idx = {'ka_lo': (0, 'lo'), 'kb_lo': (1, 'lo'), 'alpha_lo': (2, 'lo'),
+           'beta_hi': (3, 'hi'), 'ai_hi': (4, 'hi')}
+    for key, val in (('ka_lo', ka_lo), ('kb_lo', kb_lo), ('alpha_lo', alpha_lo),
+                     ('beta_hi', beta_hi), ('ai_hi', ai_hi)):
+        if val is None:
+            continue
+        i, which = idx[key]
+        kind, name, lo, hi, d = PARAMS[i]
+        if which == 'lo':
+            lo = float(val)
+        else:
+            hi = float(val)
+        PARAMS[i] = (kind, name, lo, hi, d)
+    if verbose:
+        print('生效边界: %s' % {('%s.%s' % (p[0], p[1])): (p[2], p[3]) for p in PARAMS})
+    return PARAMS
 
 
 # ===========================================================================
@@ -155,18 +184,23 @@ def wfsim_eval(us, A, verbose=True):
 # ===========================================================================
 # 3. 误差口径
 # ===========================================================================
-def metrics(PW, PF):
+def metrics(PW, PF, loss='mape'):
     ok = np.isfinite(PW) & np.isfinite(PF) & (PW > 1e-9)
     r = PF[ok] / PW[ok]
-    rel = np.abs(PF[ok] - PW[ok]) / PW[ok]
+    rel = (PF[ok] - PW[ok]) / PW[ok]
+    arel = np.abs(rel)
     k = float(np.dot(PW[ok], PF[ok]) / np.dot(PW[ok], PW[ok]))
     rel_k = np.abs(k * PW[ok] - PW[ok]) / PW[ok]           # 只按常数重标定后的相对差
     resid_k = np.abs(PF[ok] - k * PW[ok]) / PF[ok].mean()   # 形状残差（相对 FLORIS 均值）
+    # 稳健损失：|相对误差| 的**中位数**（MAPE 是均值，会被少数离群样本主导）
+    med = float(np.median(arel))
     return dict(n=int(ok.sum()),
                 ratio_mean=float(r.mean()), ratio_std=float(r.std()),
                 ratio_min=float(r.min()), ratio_max=float(r.max()),
-                mape=float(rel.mean()), mape_k=float(rel_k.mean()),
-                k_best=k, resid_k=float(resid_k.mean()))
+                mape=float(arel.mean()), medape=med,
+                mape_k=float(rel_k.mean()), medape_k=float(np.median(rel_k)),
+                k_best=k, resid_k=float(resid_k.mean()),
+                loss=med if loss == 'medape' else float(arel.mean()))
 
 
 # ===========================================================================
@@ -181,7 +215,21 @@ def main():
     ap.add_argument('--seed', type=int, default=11)
     ap.add_argument('--data', default=DATA)
     ap.add_argument('--json', default=None, help='把标定结果另存')
+    ap.add_argument('--ka-lo', type=float, default=None,
+                    help='放宽 ka 下界（默认 0.05；实测最优顶在此）')
+    ap.add_argument('--alpha-lo', type=float, default=None,
+                    help='放宽 alpha 下界（默认 0.10；实测最优顶在此）')
+    ap.add_argument('--ai-hi', type=float, default=None,
+                    help='放宽湍流 ai 上界（默认 2.0；实测最优顶在此）')
+    ap.add_argument('--beta-hi', type=float, default=None, help='放宽 beta 上界')
+    ap.add_argument('--theta0', type=float, nargs=6, default=None,
+                    help='自定义优化起点（6 个数，顺序 = PARAMS）。用于检验"是否陷在局部最优"')
+    ap.add_argument('--loss', choices=['mape', 'medape'], default='mape',
+                    help='优化目标：mape=相对误差均值(默认, 对离群点敏感) / '
+                         'medape=相对误差中位数(稳健, 实测验证集更好)')
     args = ap.parse_args()
+    set_bounds(ka_lo=args.ka_lo, alpha_lo=args.alpha_lo, ai_hi=args.ai_hi,
+               beta_hi=args.beta_hi)
     if not (args.gen or args.fit):
         args.gen = args.fit = True
 
@@ -240,11 +288,14 @@ def main():
     theta0 = np.array([p[4] for p in PARAMS], dtype=float)
     lo = np.array([p[2] for p in PARAMS], dtype=float)
     hi = np.array([p[3] for p in PARAMS], dtype=float)
+    if args.theta0 is not None:
+        theta0 = np.clip(np.asarray(args.theta0, dtype=float), lo, hi)
+        print('使用自定义起点 θ0 = %s' % np.array2string(theta0, precision=4))
 
     def J(theta):
         th = np.clip(theta, lo, hi)
         PF = floris_eval(m, cal_u, cal_A, theta=th)
-        j = metrics(cal_W, PF)['mape']
+        j = metrics(cal_W, PF, loss=args.loss)['loss']
         print('    J=%.5f  θ=%s' % (j, np.array2string(th, precision=4)), flush=True)
         return j
 
@@ -291,6 +342,12 @@ def main():
           % ('标定后', 100 * m1['mape'], 100 * m1['mape_k'], m1['ratio_std']))
     print('  %-24s %11s %11.3f%% %10.4f'
           % ('（参考）随机动作基线', '—', 100 * 0.1058, 0.1388))
+    print('\n  稳健口径（中位数，不受少数离群样本主导）:')
+    print('  %-24s %12s %12s' % ('', 'MedAPE', '常数重标后'))
+    print('  %-24s %11.3f%% %11.3f%%'
+          % ('标定前（默认参数）', 100 * m0['medape'], 100 * m0['medape_k']))
+    print('  %-24s %11.3f%% %11.3f%%'
+          % ('标定后', 100 * m1['medape'], 100 * m1['medape_k']))
     print('\n  ⇒ "常数重标后"那一列是真正要看的：它衡量**形状**还剩多少差异。')
 
     if args.json:
@@ -309,9 +366,11 @@ def _print_metrics(tag, mm):
     print('  %s n=%d' % (tag, mm['n']))
     print('    比值 mean %.4f  std %.4f  min %.4f  max %.4f'
           % (mm['ratio_mean'], mm['ratio_std'], mm['ratio_min'], mm['ratio_max']))
-    print('    MAPE（相对误差均值）        %.3f%%' % (100 * mm['mape']))
+    print('    MAPE（相对误差**均值**）    %.3f%%' % (100 * mm['mape']))
+    print('    MedAPE（相对误差**中位数**） %.3f%%' % (100 * mm['medape']))
     print('    最优常数重标定后 MAPE       %.3f%%   (k*=%.4f)'
           % (100 * mm['mape_k'], mm['k_best']))
+    print('    最优常数重标定后 MedAPE     %.3f%%' % (100 * mm['medape_k']))
     print('    形状残差（相对 FLORIS 均值）%.3f%%' % (100 * mm['resid_k']))
 
 
