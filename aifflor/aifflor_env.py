@@ -65,16 +65,26 @@ class AifflorPhysics:
         self.n_batch = 0
         self.n_direct = 0
         self.n_hit = 0
-        self.n_nonfinite = 0
+        self.n_nonfinite = 0        # 出口守卫兜底次数（退回标称动作）
+        self.n_cache_bad = 0        # 试图进入/已在缓存里的非有限值条数
 
-    # ---------------- 动作换算（与 td3per 同语义：夹到 [0, 0.5]） ----------------
+    # ---------------- 动作换算（学习带 [0,0.5]；物理层再抬到安全下界） ----------------
     def a_clip(self, act):
-        """动作 → 轴向因子向量（夹到 `[0, 0.5]`，长度补齐到 `nt`）。"""
+        """动作 → 轴向因子向量（长度补齐到 `nt`）。
+
+        ⚠ 夹带分两段（**这是本环境唯一的"动作 ≠ 物理"之处**）：
+        * 先按**学习带** `[A_LO, A_HI] = [0, 0.5]` 夹（与 `td3per` 同口径）；
+        * 再抬到**引擎安全下界** `A_PHYS_LO = 0.025`（`a = 0` 会让高斯尾流 0/0 出
+          NaN；见 `aifflor_turbine.A_PHYS_LO` 的论证与实测）。
+        ⇒ `a ∈ [0, 0.025)` 这一段在物理上按 `0.025` 计。这是**刻意的、有文档的**映射，
+        不是静默兜底：区间宽度 0.025 只占学习带的 5%，且 `a → 0` 本身是停机奇点。
+        """
         arr = np.asarray(act, dtype=float).reshape(-1)[:self.nt]
         if arr.size < self.nt:                                  # 允许标量广播
             arr = np.full(self.nt, float(arr.reshape(-1)[0]) if arr.size
                           else AT.A_NOMINAL)
-        return np.clip(arr, AT.A_LO, AT.A_HI)
+        arr = np.clip(arr, AT.A_LO, AT.A_HI)
+        return np.clip(arr, AT.A_PHYS_LO, None)
 
     # ---------------- 缓存键 ----------------
     @staticmethod
@@ -84,7 +94,11 @@ class AifflorPhysics:
 
     # ---------------- 预取 ----------------
     def prefetch(self, us, act):
-        """**替换**缓存：把 `us` 这批风速在**同一个动作向量**下一次算完。"""
+        """**替换**缓存：把 `us` 这批风速在**同一个动作向量**下一次算完。
+
+        ⚠ 只把**有限值**写进缓存：物理层 `AT.eval_batch` 已做逐条重试 + 标称兜底，
+        但这里再挡一道（NaN 绝不能进缓存 —— 历史 bug 就是它绕过了守卫）。
+        """
         us = np.atleast_1d(np.asarray(us, dtype=float))
         a = self.a_clip(act)
         if us.size == 0:
@@ -92,30 +106,51 @@ class AifflorPhysics:
         acts = np.tile(a, (us.size, 1))
         farm, _ = AT.eval_batch(self.model, us, acts)
         self.n_batch += 1
-        self._cache = {self._key(us[i], a): float(farm[i]) for i in range(us.size)}
+        self._cache = {}
+        for i in range(us.size):
+            v = float(farm[i])
+            if np.isfinite(v):
+                self._cache[self._key(us[i], a)] = v
+            else:
+                self.n_cache_bad += 1
         return farm
+
+    def _compute(self, u, a):
+        """直算一次（不做守卫 —— 守卫统一放在 `power()` 的出口）。"""
+        farm = AT.farm_power(self.model, u, a)
+        self.n_direct += 1
+        return float(farm)
+
+    def _fallback(self, u):
+        """兜底：退回标称动作 `a = 1/3`（实测该点尾流最宽、必有限）。"""
+        self.n_nonfinite += 1
+        farm = AT.farm_power(self.model, u, np.full(self.nt, AT.A_IND))
+        return float(farm) if np.isfinite(farm) else 0.0
 
     # ---------------- 求值 ----------------
     def power(self, u, act):
-        """风场总出力 [MW]（含非有限值守卫；命中缓存则直接返回）。"""
+        """风场总出力 [MW]（**出口统一守卫**；命中缓存亦然）。
+
+        ⚠ 为什么守卫必须在**出口**而不是只放在直算分支：
+        历史 bug（训练 step≈3386 崩在 `PER_buffer: assert priority > 0`）的根因是
+        `prefetch` 把 NaN 存进了缓存，而"缓存命中"直接 return ⇒ **绕过**了直算分支
+        里的守卫，NaN 一路变成 `ptur` → 观测 → TD 误差 → PER 优先级。
+        现在缓存命中也要过同一道检查，物理层（`AT.eval_batch`）另有逐条重试 + 标称兜底。
+        """
         u = float(u)
         a = self.a_clip(act)
         key = self._key(u, a)
         if self.cache_enabled and key in self._cache:
             self.n_hit += 1
-            return float(self._cache[key])
-        return self._compute(u, a)
-
-    def _compute(self, u, a):
-        farm = AT.farm_power(self.model, u, a)
-        self.n_direct += 1
+            farm = float(self._cache[key])
+            if np.isfinite(farm):
+                return farm
+            # 缓存里是坏值 ⇒ 丢弃并即时重算（下面走直算 + 出口守卫）
+            self._cache.pop(key, None)
+            self.n_cache_bad += 1
+        farm = self._compute(u, a)
         if not np.isfinite(farm):
-            # 标定后的窄尾流在极端动作组合下可能出负速度 ⇒ NaN。兜底：退回标称动作
-            # `a = 1/3`（单机最优，尾流最宽，实测有限）。
-            self.n_nonfinite += 1
-            farm = AT.farm_power(self.model, u, np.full(self.nt, AT.A_IND))
-            if not np.isfinite(farm):                           # pragma: no cover
-                farm = 0.0
+            farm = self._fallback(u)
         return float(farm)
 
     # ---------------- env 接口 ----------------
@@ -126,11 +161,16 @@ class AifflorPhysics:
     # ---------------- 诊断 ----------------
     def summary(self):
         tot = self.n_batch + self.n_direct
+        fs = AT.stats()
         return ('[aifflor-physics] FLORIS {} | 标定={} | 批量 {} 次 / 单条 {} 次 / '
-                '命中 {} 次 | 单条占比 {:.1%} | 非有限值守卫 {} 次'
+                '命中 {} 次 | 单条占比 {:.1%} | 出口兜底 {} 次 / 坏缓存 {} 条 || '
+                'FLORIS 层: 评估点 {} | 坏点 {} ({:.3f}%) | 重试救回 {} | 退回标称 {}'
                 .format(self.info.get('floris_version', '?'), self.calibrated,
                         self.n_batch, self.n_direct, self.n_hit,
-                        (self.n_direct / tot if tot else 0.0), self.n_nonfinite))
+                        (self.n_direct / tot if tot else 0.0), self.n_nonfinite,
+                        self.n_cache_bad, fs['n_eval'], fs['n_bad_in_batch'],
+                        100.0 * fs['n_bad_in_batch'] / max(fs['n_eval'], 1),
+                        fs['n_retry_ok'], fs['n_fallback']))
 
 
 # ===========================================================================

@@ -92,8 +92,63 @@ python agentutil/test_aifflor_contract.py   # 环境契约（只读，不需 MAT
 
 ---
 
-## 4. 运行与注意
+## 3.5 **必须知道的一条物理限制**：`a = 0` 是引擎死点（已修，但改变了动作语义）
 
+这是本环境**唯一**"动作 ≠ 物理"的地方，也是踩过的坑，单独一节说清。
+
+### 现象
+FLORIS 高斯尾流的初始尺度（`wake_velocity/gauss.py:76`）：
+
+```
+uR = u · ct / (2 · (1 − √(1 − ct)))          ct = 4a(1−a)
+```
+
+`a = 0 ⇒ ct = 0` 时这是 **0/0**。实测（`agentutil/probe_aifflor_nan_map.py`）：
+
+| 动作 | 裸引擎结果 |
+|---|---|
+| **恰好 `a = 0`**（单台或全场） | **100% NaN** |
+| `a = 0.025` 及以上 | **0%** |
+| 随机均匀采样 `a ~ U(0, 0.5)` | 0%（几乎不可能命中单点） |
+
+### 为什么会咬人
+`td3per_myfunc.CheckAction` 把动作夹到 **`[0, 0.5]`** ⇒ 策略只要把某台推到 `a ≤ 0`
+（"想停机/全力降载"），就被夹成**恰好 0** ⇒ **正好命中死点**。
+
+`aifflor` 训练实测（4000 步）：**评估点 5748，坏点 251 = 4.37%**，
+且**逐条重试救回 0**（单点也是 NaN）⇒ 全部走"退回标称动作 `a = 1/3`"。
+NaN 随后一路变成 `ptur` → 下层观测 → TD 误差 → PER 优先级，
+最终崩在 `PER_buffer.py:181` 的 `assert priority > 0`
+（`new_priorities = |TD|/mean + ε`，`ε = 0.01 > 0` ⇒ **只有 NaN 能触发**）。
+
+> ⚠ 当时的第一版守卫放在**直算分支**里，而 `prefetch` 把 NaN 存进了缓存、
+> **缓存命中路径绕过了守卫** ⇒ 修了等于没修。这是那次调试的真正教训。
+
+### 修法（两层，`aifflor_turbine.py` / `aifflor_env.py`）
+1. **引擎安全下界** `A_PHYS_LO = 0.025`：物理层只接受 `a ≥ 0.025`
+   （`AifflorPhysics.a_clip`）。**学习带仍是 `[0, 0.5]`**，与 `td3per` 逐字相同
+   （所以 `CheckAction` / 越界罚 400 / `violation_amount` 一处都不用改）。
+2. **出口统一守卫 + 缓存不存坏值**：`AifflorPhysics.power()` 在**出口**检查有限性
+   （缓存命中亦然，坏值即丢弃重算）；`AT.eval_batch` 做"整批 → 逐条重试 → 退回标称"
+   三级兜底，并只把有限值写进缓存。
+
+### 代价（必须写进论文/对比声明）
+**`a ∈ [0, 0.025)` 在物理上按 `0.025` 计。** 区间宽度占学习带的 5%，且该区间的功率
+极小（`a = 0.025` 时 `Cp_eff ≈ 0.1%`，风场出力 ≈ **1.65e-6 MW** ≈ 0）
+⇒ 绝对影响可忽略，但**这是"策略动作被改写"而不是"引擎算错"**，必须声明。
+若要彻底消除，可把学习带改成 `[0.025, 0.5]`（需同步改 `CheckAction` 与越界罚系数，
+使"满带越界 = 200 元"不变）—— 本项目**没有**这么做，以保持与 `td3per` 逐字同构。
+
+### 相关工具
+* `agentutil/probe_aifflor_nan_map.py` —— 裸引擎的 NaN 危险区地图（不需 MATLAB）
+* `agentutil/diag_aifflor_nan.py` —— 训练期 NaN 插桩定位器
+  （首个非有限值即抛异常中止，并打印 q/target/TD/权重轨迹）
+* `agentutil/test_aifflor_contract.py` §F —— 6 项 NaN 回归断言
+  （含"缓存被投毒为 NaN 时出口仍有限"）
+
+---
+
+## 4. 运行与注意
 ```powershell
 cd "C:\Users\SCP Site19\Desktop\llm enhanced wsis\leprrlwsis"
 F:\anaconda\envs\wsis\python.exe aifflor\aifflor_main.py

@@ -66,14 +66,36 @@ WIND_DIR_ALIGNED = _YT.WIND_DIR_ALIGNED   # 270°
 TI = _YT.TI                      # 0.06
 WIND_SHEAR = _YT.WIND_SHEAR      # 0.12
 
-#: 动作先验带（**与 td3per 逐字相同**：轴向因子 [0, 0.5]）
+#: 动作先验带（**与 td3per 逐字相同**：轴向因子 [0, 0.5]）—— 这是**学习带**，
+#: `td3per_myfunc.CheckAction` 就是按它做夹带与越界罚，故 aifflor 不改它。
 A_LO, A_HI = 0.0, 0.5
 A_NOMINAL = 0.3333               # env.WindBattery.nominal_action_value
 U_MIN_ENV, U_MAX_ENV = _YT.U_MIN_ENV, _YT.U_MAX_ENV           # 3.5 / 25
 
-#: FLORIS 高斯尾流在 CT→0 时 `uR = u·ct/(2(1−√(1−ct)))` 是 0/0 ⇒ a=0 会出 NaN。
-#: 标定后的表用 `_U_GRID` 覆盖 0..40，故此处只做**运行期守卫**（见 `Farm_power`）。
-A_SAFE_LO = 0.025
+#: **引擎安全下界**：`a` 必须严格 > 0。
+#: ⚠ 实测（`agentutil/probe_aifflor_nan_map.py`）：**恰好 `a = 0` 时 100% 出 NaN**，
+#: 而 `a ≥ 0.025` 全部干净。原因是高斯尾流 `wake_velocity/gauss.py:76` 的
+#:     `uR = u·ct / (2·(1 − √(1 − ct)))`，`ct = 4a(1−a) → 0` 时是 **0/0**。
+#: 因为 `CheckAction` 把动作夹到 `[0, 0.5]`，策略只要把某台推到 `a ≤ 0`，就会被夹成
+#: **恰好 0** ⇒ 命中死点（aifflor 训练实测坏点率 **4.37%**，且逐条重试救回 0）。
+#: ⇒ 物理层只接受 `a ≥ A_PHYS_LO`；`A_LO = 0` 与它之间那一条窄带在物理上按
+#: `A_PHYS_LO` 计（见 `agentutil/probe_aifflor_nan_map.py` 与 aifflor/README.md）。
+A_PHYS_LO = 0.025
+
+#: 上一次 `eval_batch` 里"逐条重试仍失败、退回标称动作"的条数（模块级，供上层累计）
+_LAST_N_FALLBACK = 0
+#: 累计统计：整批坏点数 / 逐条重试成功数 / 退回标称数（诊断用，见 `stats()`）
+STATS = dict(n_eval=0, n_bad_in_batch=0, n_retry_ok=0, n_fallback=0)
+
+
+def last_n_fallback():
+    """上一次 `eval_batch` 里退回标称动作的条数。"""
+    return _LAST_N_FALLBACK
+
+
+def stats():
+    """累计的 NaN 处理统计（诊断用）。"""
+    return dict(STATS)
 
 
 # ===========================================================================
@@ -128,18 +150,56 @@ def eval_batch(m, us, acts):
     -------
     (farm_mw (n,), turb_mw (n, nt))
 
-    注：与 `yawflor_turbine.eval_batch` 同构，只把"偏航角"换成"轴向因子"。
+    非有限值处理（**必需**，不是可选）
+    ----------------------------------
+    标定后的窄尾流在极端动作组合下会让 FLORIS 报
+    `WARNING Some velocities at the rotor are negative` 并**返回 NaN**；
+    而 FLORIS 是**批量**调用 ⇒ 一条坏点会污染整批。故这里：
+
+      1. 整批调用 → 检出非有限项；
+      2. 对每个坏点**逐条重试**（单点调用常能给出有限值）；
+      3. 仍非有限 ⇒ 退回**标称动作 `a = 1/3`**（实测该点尾流最宽、必有限），
+         并把该条记入 `_LAST_N_FALLBACK`（模块级计数，供 `AifflorPhysics` 累计）。
+
+    ⚠ 这一层是**必需**的：历史 bug（aifflor 训练 step≈3386 崩在
+    `PER_buffer.update_priorities: assert priority > 0`）的根因就是
+    `prefetch` 缓存里存进了 NaN，且缓存命中路径**绕过**了上层守卫 ⇒ NaN 一路
+    变成 `ptur` → 观测 → TD 误差 → PER 优先级。修在这里之后，所有调用方
+    （直算 / 预取 / 批量）都拿到有限值。
     """
-    import agentutil.probe_engine_random_actions as _R
+    global _LAST_N_FALLBACK
     us = np.atleast_1d(np.asarray(us, dtype=float))
     acts = np.atleast_2d(np.asarray(acts, dtype=float))
     n = int(us.size)
     if acts.shape[0] != n:
         raise ValueError('us 与 acts 行数不一致: %d vs %s' % (n, acts.shape))
     keep = np.clip(us, 1e-6, None)
+
+    import agentutil.probe_engine_random_actions as _R
     farm, turb = _R._run_batch(m, keep, acts)
     farm = np.asarray(farm, dtype=float)
     turb = np.asarray(turb, dtype=float)
+
+    n_fb = 0
+    STATS['n_eval'] += n
+    bad = ~np.isfinite(farm)
+    if bad.any():
+        STATS['n_bad_in_batch'] += int(bad.sum())
+        for i in np.flatnonzero(bad):
+            f1, t1 = _R._run_batch(m, [keep[i]], acts[i:i + 1])
+            farm[i], turb[i] = float(np.ravel(f1)[0]), np.ravel(t1)
+        ok = np.isfinite(farm)
+        STATS['n_retry_ok'] += int((bad & ok).sum())
+        still = ~ok
+        for i in np.flatnonzero(still):
+            a_nom = np.full((1, acts.shape[1]), float(A_IND))
+            f2, t2 = _R._run_batch(m, [keep[i]], a_nom)
+            farm[i], turb[i] = float(np.ravel(f2)[0]), np.ravel(t2)
+            n_fb += 1
+        STATS['n_fallback'] += n_fb
+    _LAST_N_FALLBACK = int(n_fb)
+
+    # `env.py` 的守卫：u < 3.5 时出力 0（与 `yawflor_turbine.eval_batch` 同口径）
     farm = np.where(us >= U_MIN_ENV, farm, 0.0)
     return farm, turb
 
