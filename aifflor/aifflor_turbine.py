@@ -12,7 +12,7 @@
 |---|---|---|
 | 入口 | `WFSim_port(u, 0.0, a[5], 0.0)` | `Farm_power(u, a[5])`（向量化） |
 | 动作 ∈ ℝ⁵ | **轴向因子 a**，`env.py` 夹到 **[0, 0.5]** | **同一个 a**（逐台），夹带同上 |
-| 动作 → 物理 | `CT_prime = 4a(1−a)²`(=`Cp`)；力 = `1.5·½ρUe²·CT_prime/(1−a)` | 表里 `CT = 4a(1−a)`、`Cp_eff = 0.95·4a(1−a)²` |
+| 动作 → 物理 | `CT_prime = 4a(1−a)²`(=`Cp`)；力 = `1.5·½ρUe²·CT_prime/(1−a)` | `CT = clip(4a(1−a), 1e-4, 0.9999)`、`Cp_eff = 0.95·4a(1−a)²` |
 | 航向 | `phi = 0`（恒） | `yaw_angles ≡ 0`（恒） |
 | 端口 | 无端口维（2D 单排） | 第五维（y=0 单排） |
 | 第 6 维动作 | SOC 目标信号，**不进风机** | 同（`env.PowerOutput` 已截到前 5 维） |
@@ -60,20 +60,59 @@ A_IND = _YT.A_IND                # 1/3（单机 Cp 最优点）
 POWER_SCALE = _YT.POWER_SCALE    # 0.95
 CP_EFF = _YT.CP_EFF              # 0.56296
 CT_EFF = _YT.CT_EFF              # 8/9
+
+#: **出口电平系数**（`FLORIS 电场出力 → 与 WFSim 对齐的常数倍率`）。
+#:
+#: 由来（实测，`agentutil/analyse_stock_vs_calibrated.py`）：用 **FLORIS 随包默认**
+#: 尾流参数时，FLORIS 的电场出力系统性**低于** WFSim 约 40%，而且这个偏差几乎是一个
+#: **纯常数倍率**（100 步真实风速序列上 `corr = 0.999980`、比值 `std = 0.0103`）。
+#: ⇒ 用**一个**显式系数即可对齐电平和波动，**不需要**改任何尾流参数。
+#:
+#: 取值 = `1/k*`，其中 `k* = ⟨P_W, P_F⟩/⟨P_W, P_W⟩` 由全域 350 点
+#: （3–20 m/s、0.5 m/s 粒度、每档 10 个随机行为）拟合：
+#:     `k* = 1.6696`  ⇒  `1/k* = 0.598947`
+#:
+#: ⚠ 适用域（必须声明）：该系数在**全域平均**意义上最优，但逐点比值范围是
+#: **1.311–2.149**，且分歧**由动作强度驱动**（`corr(r, min(a)) = −0.658`）
+#: ⇒ 在**强降载 / 动作异质**区的偏差最大。详见 `aifflor/README.md` §3.7.1。
+LEVEL_REF_K = 1.6696
+LEVEL_COEF = 1.0 / LEVEL_REF_K   # ≈ 0.5989471
 NT = _YT.NT                      # 5
 SPACING_D = _YT.SPACING_D        # 5D
 WIND_DIR_ALIGNED = _YT.WIND_DIR_ALIGNED   # 270°
 TI = _YT.TI                      # 0.06
 WIND_SHEAR = _YT.WIND_SHEAR      # 0.12
 
-#: 动作先验带（**与 td3per 逐字相同**：轴向因子 [0, 0.5]）
+#: 动作先验带（**与 td3per 逐字相同**：轴向因子 [0, 0.5]）—— 这是**学习带**，
+#: `td3per_myfunc.CheckAction` 就是按它做夹带与越界罚，故 aifflor 不改它。
 A_LO, A_HI = 0.0, 0.5
 A_NOMINAL = 0.3333               # env.WindBattery.nominal_action_value
 U_MIN_ENV, U_MAX_ENV = _YT.U_MIN_ENV, _YT.U_MAX_ENV           # 3.5 / 25
 
-#: FLORIS 高斯尾流在 CT→0 时 `uR = u·ct/(2(1−√(1−ct)))` 是 0/0 ⇒ a=0 会出 NaN。
-#: 标定后的表用 `_U_GRID` 覆盖 0..40，故此处只做**运行期守卫**（见 `Farm_power`）。
-A_SAFE_LO = 0.025
+#: **引擎安全下界**：`a` 必须严格 > 0。
+#: ⚠ 实测（`agentutil/probe_aifflor_nan_map.py`）：**恰好 `a = 0` 时 100% 出 NaN**，
+#: 而 `a ≥ 0.025` 全部干净。原因是高斯尾流 `wake_velocity/gauss.py:76` 的
+#:     `uR = u·ct / (2·(1 − √(1 − ct)))`，`ct = 4a(1−a) → 0` 时是 **0/0**。
+#: 因为 `CheckAction` 把动作夹到 `[0, 0.5]`，策略只要把某台推到 `a ≤ 0`，就会被夹成
+#: **恰好 0** ⇒ 命中死点（aifflor 训练实测坏点率 **4.37%**，且逐条重试救回 0）。
+#: ⇒ 物理层只接受 `a ≥ A_PHYS_LO`；`A_LO = 0` 与它之间那一条窄带在物理上按
+#: `A_PHYS_LO` 计（见 `agentutil/probe_aifflor_nan_map.py` 与 aifflor/README.md）。
+A_PHYS_LO = 0.025
+
+#: 上一次 `eval_batch` 里"逐条重试仍失败、退回标称动作"的条数（模块级，供上层累计）
+_LAST_N_FALLBACK = 0
+#: 累计统计：整批坏点数 / 逐条重试成功数 / 退回标称数（诊断用，见 `stats()`）
+STATS = dict(n_eval=0, n_bad_in_batch=0, n_retry_ok=0, n_fallback=0)
+
+
+def last_n_fallback():
+    """上一次 `eval_batch` 里退回标称动作的条数。"""
+    return _LAST_N_FALLBACK
+
+
+def stats():
+    """累计的 NaN 处理统计（诊断用）。"""
+    return dict(STATS)
 
 
 # ===========================================================================
@@ -86,7 +125,8 @@ def build_model(nt=NT, calibrated=True, verbose=False):
     ----------
     nt : int            机组台数（主臂 5；≠5 时若 `calibrated=True` 会报错）
     calibrated : bool   `True`（默认）施加 `floris_calibrated_defaults` 的标定尾流参数；
-                        `False` 用 FLORIS 随包默认（仅供"标定前/后"对照，**不要用于生产**）
+                        `False` 用 FLORIS 随包默认（**"只用电平系数"模式**用这个；
+                        此时必须配 `AifflorPhysics(power_scale=LEVEL_COEF)` 才与 WFSim 对齐）
     """
     import agentutil.probe_engine_random_actions as _R
     _R.register_op_model()
@@ -101,6 +141,7 @@ def build_model(nt=NT, calibrated=True, verbose=False):
         layout='single_row_5D', rotor_diameter=D_ROTOR, hub_height=HUB_HEIGHT,
         rho=RHO, wind_shear=WIND_SHEAR, ti=TI, wind_direction=WIND_DIR_ALIGNED,
         cp_eff=CP_EFF, ct_eff=CT_EFF, power_scale=POWER_SCALE,
+        level_ref_k=LEVEL_REF_K, level_coef=LEVEL_COEF,
         wake_params=(dict(CALIBRATED_WAKE_PARAMS) if calibrated else None),
         theta=(calibrated_theta() if calibrated else None),
     )
@@ -128,18 +169,56 @@ def eval_batch(m, us, acts):
     -------
     (farm_mw (n,), turb_mw (n, nt))
 
-    注：与 `yawflor_turbine.eval_batch` 同构，只把"偏航角"换成"轴向因子"。
+    非有限值处理（**必需**，不是可选）
+    ----------------------------------
+    标定后的窄尾流在极端动作组合下会让 FLORIS 报
+    `WARNING Some velocities at the rotor are negative` 并**返回 NaN**；
+    而 FLORIS 是**批量**调用 ⇒ 一条坏点会污染整批。故这里：
+
+      1. 整批调用 → 检出非有限项；
+      2. 对每个坏点**逐条重试**（单点调用常能给出有限值）；
+      3. 仍非有限 ⇒ 退回**标称动作 `a = 1/3`**（实测该点尾流最宽、必有限），
+         并把该条记入 `_LAST_N_FALLBACK`（模块级计数，供 `AifflorPhysics` 累计）。
+
+    ⚠ 这一层是**必需**的：历史 bug（aifflor 训练 step≈3386 崩在
+    `PER_buffer.update_priorities: assert priority > 0`）的根因就是
+    `prefetch` 缓存里存进了 NaN，且缓存命中路径**绕过**了上层守卫 ⇒ NaN 一路
+    变成 `ptur` → 观测 → TD 误差 → PER 优先级。修在这里之后，所有调用方
+    （直算 / 预取 / 批量）都拿到有限值。
     """
-    import agentutil.probe_engine_random_actions as _R
+    global _LAST_N_FALLBACK
     us = np.atleast_1d(np.asarray(us, dtype=float))
     acts = np.atleast_2d(np.asarray(acts, dtype=float))
     n = int(us.size)
     if acts.shape[0] != n:
         raise ValueError('us 与 acts 行数不一致: %d vs %s' % (n, acts.shape))
     keep = np.clip(us, 1e-6, None)
+
+    import agentutil.probe_engine_random_actions as _R
     farm, turb = _R._run_batch(m, keep, acts)
     farm = np.asarray(farm, dtype=float)
     turb = np.asarray(turb, dtype=float)
+
+    n_fb = 0
+    STATS['n_eval'] += n
+    bad = ~np.isfinite(farm)
+    if bad.any():
+        STATS['n_bad_in_batch'] += int(bad.sum())
+        for i in np.flatnonzero(bad):
+            f1, t1 = _R._run_batch(m, [keep[i]], acts[i:i + 1])
+            farm[i], turb[i] = float(np.ravel(f1)[0]), np.ravel(t1)
+        ok = np.isfinite(farm)
+        STATS['n_retry_ok'] += int((bad & ok).sum())
+        still = ~ok
+        for i in np.flatnonzero(still):
+            a_nom = np.full((1, acts.shape[1]), float(A_IND))
+            f2, t2 = _R._run_batch(m, [keep[i]], a_nom)
+            farm[i], turb[i] = float(np.ravel(f2)[0]), np.ravel(t2)
+            n_fb += 1
+        STATS['n_fallback'] += n_fb
+    _LAST_N_FALLBACK = int(n_fb)
+
+    # `env.py` 的守卫：u < 3.5 时出力 0（与 `yawflor_turbine.eval_batch` 同口径）
     farm = np.where(us >= U_MIN_ENV, farm, 0.0)
     return farm, turb
 

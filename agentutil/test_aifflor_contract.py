@@ -83,9 +83,14 @@ def main():
        'u=10, a=1/3 ⇒ %.9f MW（标定后现值）' % p13)
     p20 = ph.power(10.0, [0.20] * 5)
     ok(p20 > p13, 'u=10 时 a=0.20 (%.4f) > a=1/3 (%.4f)：标定后最优点在 0.375 侧' % (p20, p13))
-    # a 夹带
-    ok(np.allclose(ph.a_clip([-1.0, 9.0, 0.25, 0.25, 0.25]), [0.0, 0.5, 0.25, 0.25, 0.25]),
-       'a_clip 正确夹到 [0, 0.5]')
+    # a 夹带：先按学习带 [0,0.5]，再抬到引擎安全下界 A_PHYS_LO=0.025
+    ok(np.allclose(ph.a_clip([-1.0, 9.0, 0.25, 0.25, 0.25]),
+                   [0.025, 0.5, 0.25, 0.25, 0.25]),
+       'a_clip: 学习带 [0,0.5] + 引擎安全下界 0.025（越界 -1→0.025, 9→0.5）')
+    ok(abs(AT.A_PHYS_LO - 0.025) < 1e-12 and AT.A_LO == 0.0,
+       'A_PHYS_LO=0.025（引擎）与 A_LO=0.0（学习带）分开定义')
+    ok(np.isfinite(ph.power(10.0, [0.0] * 5)),
+       'a=0（裸引擎的 0/0 死点）经物理层后为有限值：%.3e MW' % ph.power(10.0, [0.0] * 5))
 
     print('\n' + '=' * 90)
     print('D. env 契约：观测布局 / 围栏 / 预取 / 接口同形（不启 MATLAB）')
@@ -125,6 +130,36 @@ def main():
     print('=' * 90)
     ok(not hasattr(AT, 'GAMMA_MAX'), 'aifflor_turbine 没有偏航常量 GAMMA_MAX')
     ok(AT.WIND_DIR_ALIGNED == 270.0, '风向仍沿 +x（270°），对应 WFSim 的 wind_angle=0')
+
+    print('\n' + '=' * 90)
+    print('F. NaN 外推风险：出口守卫 + 缓存不得存坏值（历史 bug 回归）')
+    print('=' * 90)
+    # 历史 bug：prefetch 把 NaN 存进缓存，缓存命中路径**绕过**直算分支的守卫
+    # ⇒ NaN 变成 ptur → 观测 → TD 误差 → PER 优先级 → `assert priority > 0` 失败。
+    import aifflor.aifflor_turbine as AT2
+    e3 = WindBatteryAIF(5.0, 5, upload=False, engine=None, physics=AifflorPhysics(nt=5))
+    e3.reset()
+    # 1) 缓存里绝不允许出现非有限值
+    bad_cached = [k for k, v in e3.physics._cache.items() if not np.isfinite(v)]
+    ok(not bad_cached, '预取缓存里没有非有限值（%d 条缓存）' % len(e3.physics._cache))
+    # 2) 主动往缓存塞一个 NaN，出口必须挡住并重算
+    key = next(iter(e3.physics._cache))
+    e3.physics._cache[key] = float('nan')
+    u_k, a_k = key[0], np.asarray(key[1], dtype=float)
+    v = e3.physics.power(u_k, a_k)
+    ok(np.isfinite(v), '缓存被投毒为 NaN 时，出口守卫仍返回有限值（%.6f MW）' % v)
+    ok(e3.physics.n_cache_bad >= 1, '坏缓存被计数（n_cache_bad=%d）' % e3.physics.n_cache_bad)
+    # 3) 直算路径遇 NaN 时退回标称且仍有限
+    v2 = e3.physics.power(10.0, [0.0] * 5)      # a=0 是已知的 0/0 死点
+    ok(np.isfinite(v2), 'a=0（已知死点）也返回有限值（%.6f MW）' % v2)
+    # 4) 物理层统计接口存在
+    ok(set(AT2.stats().keys()) == {'n_eval', 'n_bad_in_batch', 'n_retry_ok', 'n_fallback'},
+       'AT.stats() 暴露 NaN 处理统计')
+    # 5) eval_batch 出口不含 NaN
+    f, t = AT2.eval_batch(e3.physics.model, np.array([6.0, 8.0]), np.array([[0.0] * 5,
+                                                                           [0.5] * 5]))
+    ok(bool(np.isfinite(f).all()) and bool(np.isfinite(t).all()),
+       'eval_batch 出口全为有限值（含 a=0 与 a=0.5 两个端点）')
 
     print('\n' + '=' * 90)
     if FAIL:

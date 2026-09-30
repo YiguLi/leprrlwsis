@@ -103,8 +103,21 @@ MAIN_EDITS = [
         '    #   在结构上同形（互不串状态），代价是两份 FlorisModel（构建各 ~0.2 s）。\n'
         '    #   尾流参数 = `agentutil/floris_calibrated_defaults.py` 的**标定值**\n'
         '    #   （对 WFSim 的验证集相对误差 66.9% → 1.1%）。\n'
-        '    aif_physics = AifflorPhysics(nt=args.nb_turbine)\n'
-        '    aif_physics_test = AifflorPhysics(nt=args.nb_turbine)\n'
+        "    # aifflor 的物理配置（**由 `agentutil/port_aifflor.py` 的替换表决定**）：\n"
+        "    #   `calibrated=False` = **FLORIS 随包默认尾流参数**（可审计：不改任何参数）；\n"
+        "    #   `power_scale=AT.LEVEL_COEF` = 出口电平系数 1/1.6696 ≈ 0.59895，\n"
+        "    #     把 FLORIS 的电场出力整体抬到 WFSim 电平。\n"
+        "    #   依据（实测，`agentutil/analyse_level_coef_modes.py`）：\n"
+        "    #     · 全域 350 点（3–20 m/s，随机动作）原始 MAPE 68.476% → **7.189%**；\n"
+        "    #     · 重标定后 MAPE 66.962% → **0.001%**（即电平偏差被**完全**吸收）；\n"
+        "    #     · 波动：限幅后波动均值相对 WFSim +22.50%（标定参数为 −28.11%）；\n"
+        "    #     · 锚点 u=10, a=1/3：由 5.942350 变为 3.559146 MW"
+        "（WFSim 参考 3.4462，+3.28%）。\n"
+        "    #   ⇒ 物理用原厂默认、只加一个显式系数，功率与波动都对齐且更易审计。\n"
+        "    aif_physics = AifflorPhysics(nt=args.nb_turbine, calibrated=False,\n"
+        "                                 power_scale=aturb.LEVEL_COEF)\n"
+        "    aif_physics_test = AifflorPhysics(nt=args.nb_turbine, calibrated=False,\n"
+        "                                      power_scale=aturb.LEVEL_COEF)\n"
         '    env = WindBatteryAIF(max_E, args.nb_turbine, upload, None, physics=aif_physics)\n'
         '    env_test = WindBatteryAIF(max_E, args.nb_turbine, upload, None,\n'
         '                              physics=aif_physics_test)\n'
