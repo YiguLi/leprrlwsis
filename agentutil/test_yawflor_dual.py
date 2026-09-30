@@ -189,6 +189,25 @@ for (u, pr, ptur, pb, pen, E, E2) in ((10.0, 580.0, 6.0, 0.0, 0.0, 3.0, 3.1),
               'P_F=%.1f inev=%.2f ⇒ c1=%.4f（=越限）且 r1 比基准少 κ·P_F=%.4f'
               % (P_F, inev, c1, det['soft_pen']))
 
+# **软通道必须独立于 c1 口径**（修过一次："--c1-tail-only 0 且 κ>0" 时 κ 曾静默失效）
+mf.C1_TAIL_ONLY, mf.KAPPA_SOFT, mf.W_INEV = False, 0.5, 0.0
+_u, _pr, _ptur, _pb, _pen, _E, _E2 = 10.0, 580.0, 6.0, 0.0, 0.0, 3.0, 3.1
+_P_F = 2.0
+_obs = np.array([_pr, _u, _E, _ptur - _pb])
+_obs2 = np.array([_pr, _u, _E2, _ptur - _pb + _P_F])
+_act = np.array([0.1, -0.2, 0.0, 0.3, -0.4, 0.0, _pb])
+_info = dict(pbrule=_pb, unfeasible_gap=0.0, clip_amount=0.0,
+             is_infeasible=False, inevitable_violation=0.0)
+_r1, _c1, _det = mf.Cal_Rew_RB(_obs, _obs2, _act, _info, penalty_NN_H=_pen,
+                               time=1.0 / 60.0, ptur=_ptur, pb_cmd=_pb)
+_base = (mf.get_wT(_det['wind_level'], _det['price_level']) * _pr * _ptur / 60.0
+         + mf.get_wB(_det['price_level'], _det['wind_level'], _E) * (-_pr * _pb / 60.0)
+         - 490.0 * max(-_pb, 0.0) / 60.0 - _pen)
+check(abs(_c1 - _P_F) < 1e-12 and abs(_det['soft_pen'] - 0.5 * _P_F) < 1e-15
+      and abs(_r1 - (_base - 0.5 * _P_F)) < 1e-12,
+      'C1_TAIL_ONLY=False 且 κ>0 ⇒ c1 仍走历史口径、软价照常生效（修过：曾静默失效）')
+mf.C1_TAIL_ONLY, mf.KAPPA_SOFT, mf.W_INEV = True, 0.2, 0.0
+
 # configure 语义：--c1-tail-only 三态（auto 默认 / 显式 1 / 显式 0）
 class _NS:
     pass

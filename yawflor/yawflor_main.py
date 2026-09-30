@@ -112,7 +112,7 @@ def init_wt_action_bias(agent, lo=None, hi=None, sig_value=0.0, verbose=True):
       fc4.bias 仍是 PyTorch 默认 U(−1/√fan_in)=U(±0.25) (fan_in=hidden1=16);
       而 a 与功率系数的关系是 Cp = 4a(1−a)² (见 WFSim_port.m):
         a=0 → Cp=0 (该机零出力/停机),  a=1/3 → Cp=0.593 (Betz 最大),  a=0.5 → Cp=0.5。
-      于是初始策略 ≈ bias: 实测 5 个种子 (旧 16/100 口径) → 死机 2~4 台、全场 ΣCp 仅 0.47~0.72
+      于是初始策略 ≈ bias: 实测 5 个种子 → 死机 2~4 台、全场 ΣCp 仅 0.47~0.72
       (效率 16%~24%)。策略从"半停机"出发, 而 a<0 区被 CheckAction 裁掉后梯度为 0
       → 若没有恢复力就会长期停在停机态。
     yawflor 的带是 `[lo,hi] = [−1,+1]`（默认取 `hsrl_warmup.YAW_LO/YAW_HI` 单一真源），
@@ -880,9 +880,6 @@ if __name__ == "__main__":
                         help='run 身份 (决定日志目录 output/<env>-runN, 即 TensorBoard 的 run 名);'
                              ' yawflor: TB 的 scalar tag 与 td3per 逐字同名(便于跨 run 对齐),'
                              ' 故方法区分靠此目录名 + CSV 名 (df_yawflor.csv)')
-    # 网络宽度 (H/L 共用): **旧格式 16/100**（2026-09-29 曾提升到 64/128,
-    #   2026-09-30 按用户要求退回旧格式, 与 50de2d7 之前的 run / 旧 3 个项目口径一致）。
-    #   ⚠ 改维度后旧 run 的 .pkl 不可直接复载 (fc1/fc3 形状不同)。
     parser.add_argument('--hidden1',
                         default=16,
                         type=int,
@@ -891,12 +888,10 @@ if __name__ == "__main__":
                         default=100,
                         type=int,
                         help='hidden num of second fully connect layer')
-    # critic lr: **旧格式 0.01**（2026-09-29 曾改为 1e-3, 现退回;
-    #   actor lr 仍是 1e-4, 见 --prate, 未动）
     parser.add_argument('--rate',
                         default=0.01,
                         type=float,
-                        help='critic net learning rate')
+                        help='learning rate')
     parser.add_argument('--prate',
                         default=0.0001,
                         type=float,
@@ -947,22 +942,20 @@ if __name__ == "__main__":
                         help='越界乘性惩罚系数 c: 风机收益 × exp(-c·Σ前5维越界量) '
                              '(默认 %.1f = **关闭**; 5.0 = 已证伪的旧口径, 见 README run14 分析)'
                              % VIOL_DERATE_COEF)
-    # minibatch: **旧格式 128**（2026-09-29 曾改为 256, 现退回; 与 --rmsize 同步减半）
     parser.add_argument('--bsize', default=128, type=int,
                         help='minibatch size')
     # ---- memory 容量 ----
     #   ⚠ 口径随 nstep 变: 滑窗下 1 条 = n 个块 = 5n 个环境步, 所以"条数"要按
     #   env-step 读: rmsize x 5n = 覆盖的环境步。
-    #   默认 20000 (**旧格式**; 2026-09-29 曾提升到 40000, 现退回): n=5 ⇒ 500k 步
-    #     ≈ 347 天。与 --bsize 128 同步减半 ⇒ 每个样本的"遍历遍数"不变
-    #     (updates x bsize / rmsize 与 256/40000 完全相同)。
-    #   复现历史: run1~run10 (1-step 口径) 传 --rmsize 80000 (= 400k 步);
-    #             run12 起的 n=5 生产口径用默认值。
+    #   默认 20000 (生产口径, 与 run12/run13 一致): n=5 ⇒ 500k 步 ≈ 1.8 epoch ≈ 347 天,
+    #     即"最近 ~1.8 个 epoch 的滚动窗口"; ≤60k 步的 run 里仍填不满 (12,000 条)。
+    #   复现历史 run1~run10 (1-step) 请传 --rmsize 80000 (= 400k 步, 且与当时一致)。
+    #   其它五个方法没有 n 步 ⇒ 维持 80000 不动 (见 agentutil/test_phase_uniform.py 的例外表)。
     parser.add_argument('--rmsize',
                         default=20000,
                         type=int,
                         help='H 层 memory 条数 (覆盖环境步 = rmsize x 5 x nstep; '
-                             '默认 20000 (= 500k 步); 复现 run1~run10 传 80000)')
+                             '默认 20000 = 生产口径; 复现 run1~run10 传 80000)')
     parser.add_argument('--window_length', default=1, type=int, help='')
     parser.add_argument('--tau',
                         default=0.001,
@@ -1118,7 +1111,10 @@ if __name__ == "__main__":
     args.train_iter_H = 1000 * args.max_episode_length
     if getattr(args, 'max_steps', 0) and args.max_steps > 0:
         args.train_iter_H = int(args.max_steps)
-    args.seed = np.random.randint(0, 10000)
+    # --seed 默认 -1 ⇒ 随机取种（与历史一致）；**显式给 >=0 时尊重该值**，
+    #   用于**配对 A/B**（旧 9 个 main 未改，仍是"每 run 随机取种"）。
+    if int(getattr(args, 'seed', -1)) < 0:
+        args.seed = np.random.randint(0, 10000)
     args.cost_single_limit = 1000.
 
     # args.warmup = 5

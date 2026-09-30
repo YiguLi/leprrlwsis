@@ -80,6 +80,20 @@ MYFUNC_EDITS = [
         '        soft_pen = KAPPA_SOFT * P_F\n'
         '        r1 -= soft_pen\n',
         1, 'c1 双通道分支 + 软通道进 r1'),
+    # ---- 修：软通道必须**独立于** c1 口径（否则 --c1-tail-only 0 + κ>0 时 κ 静默失效）----
+    (
+        '    soft_pen = 0.0\n'
+        '    if C1_TAIL_ONLY:\n'
+        '        c1 = max(0.0, exc_tot - W_INEV * exc_inev)\n'
+        '        soft_pen = KAPPA_SOFT * P_F\n'
+        '        r1 -= soft_pen\n',
+        '    soft_pen = 0.0\n'
+        '    if C1_TAIL_ONLY:\n'
+        '        c1 = max(0.0, exc_tot - W_INEV * exc_inev)\n'
+        '    if KAPPA_SOFT > 0.0:      # 软通道**独立于** c1 口径（E2c 需要"只加软价、不加硬通道"）\n'
+        '        soft_pen = KAPPA_SOFT * P_F\n'
+        '        r1 -= soft_pen\n',
+        1, '软通道独立于 c1 口径（修 κ 静默失效）'),
     # ---- details 增加三个审计列（纯新增键，不改动任何算术）----
     (
         "        'c1_fluct': c1,\n"
@@ -237,6 +251,14 @@ MAIN_EDITS = [
         "                'exc_inev': reward_details.get('exc_inev', 0.0),\n"
         "                'soft_pen': reward_details.get('soft_pen', 0.0),",
         1, 'CSV 增加 exc_tot/exc_inev/soft_pen 三列'),
+    # ---- --seed：显式给 >=0 时尊重它（默认 -1 ⇒ 随机取种，行为不变）----
+    (
+        '    args.seed = np.random.randint(0, 10000)',
+        '    # --seed 默认 -1 ⇒ 随机取种（与历史一致）；**显式给 >=0 时尊重该值**，\n'
+        '    #   用于**配对 A/B**（旧 9 个 main 未改，仍是"每 run 随机取种"）。\n'
+        "    if int(getattr(args, 'seed', -1)) < 0:\n"
+        '        args.seed = np.random.randint(0, 10000)',
+        1, '--seed 显式值生效（配对 A/B 用）'),
     (
         'from td3per.td3per_myfunc import (',
         'from yawflor.yawflor_myfunc import (',

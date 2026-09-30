@@ -312,6 +312,7 @@ def Cal_Rew_RB(observation, observation2, action_rbb, rbb_info,
     soft_pen = 0.0
     if C1_TAIL_ONLY:
         c1 = max(0.0, exc_tot - W_INEV * exc_inev)
+    if KAPPA_SOFT > 0.0:      # 软通道**独立于** c1 口径（E2c 需要"只加软价、不加硬通道"）
         soft_pen = KAPPA_SOFT * P_F
         r1 -= soft_pen
 
