@@ -858,12 +858,16 @@ if __name__ == "__main__":
                         default='train',
                         type=str,
                         help='support option: train/test')
-    # aifflor: 输出目录前缀改为 'AIFFLOR'（产物 output/AIFFLOR-runNN，与 td3per 的
-    #   output/TD3PER-runNN 分开；下游分析脚本需按目录名显式传入）。
+    # aifflor: 输出目录 / **TensorBoard run 名** 前缀改为 'AIFFLOR'
+    #   （产物 output/AIFFLOR-runNN，与 td3per 的 output/TD3PER-runNN 分开）。
+    #   ⚠ TB 的 scalar tag 与 td3per 逐字同名（刻意的，便于跨 run 对齐比较）
+    #   ⇒ 方法身份靠这个 run 名 + CSV 名 df_aifflor.csv。
     parser.add_argument('--env',
                         default='AIFFLOR',
                         type=str,
-                        help='open-ai gym environment')
+                        help='run 身份 (决定日志目录 output/<env>-runN, 即 TensorBoard 的 run 名);'
+                             ' aifflor: TB 的 scalar tag 与 td3per 逐字同名(便于跨 run 对齐),'
+                             ' 故方法区分靠此目录名 + CSV 名 (df_aifflor.csv)')
     parser.add_argument('--hidden1',
                         default=16,
                         type=int,

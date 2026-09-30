@@ -102,6 +102,25 @@ F:\anaconda\envs\wsis\python.exe aifflor\aifflor_main.py
 * **必须用 `F:\anaconda\envs\wsis\python.exe`**（FLORIS 4.6.6 装在那里；
   3.12.x 之间的扩展模块不兼容，用 base 解释器会报 `pyexpat` DLL 错误）。
 * **不启 MATLAB**（`aifflor_main` 已把 `import matlab` / `start_matlab()` 整段移除）。
+
+### TensorBoard 标签：**scalar tag 刻意不改**，run 名改了
+
+这是一处**故意的**设计，必须说清（否则会以为漏改）：
+
+| TB 里的东西 | `td3per` | `aifflor` | 说明 |
+|---|---|---|---|
+| **scalar tag**（曲线名） | `r1` `c1` `lam1` `P_F` `test9/overall/r1` … | **完全相同**（95 个 tag 全同） | **刻意逐字同名** ⇒ 便于在 TB 里把两个方法的同名曲线叠在一起对齐比较 |
+| **run 名**（左侧那一栏） | `TD3PER-runNN` | **`AIFFLOR-runNN`** | 方法身份**只**靠这里区分 |
+| CSV 文件名 | `df_td3per.csv` | `df_aifflor.csv` | 第二重区分 |
+
+原因：`td3per_main.py` 里**没有任何** tag 含 `TD3PER` 字样（已全量核对：95 个 tag 都是
+`r1`/`c1`/`P_F`/`test9/*` 这类通用名）。所以"方法名"在 TB 里**只能**由 run 名承担 ——
+这正是 `--env` 必须从 `TD3PER` 改成 `AIFFLOR` 的原因；若不改，aifflor 的 run 在 TB
+左侧会显示成 `TD3PER-runN`，与真 `td3per` 无法分辨。
+
+⚠ 因此：**在 TB 里比较 aifflor 与 td3per 时，同名曲线（如 `r1`）是可以直接叠加的**
+（这正是 tag 不改的目的）；但**如果两个 run 的目录名相同就无法分辨**，所以别让
+aifflor 用回 `--env TD3PER`。
 * **输出目录 = `output/AIFFLOR-runNN`**（`--env` 默认值由 `TD3PER` 改为 `AIFFLOR`，
   与 `yawflor` 用 `YAWFLOR` 同一套命名惯例）⇒ 与 `td3per` 的 `output/TD3PER-runNN`
   **完全分开**。

@@ -122,21 +122,31 @@ MAIN_EDITS = [
         '        prCyan(env.summary())\n'
         '        prCyan(env_test.summary())',
         1, '训练收尾打印物理调用统计'),
-    # ---- 输出目录名：output/TD3PER-runNN → output/AIFFLOR-runNN ----
-    #   `args.env` 只用于两处：`get_output_folder(args.output, args.env)` 与
-    #   resume 默认路径。改成 'AIFFLOR' ⇒ 产物落在 output/AIFFLOR-runNN，
-    #   与 td3per 的 output/TD3PER-runNN 分开（否则两者会撞目录）。
-    #   大小写与 `yawflor` 的 'YAWFLOR' 保持一致（`yawflor/README.md` 的命名惯例：
-    #   TB 的 scalar tag 与 td3per 逐字同名，**方法区分靠目录名 + CSV 名**）。
+    # ---- 输出目录名 / TensorBoard run 名：TD3PER → AIFFLOR ----
+    #   ⚠ 为什么必须改：TB 的 **scalar tag** 全是克隆来的通用名（`r1`/`c1`/`P_F`/`test9/...`），
+    #   `aifflor` 与 `td3per` 在 tag 上**完全同名**（这正是跨 run 对齐比较所要的）。
+    #   ⇒ 方法身份只能靠 **TensorBoard 的 run 名**（= 日志目录名
+    #   `get_output_folder(output, args.env)`）与 **CSV 文件名**（`RUN_TAG='aifflor'`）。
+    #   若沿用 `--env` 默认 `'TD3PER'`，不传参启动会落进 `output/TD3PER-runN`，
+    #   TB 左侧那一栏就叫 TD3PER ⇒ 与真 td3per 无法分辨。
+    #   大小写取 `AIFFLOR` 与 `yawflor` 的 `YAWFLOR` 一致。
     #   ⚠ 下游分析脚本若按 `output/TD3PER-*` 匹配，需要显式传目录名。
     (
         "    parser.add_argument('--env',\n"
-        "                        default='TD3PER',",
-        "    # aifflor: 输出目录前缀改为 'AIFFLOR'（产物 output/AIFFLOR-runNN，与 td3per 的\n"
-        "    #   output/TD3PER-runNN 分开；下游分析脚本需按目录名显式传入）。\n"
+        "                        default='TD3PER',\n"
+        "                        type=str,\n"
+        "                        help='open-ai gym environment')",
+        "    # aifflor: 输出目录 / **TensorBoard run 名** 前缀改为 'AIFFLOR'\n"
+        "    #   （产物 output/AIFFLOR-runNN，与 td3per 的 output/TD3PER-runNN 分开）。\n"
+        "    #   ⚠ TB 的 scalar tag 与 td3per 逐字同名（刻意的，便于跨 run 对齐比较）\n"
+        "    #   ⇒ 方法身份靠这个 run 名 + CSV 名 df_aifflor.csv。\n"
         "    parser.add_argument('--env',\n"
-        "                        default='AIFFLOR',",
-        1, "--env 默认 TD3PER → AIFFLOR（输出目录名）"),
+        "                        default='AIFFLOR',\n"
+        "                        type=str,\n"
+        "                        help='run 身份 (决定日志目录 output/<env>-runN, 即 TensorBoard 的 run 名);'\n"
+        "                             ' aifflor: TB 的 scalar tag 与 td3per 逐字同名(便于跨 run 对齐),'\n"
+        "                             ' 故方法区分靠此目录名 + CSV 名 (df_aifflor.csv)')",
+        1, "--env 默认 TD3PER → AIFFLOR（输出目录名 = TB run 名）"),
 ]
 
 #: `myfunc` **逐字复制、零改动**（见模块 docstring 的论证）
