@@ -31,6 +31,24 @@
     python agentutil/audit_policy_stability.py run9 run10 run13
     python agentutil/audit_policy_stability.py run9 run10 run12 run13 --steps 10000 16000 20000 26000
     python agentutil/audit_policy_stability.py run9 run10 run13 --panel-from run9 --check-gamma
+    python agentutil/audit_policy_stability.py run9 run10 run13 --layers H L
+
+[F] 的层臂 (--layers)
+---------------------
+* `H`（默认，与历史输出逐字相同）：状态 = `Normalize_H(obs, minute, mode=1)` 6 维，
+  网络 = `checkpoint_*/actor_6.pkl`，界 = WT x5 `[0,0.5]` + signal `[-0.5,0.5]`
+  （与 `td3per_myfunc.CheckAction` 的 `len==6` 分支一致）。
+* `L`：状态 = 日志列 `norm_observation_L` 5 维（`build_L_obs_distilled`），
+  网络 = `checkpoint_*/actor_1.pkl`，界 = `[-10,10]`
+  （与 `td3per_myfunc.CheckAction` 的 `len==1` 分支 `charge=10` 一致）。
+  ⚠ 需要该 run 有 **RL 下层**（`actor_1.pkl`）**且**日志有 `norm_observation_L` 列；
+  规则下层的 run（如 td3prrlrb 的 SocTracker）会跳过并说明原因，不会报错。
+
+[F] 另报**相邻增量方向余弦**，用来补 α 的盲区：
+    `cos≈0` 位移方向无记忆（独立游走）; `cos→1` 有向匀速漂移;
+    `cos` 介于两者且 m=2 处不衰减 ⇒ **有向但被均值回复约束 / 慢转**。
+α 只回答"位移随间隔怎么增长"（0.5=扩散 / 1=匀速），无法区分
+"独立游走"与"有向慢转"——两者都能给出 α≈0.5，cos 才是判别式。
 """
 
 import argparse
@@ -54,6 +72,14 @@ from model import Actor, Critic
 BLOCK = 5                      # H 层一个决策块 = 5 个 env step
 BOUNDS = [(-0.0, 0.5)] * 5 + [(-0.5, 0.5)]   # CheckAction: WT x5, signal x1
 
+# [F] 的层臂: 状态来源 / 网络文件 / 动作界。默认只用 H ⇒ 历史输出逐字不变。
+LAYERS = {
+    'H': dict(actor='actor_6.pkl', dims=6, bounds=BOUNDS,
+              src='Normalize_H(obs, minute, mode=1)'),
+    'L': dict(actor='actor_1.pkl', dims=1, bounds=[(-10.0, 10.0)],
+              src='norm_observation_L'),
+}
+
 
 # ---------------------------------------------------------------------------
 # 数据读取
@@ -67,11 +93,12 @@ def run_dir(name):
     raise SystemExit('找不到 run: %s' % name)
 
 
-def ckpt_steps(d):
+def ckpt_steps(d, actor='actor_6.pkl'):
+    """有该网络文件的 checkpoint 步（默认 actor_6 = H 层，逐字保持历史行为）。"""
     out = []
     for p in glob.glob(os.path.join(d, 'checkpoint_*')):
         m = re.search(r'(\d+)$', p)
-        if m and os.path.exists(os.path.join(p, 'actor_6.pkl')):
+        if m and os.path.exists(os.path.join(p, actor)):
             out.append(int(m.group(1)))
     return sorted(out)
 
@@ -81,7 +108,10 @@ def read_log(d, every=1):
 
     返回 (rows, sampled):
       rows[step]     = (r1, lam1)            —— 全量, 供锚点/lam 滚动统计
-      sampled        = [(obs4, phase_minute, phase_sin, phase_cos), ...] —— 每 every 行一条, 供构面板
+      sampled        = [(obs4, phase_minute, phase_sin, phase_cos, obsL5), ...] —— 每 every 行一条, 供构面板
+      obsL5          = 日志列 `norm_observation_L`（L 层 5 维状态）; 缺列 ⇒ None。
+                       追加在元组**末尾** ⇒ 现有 `for o, pm, *_ in picks` 与下标 `s[0..3]`
+                       的消费者不受影响（只有 [F] 的 `--layers L` 会读它）。
     obs 只在需要时解析 (run9 日志 140MB, 逐行解析 4 个 float 太贵)。
     """
     p = os.path.join(d, 'df_td3per.csv')
@@ -95,6 +125,7 @@ def read_log(d, every=1):
         i_st, i_ob, i_pm, i_r1 = ix['step'], ix['observation'], ix['phase_minute'], ix['r1']
         i_lam = ix.get('lam1')
         i_ps, i_pc = ix.get('phase_sin'), ix.get('phase_cos')
+        i_ol = ix.get('norm_observation_L')      # L 层 5 维状态（旧日志可能没有）
 
         rows, sampled = {}, []
         for n, r in enumerate(rd):
@@ -127,7 +158,15 @@ def read_log(d, every=1):
                     ps, pc = float(r[i_ps]), float(r[i_pc])
                 except (ValueError, IndexError):
                     ps = pc = None
-            sampled.append((obs[:4], pm, ps, pc))
+            obsL = None
+            if i_ol is not None:
+                try:
+                    _v = np.array([float(x) for x in r[i_ol].strip().strip('[]').split()])
+                    if _v.size >= 1 and np.isfinite(_v).all():
+                        obsL = _v
+                except (ValueError, IndexError):
+                    obsL = None
+            sampled.append((obs[:4], pm, ps, pc, obsL))
     return rows, sampled
 
 
@@ -159,8 +198,8 @@ def block_rewards(rows, win, st):
 # ---------------------------------------------------------------------------
 # 网络加载 / 评估
 # ---------------------------------------------------------------------------
-def load_actor(d, st):
-    sd = torch.load(os.path.join(d, 'checkpoint_%d' % st, 'actor_6.pkl'),
+def load_actor(d, st, fname='actor_6.pkl'):
+    sd = torch.load(os.path.join(d, 'checkpoint_%d' % st, fname),
                     map_location='cpu', weights_only=False)
     m = Actor(sd['fc1.weight'].shape[1], sd['fc4.weight'].shape[0],
               hidden1=sd['fc1.weight'].shape[0], hidden2=sd['fc2.weight'].shape[0])
@@ -197,11 +236,29 @@ def d_pi5(a, b):
     return float(np.abs(a[:, :5] - b[:, :5]).max(axis=1).mean())
 
 
-def out_of_bound(a):
+def out_of_bound(a, bounds=None):
     bad = np.zeros(len(a), dtype=bool)
-    for k, (lo, hi) in enumerate(BOUNDS):
+    for k, (lo, hi) in enumerate(BOUNDS if bounds is None else bounds):
         bad |= (a[:, k] < lo - 1e-9) | (a[:, k] > hi + 1e-9)
     return float(bad.mean())
+
+
+def dir_cos(acts, stops, sep=1):
+    """相邻增量方向余弦: 面板×维度展平后 cos(Δ_i, Δ_{i+sep})。
+
+    ~0 ⇒ 位移方向无记忆（独立随机游走 / 已在地板上）;
+    →1 ⇒ 有向匀速漂移（未收敛）;
+    介于两者且 sep 增大不衰减 ⇒ 有向但被均值回复约束（慢转）。
+    增量模为 0（完全冻结）的样本对直接跳过；返回 (cos 数组, 参与对数)。
+    """
+    inc = [(acts[s2] - acts[s1]).ravel() for s1, s2 in zip(stops[:-1], stops[1:])]
+    cs = []
+    for i in range(len(inc) - sep):
+        u, v = inc[i], inc[i + sep]
+        nu, nv = float(np.linalg.norm(u)), float(np.linalg.norm(v))
+        if nu > 0 and nv > 0:
+            cs.append(float(u @ v) / (nu * nv))
+    return (np.array(cs), len(inc) - sep) if cs else (np.array([]), 0)
 
 
 def check_gamma(d, tail=20000):
@@ -257,6 +314,9 @@ def main():
     ap.add_argument('--anchor-win', type=int, default=20000, help='锚点滚动窗口（默认 20000 步）')
     ap.add_argument('--stat-win', type=int, default=4, help='[C] 摘要统计的窗口长度（末 N 个评估步，默认 4）')
     ap.add_argument('--lag-n', type=int, default=7, help='[F] 标度律用每个 run 自己最后 N 个连续 checkpoint（默认 7）')
+    ap.add_argument('--layers', nargs='+', choices=['H', 'L'], default=['H'],
+                    help='[F] 审计哪些层臂（默认 H，与历史输出逐字相同）; '
+                         'L 需 checkpoint 内有 actor_1.pkl 且日志有 norm_observation_L 列')
     ap.add_argument('--anchor-min', type=float, default=1.0,
                     help='锚点稳健阈值: |锚点| < 该值时自洽比记为 nan（小分母相除会虚高，默认 1.0）')
     ap.add_argument('--check-gamma', action='store_true', help='反解各 run 的 gamma_eff')
@@ -314,6 +374,16 @@ def main():
         src = key
     X = torch.tensor(np.stack([h_state(o, pm, 1) for o, pm, *_ in picks]).astype(np.float32))
     print('共同面板: %s, %d 个状态 (H state dim=%d)' % (src, len(X), X.shape[1]))
+
+    # L 层面板: 同一组状态索引, 状态值取日志列 norm_observation_L（只在 --layers L 时需要）
+    XL = None
+    if 'L' in args.layers:
+        _pl = [s for s in picks if s[4] is not None]
+        if len(_pl) < 2:
+            print('  [L] 面板不可用: 日志缺 norm_observation_L 列（或全为空）')
+        else:
+            XL = torch.tensor(np.stack([s[4] for s in _pl]).astype(np.float32))
+            print('共同面板[L]: %s, %d 个状态 (L state dim=%d)' % (src, len(XL), XL.shape[1]))
 
     # ---- 评估步 ----
     allsteps = {nm: ckpt_steps(dirs[nm]) for nm in runs}
@@ -463,35 +533,60 @@ def main():
     print('      alpha ~ 0.0  冻结       -> 完全不动')
     print('    a_scale = 面板上动作的标准差量级; rms(1)/a_scale 越小说明"checkpoint 间移动"相对')
     print('    "策略在不同状态间的差异"越可忽略 (经验: <0.1 基本可视为冻结)')
+    if args.layers != ['H']:
+        print('    层臂: %s   (L: 状态=日志列 norm_observation_L, 网络=actor_1.pkl, 界=[-10,10])'
+              % ' '.join(args.layers))
     print('  %-10s %5s %9s %9s %9s %10s  %s' % ('run', 'n', 'alpha', 'R2', 'rms(1)', 'rms1/a_sc', 'rms(k) k=1..'))
     for nm in runs:
         d = dirs[nm]
-        ss = ckpt_steps(d)[-args.lag_n:]
-        if len(ss) < 3:
-            print('  %-10s (checkpoint 不足 3 个, 跳过)' % nm)
-            continue
-        acts = {s: policy_actions(load_actor(d, s), X) for s in ss}
-        A_all = np.concatenate([acts[s] for s in ss], axis=0)
-        a_scale = float(np.sqrt((A_all.std(axis=0) ** 2).mean()))
-        ks, rms = [], []
-        for k in range(1, len(ss)):
-            ds = [float(np.sqrt(((acts[ss[i + k]] - acts[ss[i]]) ** 2).sum(axis=1).mean()))
-                  for i in range(len(ss) - k)]
-            ks.append(k)
-            rms.append(float(np.mean(ds)))
-        al, c0 = np.polyfit(np.log(ks), np.log(rms), 1)
-        pred = al * np.log(ks) + c0
-        r2 = 1 - ((np.log(rms) - pred) ** 2).sum() / ((np.log(rms) - np.mean(np.log(rms))) ** 2).sum()
-        print('  %-10s %5d %9.3f %9.4f %9.4f %10.4f  %s'
-              % (nm, len(ss), al, r2, rms[0], rms[0] / a_scale,
-                 ' '.join('%.4f' % v for v in rms)))
-        # 相邻 D_pi 的线性趋势 (末 N 个 checkpoint)
-        adj = [d_pi(acts[ss[i]], acts[ss[i - 1]]) for i in range(1, len(ss))]
-        sl = np.polyfit(np.arange(len(adj)), adj, 1)[0]
-        verdict = ('仍在匀速漂移(未收敛)' if al > 0.8 else
-                   '定点附近游走(已稳定)' if 0.35 <= al <= 0.8 else '冻结')
-        print('             %s: 相邻 D_pi 趋势 %+.4f/ckpt, 序列 %s'
-              % (verdict, sl, ' '.join('%.3f' % v for v in adj)))
+        for lay in args.layers:
+            spec = LAYERS[lay]
+            lab = nm if args.layers == ['H'] else '%s/%s' % (nm, lay)
+            Xl = X if lay == 'H' else XL
+            if Xl is None:
+                print('  %-10s (L 面板不可用: 日志缺 norm_observation_L 列, 跳过)' % lab)
+                continue
+            ss = ckpt_steps(d, spec['actor'])[-args.lag_n:]
+            if len(ss) < 3:
+                print('  %-10s (checkpoint 不足 3 个, 跳过)' % lab)
+                continue
+            try:
+                acts = {s: policy_actions(load_actor(d, s, spec['actor']), Xl) for s in ss}
+            except Exception as ex:      # 规则下层 / 非 fc1..fc4 结构 ⇒ 跳过而不是中断
+                print('  %-10s (无法加载 %s: %s, 跳过)' % (lab, spec['actor'], type(ex).__name__))
+                continue
+            A_all = np.concatenate([acts[s] for s in ss], axis=0)
+            a_scale = float(np.sqrt((A_all.std(axis=0) ** 2).mean()))
+            ks, rms = [], []
+            for k in range(1, len(ss)):
+                ds = [float(np.sqrt(((acts[ss[i + k]] - acts[ss[i]]) ** 2).sum(axis=1).mean()))
+                      for i in range(len(ss) - k)]
+                ks.append(k)
+                rms.append(float(np.mean(ds)))
+            al, c0 = np.polyfit(np.log(ks), np.log(rms), 1)
+            pred = al * np.log(ks) + c0
+            r2 = 1 - ((np.log(rms) - pred) ** 2).sum() / ((np.log(rms) - np.mean(np.log(rms))) ** 2).sum()
+            print('  %-10s %5d %9.3f %9.4f %9.4f %10.4f  %s'
+                  % (lab, len(ss), al, r2, rms[0], rms[0] / a_scale,
+                     ' '.join('%.4f' % v for v in rms)))
+            # 相邻 D_pi 的线性趋势 (末 N 个 checkpoint)
+            adj = [d_pi(acts[ss[i]], acts[ss[i - 1]]) for i in range(1, len(ss))]
+            sl = np.polyfit(np.arange(len(adj)), adj, 1)[0]
+            verdict = ('仍在匀速漂移(未收敛)' if al > 0.8 else
+                       '定点附近游走(已稳定)' if 0.35 <= al <= 0.8 else '冻结')
+            print('             %s: 相邻 D_pi 趋势 %+.4f/ckpt, 序列 %s'
+                  % (verdict, sl, ' '.join('%.3f' % v for v in adj)))
+            # 方向 cosine: 补 alpha 的盲区（独立游走 vs 有向慢转，两者都可给出 alpha~0.5）
+            c1, n1 = dir_cos(acts, ss, sep=1)
+            c2, n2 = dir_cos(acts, ss, sep=2)
+            if n1 and c1.size:
+                m1 = float(c1.mean())
+                s1 = float(c1.std(ddof=1) / np.sqrt(c1.size)) if c1.size > 1 else 0.0
+                t2 = ('%+.3f' % float(c2.mean())) if (n2 and c2.size) else 'n/a'
+                print('             cos(增量方向) Δ_i·Δ_{i+1} %+.3f ± %.3f (n=%d) | Δ_i·Δ_{i+2} %s'
+                      '   [~0=独立游走, →1=有向匀速]' % (m1, s1, c1.size, t2))
+            else:
+                print('              cos(增量方向): 增量为零 ⇒ 完全冻结')
 
 
 if __name__ == '__main__':
