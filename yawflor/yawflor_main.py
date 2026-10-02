@@ -955,18 +955,24 @@ if __name__ == "__main__":
     parser.add_argument('--bsize', default=128, type=int,
                         help='minibatch size')
     # ---- memory 容量 ----
-    #   ⚠ 口径随 nstep 变: 滑窗下 1 条 = n 个块 = 5n 个环境步, 所以"条数"要按
-    #   env-step 读: rmsize x 5n = 覆盖的环境步。
-    #   默认 20000 (**旧格式**; 2026-09-29 曾提升到 40000, 现退回): n=5 ⇒ 500k 步
-    #     ≈ 347 天。与 --bsize 128 同步减半 ⇒ 每个样本的"遍历遍数"不变
+    #   ✅ 口径 = **环境步**（2026-10 更正）: 滑窗 stride-1 下**每来一个块结算一条**
+    #      （1 块 = 5 环境步）⇒ **1 条 = 5 环境步，与 nstep 无关**。
+    #      旧注释写的 "rmsize x 5 x nstep" 把 nstep 也算进去是错的 —— 滑窗实现让
+    #      **每个块都是某条转移的起点**，状态覆盖 = 块数，条目数 ≈ 块数；
+    #      nstep 只改变**目标深度**（自助传播 50 → 50/n），不改变覆盖比例。
+    #      n 步的全部代价只是 `_pending` 队列恒为 n-1 条 + episode 末按截断逐条补齐
+    #      ⇒ **只浪费 n-1 条**（n=5 时 4 条），相对 rmsize 可忽略。
+    #   覆盖环境步 = rmsize x 5。
+    #   默认 20000 (**旧格式**; 2026-09-29 曾提升到 40000, 现退回) ⇒ 100k 环境步
+    #     ≈ 69 天。与 --bsize 128 同步减半 ⇒ 每个样本的"遍历遍数"不变
     #     (updates x bsize / rmsize 与 256/40000 完全相同)。
     #   复现历史: run1~run10 (1-step 口径) 传 --rmsize 80000 (= 400k 步);
     #             run12 起的 n=5 生产口径用默认值。
     parser.add_argument('--rmsize',
                         default=20000,
                         type=int,
-                        help='H 层 memory 条数 (覆盖环境步 = rmsize x 5 x nstep; '
-                             '默认 20000 (= 500k 步); 复现 run1~run10 传 80000)')
+                        help='H 层 memory 条数 (覆盖环境步 = rmsize x 5; '
+                             '默认 20000 (= 100k 步); 复现 run1~run10 传 80000)')
     parser.add_argument('--window_length', default=1, type=int, help='')
     parser.add_argument('--tau',
                         default=0.001,
