@@ -147,10 +147,17 @@ class WindBattery:
             try:
                 u0 = float(u0)
                 _ml = _get_matlab()          # 惰性 import（旧路径行为不变）
+                # 第 5 个实参 want_full=False: 不要让 MATLAB 回传 5 步完整流场解
+                # (sol_array)。本方法只读 'out'，实测净省 ~0.02-0.10 s/次 (2-8%)，
+                # 另省掉每次调用在 Python 侧分配/回收那个嵌套 dict 的开销。
+                # 数值逐位不变 —— 改前/改后 30 例直接调用 + 5 例经本方法的 A/B 逐位
+                # 回归见 output/_wfsim_ab/。读 power_out.test 的诊断脚本不传该实参
+                # ⇒ 默认 true，行为不变。
                 target_result = self.engine.WFSim_port(_ml.double([u0]),
                                                 _ml.double([0.0]),
                                                 _ml.double([list(act_wind)]),
-                                                _ml.double([0.0]))
+                                                _ml.double([0.0]),
+                                                False)
             except:
                 print(u0)   
                 print(type(u0))

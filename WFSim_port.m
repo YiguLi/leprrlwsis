@@ -1,5 +1,25 @@
-function power_out = WFSim_port(w_s, w_a, a, p)%wind_speed,wind_angle,c_prime,phi
+function power_out = WFSim_port(w_s, w_a, a, p, want_full)%wind_speed,wind_angle,c_prime,phi
 %clear; clc; close all; %
+
+% ---- 可选第 5 实参 want_full: 是否把 5 步完整流场解一并回传 (默认 true) ----
+% 为什么要这个开关: sol_array 序列化跨引擎边界实测净代价 ~0.02-0.10 s/次
+%   (min~mean, 占整次调用 2-8%; 机器争抢时偏高)。output/_wfsim_ab 的逐位 A/B:
+%   同一批 30 例 (u,a) 只回 'out' vs 回 'out'+'test', 数值逐位相同 (0 项不一致)。
+%   ⚠ 曾报 0.686 s / "32%" 是错的 —— 那次对比里"改前"那组含会话第一次调用
+%   (冷启动 addpath + JIT), 差值被它污染; 用交错 + min 统计后就是上面这个量级。
+% 默认 true ⇒ 读 power_out.test 的诊断脚本一字不改:
+%   agentutil/probe_a_per_turbine.py / probe_a_farm_structure.py /
+%   probe_engine_random_actions.py / probe_engine_newday_validate.py /
+%   probe_engine_minute_compare.py / run_clip_check_wfsim.m
+if nargin < 5 || isempty(want_full)
+    want_full = true;
+end
+
+% ---- 路径守卫: WFSim_addpaths 幂等, 但每次调用都要重跑 addpath(genpath(libraries)) ----
+% 实测单次 0.12 s (min) / 0.20 s (median), 占整次调用约 10-15%。
+% persistent 在 `clear functions` / 引擎重启 / 本文件被编辑后自动失效
+% ⇒ 那时会重新 addpath, 可解析状态与原实现一致, 数值不变。
+persistent paths_ready
 
 %wind
 Wind.wind_speed = w_s;%m/s
@@ -25,11 +45,16 @@ Control.a = a(:);           % NT×1, 关键: 列向量才能逐台生效
 Control.c_prime = 4*Control.a.*(1-Control.a).^2;   % C_p = 4a(1-a)^2 (沿用原口径)
 Control.phi = p;%degree
 
-run('WFSim_addpaths.m');    % Add essential paths to MATLABs environment
+if isempty(paths_ready)
+    run('WFSim_addpaths.m');    % Add essential paths to MATLABs environment
+    paths_ready = true;
+end
 %simulate by WFSim
 sol_array = WFSim(Wind,Control);
 
 power_out.out = sum(sol_array{1,5}.turbine.power);
-power_out.test = sol_array;
+if want_full
+    power_out.test = sol_array;
+end
 %disp(['total power_out ' num2str(power_out)]);
 end
