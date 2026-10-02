@@ -12,7 +12,7 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
       - 观测 = Normalize(obs) 4 维 + 24h 相位特征 (--phase_feat 1 → 6 维);
       - 对偶: lam1 ∈ [3, 100] 初值 5.0, d_block_H = 50 → 地板 5 (EMA 实际块成本);
       - 每块 2 次更新; 逐维探索噪声 (--wt_noise / --sig_noise_max / --sig_noise_min);
-      - --epsilon 4000 (H 决策次数 ⇒ 20k 环境步); actor 输出层 WT bias 初始化到“中性宽带”。
+      - --epsilon 8000 (H 决策次数 ⇒ 40k 环境步); actor 输出层 WT bias 初始化到“中性宽带”。
   * 下层 L: **td3per 自己的 RL BESS 操作保留** (TD3 + PER + EMA 对偶 + RBB 硬裁剪),
       只把"信号 / 追踪目标"换成 SOC 目标:
       - 观测 (5 维蒸馏) = [pbrulemin/10, pbrulemax/10, **soc_target/10**, SOC/10, u/10]
@@ -975,10 +975,10 @@ if __name__ == "__main__":
                         type=int,
                         help='train iters each timestep')
     parser.add_argument('--epsilon',
-                        default=4000,
+                        default=8000,
                         type=int,
                         help='【H 层】探索噪声 ε 由 1 线性衰减到 0 所需的【决策次数】。'
-                             'H 每 5 个环境步决策一次 ⇒ 4000 次 = 20k 环境步'
+                             'H 每 5 个环境步决策一次 ⇒ 8000 次 = 40k 环境步'
                              '(信号维幅值此后由地板 sig_noise_min 保底)')
     parser.add_argument('--l_epsilon',
                         default=50000,

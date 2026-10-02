@@ -212,7 +212,7 @@ class SP_TD3(object):
         #   WT 5 维: ±wt_noise * eps        (0.05, 与原幅度一致, 仅改为逐维独立抽样)
         #   信号维 : ±max(sig_noise_max*eps, sig_noise_min)  (0.2 → 地板 0.05)
         # eps 由 1 线性衰减到 0, 衰减完成的【决策次数】= args.epsilon
-        # (H 每 5 个环境步决策一次 ⇒ args.epsilon=4000 对应 20k 环境步)。
+        # (H 每 5 个环境步决策一次 ⇒ args.epsilon=8000 对应 40k 环境步)。
         # 下层 (nb_actions=1) 走 else 分支: 幅度 = wt_noise·eps、无地板,
         # 与改造前 td3per 下层的 ±0.05·eps 完全等价 (epsilon 由 --l_epsilon 控制)。
         self.wt_noise = float(wt_noise)

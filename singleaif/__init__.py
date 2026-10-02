@@ -17,6 +17,9 @@ EMA 对偶、PER、Twin critics、目标策略平滑等) 与 td3per 完全一致
     产出单风机动作随机游走 + 信号维恒 0 (经 `build_from_args` 自动跟随, 不改共享文件)。
   * agent 文件: H = actor_2.pkl / critic_{p,p2,c,c2}_2.pkl; L = actor_1.pkl (不变)。
   * 输出目录: `--env SINGLEAIF` ⇒ `output/SINGLEAIF-runN`。
+  * 探索时长: `--epsilon` 默认 **8000** (H 决策次数 = **40k 环境步**), 比 td3per 的
+    4000(20k 步) 更长 —— 给 H 风机维更久的有幅探索, 以对抗 run38 观察到的
+    "探索过早归零(20k) → 策略卡盆地"。
 
 Key differences from SP_DDPG (与 td3per 相同): Twin critics per channel (MIN profit
 pair / MAX cost pair, cost bootstrap clamp≥0)、delayed policy update、target policy
