@@ -160,6 +160,39 @@ MAIN_EDITS = [
         "                             ' aifflor: TB 的 scalar tag 与 td3per 逐字同名(便于跨 run 对齐),'\n"
         "                             ' 故方法区分靠此目录名 + CSV 名 (df_aifflor.csv)')",
         1, "--env 默认 TD3PER → AIFFLOR（输出目录名 = TB run 名）"),
+    # ---- `--rmsize` 口径更正：条数直接就是环境步数，去掉历史遗留的 x5 ----
+    #   旧口径基于错误前提（以为 nstep=5 把 transition 压缩到 rmsize/n 条）；
+    #   实际滑窗 stride-1 不压缩，每个块都是某条转移的起点 ⇒ 浪费问题早已解决。
+    (
+        "    # ---- memory 容量 ----\n"
+        "    #   ✅ 口径 = **条数直接就是环境步数**（2026-10 更正，去掉历史遗留的 x5）:\n"
+        "    #   旧注释写 \"1 条 = n 个块 = 5n 个环境步 ⇒ rmsize x 5n\"，那是**基于一个错误前提**\n"
+        "    #   —— 以为 nstep=5 会把 transition 压缩到 rmsize/n 条。实际滑窗 stride-1\n"
+        "    #   **不压缩**: 每个块都是某条转移的起点, 条目数 ≈ 块数 ⇒ 浪费问题早已解决。\n"
+        "    #   ⇒ **rmsize = 40000 就是 40000（条 ≈ 环境步）, 不要再乘任何系数。**\n"
+        "    #   覆盖环境步 = rmsize（= 40000）。\n"
+        "    #   复现历史 run1~run10 (1-step) 请传 --rmsize 80000; 复现 run12/run13 (n=5) 传 20000。\n"
+        "    #   其它五个方法没有 n 步 ⇒ 维持 80000 不动 (见 agentutil/test_phase_uniform.py 的例外表)。\n"
+        "    parser.add_argument('--rmsize',\n"
+        "                        default=40000,\n"
+        "                        type=int,\n"
+        "                        help='H 层 memory 条数（≈ 覆盖的环境步数; 不乘系数）; '\n"
+        "                             '默认 40000 = 生产口径; 复现 run1~run10 传 80000')\n",
+        "    # ---- memory 容量 ----\n"
+        "    #   ✅ 口径 = **条数直接就是环境步数**（2026-10 更正，去掉历史遗留的 x5）:\n"
+        "    #   旧注释写 \"1 条 = n 个块 = 5n 个环境步 ⇒ rmsize x 5n\"，那是**基于一个错误前提**\n"
+        "    #   —— 以为 nstep=5 会把 transition 压缩到 rmsize/n 条。实际滑窗 stride-1\n"
+        "    #   **不压缩**: 每个块都是某条转移的起点, 条目数 ≈ 块数 ⇒ 浪费问题早已解决。\n"
+        "    #   ⇒ **rmsize = 40000 就是 40000（条 ≈ 环境步）, 不要再乘任何系数。**\n"
+        "    #   覆盖环境步 = rmsize（= 40000）。\n"
+        "    #   复现历史 run1~run10 (1-step) 请传 --rmsize 80000; 复现 run12/run13 (n=5) 传 20000。\n"
+        "    #   其它五个方法没有 n 步 ⇒ 维持 80000 不动 (见 agentutil/test_phase_uniform.py 的例外表)。\n"
+        "    parser.add_argument('--rmsize',\n"
+        "                        default=40000,\n"
+        "                        type=int,\n"
+        "                        help='H 层 memory 条数（≈ 覆盖的环境步数; 不乘系数）; '\n"
+        "                             '默认 40000 = 生产口径; 复现 run1~run10 传 80000')\n",
+        1, "--rmsize 口径：rmsize 就是条数(≈环境步)，不乘 x5"),
 ]
 
 #: `myfunc` **逐字复制、零改动**（见模块 docstring 的论证）

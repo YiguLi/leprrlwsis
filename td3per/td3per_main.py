@@ -930,17 +930,19 @@ if __name__ == "__main__":
     parser.add_argument('--bsize', default=256, type=int,
                         help='minibatch size')
     # ---- memory 容量 ----
-    #   ⚠ 口径随 nstep 变: 滑窗下 1 条 = n 个块 = 5n 个环境步, 所以"条数"要按
-    #   env-step 读: rmsize x 5n = 覆盖的环境步。
-    #   默认 40000 (生产口径): n=10 ⇒ 2M 环境步 ≈ 7 个 epoch 的滚动窗口,
-    #     即"最近 ~1.8 个 epoch 的滚动窗口"; ≤60k 步的 run 里仍填不满 (12,000 条)。
+    #   ✅ 口径 = **条数直接就是环境步数**（2026-10 更正，去掉历史遗留的 x5）:
+    #   旧注释写 "1 条 = n 个块 = 5n 个环境步 ⇒ rmsize x 5n"，那是**基于一个错误前提**
+    #   —— 以为 nstep=5 会把 transition 压缩到 rmsize/n 条。实际滑窗 stride-1
+    #   **不压缩**: 每个块都是某条转移的起点, 条目数 ≈ 块数 ⇒ 浪费问题早已解决。
+    #   ⇒ **rmsize = 40000 就是 40000（条 ≈ 环境步）, 不要再乘任何系数。**
+    #   覆盖环境步 = rmsize（= 40000）。
     #   复现历史 run1~run10 (1-step) 请传 --rmsize 80000; 复现 run12/run13 (n=5) 传 20000。
     #   其它五个方法没有 n 步 ⇒ 维持 80000 不动 (见 agentutil/test_phase_uniform.py 的例外表)。
     parser.add_argument('--rmsize',
                         default=40000,
                         type=int,
-                        help='H 层 memory 条数 (覆盖环境步 = rmsize x 5 x nstep; '
-                             '默认 40000 = 生产口径; 复现 run1~run10 传 80000)')
+                        help='H 层 memory 条数（≈ 覆盖的环境步数; 不乘系数）; '
+                             '默认 40000 = 生产口径; 复现 run1~run10 传 80000')
     parser.add_argument('--window_length', default=1, type=int, help='')
     parser.add_argument('--tau',
                         default=0.001,
