@@ -469,7 +469,7 @@ def train(num_iterations_H,
         if step > args.warmup:
             #--------------------Update----------------------
             if episode_steps % 5 == 4:
-                # H 层更新频率(UTD): 每块 args.utd_h 次 (默认 2 = td3perrb 口径)
+                # H 层更新频率(UTD): 每块 args.utd_h 次 (默认 4)
                 for _ in range(args.utd_h):
                     agent_H.update_policy()
 
@@ -895,15 +895,15 @@ if __name__ == "__main__":
     #   实现: H 层把连续 n 个块折算进一条转移 (reward=Σγ^k r_k, 滑窗 stride-1:
     #   每个块都是某条转移的起点 ⇒ 状态覆盖 = 块数, 条目数 ≈ 块数), 每条转移自带
     #   bootstrap 系数 γ^n ⇒ 需要自助传播的深度从 1/(1−γ)=50 降到 50/n。
-    #   ---- 默认值 = 5 (生产口径) ----
+    #   ---- 默认值 = 10 (生产口径) ----
     #   依据: run12/run13 的 **2v2 观测** (非受控 A/B; 尚无同代码的 --nstep 1 对照臂):
     #     |dQp/da| @20k  n=5: 7.9 / 5.4  vs  n=1: 1.02 / 1.29 (5~8x, 且 n=5 不衰减)
     #     0-20k 块奖励   n=5: 181 / 160  vs  n=1: 55.5 / 90.7 (元)
     #     自洽比 @30k    n=5: 0.59/0.60  vs  n=1: 0.34 / 0.47
     #   **复现历史 run1~run10 请显式传 --nstep 1** (那条路径逐位不变)。
-    parser.add_argument('--nstep', default=5, type=int,
-                        help='H 层 n 步回报, 滑窗 stride-1 (默认 5 = 生产口径; '
-                             '1 = 复现 run1~run10 的 1-step 历史口径; 建议 5~10)')
+    parser.add_argument('--nstep', default=10, type=int,
+                        help='H 层 n 步回报, 滑窗 stride-1 (默认 10 = 生产口径; '
+                             '1 = 复现 run1~run10 的 1-step 历史口径; 建议 10)')
     parser.add_argument('--target_agg', default='min', type=str,
                         choices=['min', 'mean'],
                         help='H 层 twin profit-critic 的 target 聚合 '
@@ -927,20 +927,20 @@ if __name__ == "__main__":
                         help='越界乘性惩罚系数 c: 风机收益 × exp(-c·Σ前5维越界量) '
                              '(默认 %.1f = **关闭**; 5.0 = 已证伪的旧口径, 见 README run14 分析)'
                              % VIOL_DERATE_COEF)
-    parser.add_argument('--bsize', default=128, type=int,
+    parser.add_argument('--bsize', default=256, type=int,
                         help='minibatch size')
     # ---- memory 容量 ----
     #   ⚠ 口径随 nstep 变: 滑窗下 1 条 = n 个块 = 5n 个环境步, 所以"条数"要按
     #   env-step 读: rmsize x 5n = 覆盖的环境步。
-    #   默认 20000 (生产口径, 与 run12/run13 一致): n=5 ⇒ 500k 步 ≈ 1.8 epoch ≈ 347 天,
+    #   默认 40000 (生产口径): n=10 ⇒ 2M 环境步 ≈ 7 个 epoch 的滚动窗口,
     #     即"最近 ~1.8 个 epoch 的滚动窗口"; ≤60k 步的 run 里仍填不满 (12,000 条)。
-    #   复现历史 run1~run10 (1-step) 请传 --rmsize 80000 (= 400k 步, 且与当时一致)。
+    #   复现历史 run1~run10 (1-step) 请传 --rmsize 80000; 复现 run12/run13 (n=5) 传 20000。
     #   其它五个方法没有 n 步 ⇒ 维持 80000 不动 (见 agentutil/test_phase_uniform.py 的例外表)。
     parser.add_argument('--rmsize',
-                        default=20000,
+                        default=40000,
                         type=int,
                         help='H 层 memory 条数 (覆盖环境步 = rmsize x 5 x nstep; '
-                             '默认 20000 = 生产口径; 复现 run1~run10 传 80000)')
+                             '默认 40000 = 生产口径; 复现 run1~run10 传 80000)')
     parser.add_argument('--window_length', default=1, type=int, help='')
     parser.add_argument('--tau',
                         default=0.001,
@@ -1004,8 +1004,8 @@ if __name__ == "__main__":
                         help='number of turbines')
 
     # ---- UTD（每块 update_policy 次数）: 启动指令可调; 默认 = 历史口径, 逐位不变 ----
-    parser.add_argument('--utd_h', default=2, type=int,
-                        help='H 层每块 update_policy 次数 (默认 2 = 历史口径; 调整它不再改变 d_block_H 的减半节奏)')
+    parser.add_argument('--utd_h', default=4, type=int,
+                        help='H 层每块 update_policy 次数 (默认 4; 复现历史传 --utd_h 2; 调整它不再改变 d_block_H 的减半节奏)')
     parser.add_argument('--utd_l', default=10, type=int,
                         help='L 层每块 update_policy 次数 (默认 10 = 历史口径)')
 

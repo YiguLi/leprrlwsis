@@ -283,21 +283,22 @@ assert hc.utd_plan(4, 3) == (3, 1, 0), hc.utd_plan(4, 3)
 assert hc.utd_plan(2, 10, interleaved=False) == (0, 2, 10)
 
 #: 项目 -> (main, 是否有 L 层, H 层 curriculum 块数, --utd_h 默认值)
-#:   ⚠ "块数"与"默认 UTD"是**两件事**：块数来自**历史计数节奏**，默认 UTD 来自
-#:   **历史每块更新次数**。td3prle 就是两者分离的例子 —— 它每块只更新 H 2 次
-#:   (--utd_h 默认 2)，但历史上把计数循环写成每块 5 次(阈值 100) ⇒ 减半需 20 块。
+#:   ⚠ "块数"与"默认 UTD"是**两件事**：块数来自**历史计数节奏**；默认 UTD 是
+#:   **启动可调的新口径**（TD3 家族 4，旧家族保持历史口径 5）。td3prle 就是两者
+#:   分离的例子 —— 它每块更新 H 4 次（--utd_h 默认 4），但历史上计数循环写 5 次
+#:   (阈值 100) ⇒ 减半需 20 块。
 UTD_MAINS = {
-    'td3per': ('td3per/td3per_main.py', True, 50, 2),
-    'aifflor': ('aifflor/aifflor_main.py', True, 50, 2),
-    'yawflor': ('yawflor/yawflor_main.py', True, 50, 2),
-    'td3prrbb': ('td3prrbb/td3prrbb_main.py', True, 50, 2),
-    'td3prle': ('td3prle/td3prle_main.py', True, 20, 2),
+    'td3per': ('td3per/td3per_main.py', True, 50, 4),
+    'aifflor': ('aifflor/aifflor_main.py', True, 50, 4),
+    'yawflor': ('yawflor/yawflor_main.py', True, 50, 4),
+    'td3prrbb': ('td3prrbb/td3prrbb_main.py', True, 50, 4),
+    'td3prle': ('td3prle/td3prle_main.py', True, 20, 4),
     'prle': ('prle/prle_main.py', True, 20, 5),
     'prrbb': ('prrbb/prrbb_main.py', True, 20, 5),
     'per': ('PER_main0.py', True, 20, 5),
-    'td3perrb': ('td3perrb/td3perrb_main.py', False, 50, 2),
-    'td3prrlrb': ('td3prrlrb/td3prrlrb_main.py', False, 50, 2),
-    'td3leprrlrb': ('td3leprrlrb/td3leprrlrb_main.py', False, 50, 2),
+    'td3perrb': ('td3perrb/td3perrb_main.py', False, 50, 4),
+    'td3prrlrb': ('td3prrlrb/td3prrlrb_main.py', False, 50, 4),
+    'td3leprrlrb': ('td3leprrlrb/td3leprrlrb_main.py', False, 50, 4),
 }
 for proj, (mp, has_l, h_blocks, utd_h) in UTD_MAINS.items():
     mt = src(mp)
@@ -307,7 +308,7 @@ for proj, (mp, has_l, h_blocks, utd_h) in UTD_MAINS.items():
     assert bool(re.search(r"add_argument\('--utd_l'", mt)) == bool(has_l), \
         (proj, '--utd_l 的有无与该 arm 是否有 L 层不一致')
     assert re.search(r"add_argument\('--utd_h', default=%d," % utd_h, mt), \
-        (proj, '--utd_h 默认值不是历史口径 %d' % utd_h)
+        (proj, '--utd_h 默认值不是新默认口径 %d' % utd_h)
     # ② 更新次数必须走参数
     assert re.search(r'range\(args\.utd_h\)|hc\.utd_plan\(args\.utd_h', mt), \
         (proj, 'H 层更新次数未接 --utd_h')
@@ -322,7 +323,7 @@ for proj, (mp, has_l, h_blocks, utd_h) in UTD_MAINS.items():
         (proj, 'H curriculum 未按"块数"计量')
     assert not re.search(r'consecutive_satisfied_H >= 100', mt), \
         (proj, 'H curriculum 仍用"更新次数"阈值 100')
-print('  {} 个 arm: 均有 --utd_h（默认 = 各自历史口径）; {} 个含 L 层的均有 --utd_l'
+print('  {} 个 arm: 均有 --utd_h（默认 = 各自口径：TD3 家族 4 / 旧家族 5）; {} 个含 L 层的均有 --utd_l'
       .format(len(UTD_MAINS), sum(1 for _m, l, _b, _u in UTD_MAINS.values() if l)))
 print('  H 计数每块恰好 1 次、阈值用块数常量 ⇒ 调 --utd_h 不再改变 d_block_H 的减半节奏')
 print('  utd_plan: (2,10)→(2,0,8) / (5,5)→(5,0,0) / (5,10)→(5,0,5) 与历史循环逐位等价')
