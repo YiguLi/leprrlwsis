@@ -1060,6 +1060,15 @@ if __name__ == "__main__":
                         default=50000,
                         type=int,
                         help='linear decay of exploration policy')
+    # ---- 探索噪声（**与 td3per 逐字同格式**：逐维独立抽样 + 地板）----
+    parser.add_argument('--wt_noise', default=0.05, type=float,
+                        help='WT 维探索噪声幅度 (±wt_noise*eps)')
+    parser.add_argument('--sig_noise_max', default=0.2, type=float,
+                        help='SOC 目标信号维探索噪声幅度上限 (±sig_noise_max*eps)')
+    parser.add_argument('--sig_noise_min', default=0.01, type=float,
+                        help='SOC 目标信号维探索噪声**地板** (eps 收敛到它, 不再降到 0)')
+    parser.add_argument('--wt_noise_floor', default=0.01, type=float,
+                        help='WT 维探索噪声**地板** (0 = 探索窗口结束后完全不再探索)')
     parser.add_argument('--seed', default=-1, type=int, help='')
     parser.add_argument('--resume',
                         default='default',
@@ -1253,6 +1262,10 @@ if __name__ == "__main__":
                           policy_delay=args.policy_delay,
                           policy_noise=args.policy_noise,
                           noise_clip=args.noise_clip,
+                              wt_noise=args.wt_noise,
+                              sig_noise_max=args.sig_noise_max,
+                              sig_noise_min=args.sig_noise_min,
+                              wt_noise_floor=args.wt_noise_floor,
                           cost_critic_mode=args.cost_critic_mode,
 nstep=args.nstep, target_agg=args.target_agg)
     agent_H.lam = _HCFG['lam_init'] if _HCFG else 100.0
@@ -1279,6 +1292,10 @@ nstep=args.nstep, target_agg=args.target_agg)
                           policy_delay=args.l_policy_delay,
                           policy_noise=args.l_policy_noise,
                           noise_clip=args.noise_clip,
+                              wt_noise=args.wt_noise,
+                              sig_noise_max=args.sig_noise_max,
+                              sig_noise_min=args.sig_noise_min,
+                              wt_noise_floor=args.wt_noise_floor,
                           cost_critic_mode=args.cost_critic_mode)
     agent_L.lam = hst.L_LAM_INIT   # λ2 初值 (单一真源; 旧 100.0 属 [2,200] 旧口径, 已越界)
     agent_L.cost_limit = hst.L_COST_LIMIT  # L层c2专用初始值（覆盖全局cost_single_limit=1000）

@@ -40,6 +40,8 @@ class SP_TD3(object):
                  ema_lam=False, ema_alpha=0.02, ema_lam_lr=0.01,
                  record_update_stats=False,
                  policy_delay=2, policy_noise=0.1, noise_clip=0.3,
+                 wt_noise=0.05, sig_noise_max=0.2, sig_noise_min=0.01,
+                 wt_noise_floor=0.01,
                  cost_critic_mode='max',
                  nstep=1, target_agg='min'):
 
@@ -125,7 +127,28 @@ class SP_TD3(object):
         self.epsilon = 1.0
         # 探索噪声**半宽** (动作单位): 旧式 ±0.05·ε 的 0.05 提成属性,
         # 使 L 层（残余动作 Δ，量级 ±MW）可单独重标 (main: --l_noise_amp)，H 层不变。
-        self.noise_halfwidth = 0.05
+        self.nb_turbine = int(args.nb_turbine)
+        # ---- 探索噪声幅度（**与 td3per 逐字同格式**，逐维独立抽样）----
+        #   WT 维 : 幅度 = wt_noise·ε       , 地板 = wt_noise_floor
+        #   信号维: 幅度 = sig_noise_max·ε  , 地板 = sig_noise_min
+        #   amp = explore_amp·ε + explore_floor·(1−ε)
+        #     ε=1 ⇒ 起始幅度; ε=0 ⇒ **地板（不再停止探索）**
+        # ε 由 1 线性衰减到 0，衰减完成的【决策次数】= args.epsilon
+        # 下层 (nb_actions=1) 走 else 分支。
+        self.wt_noise = float(wt_noise)
+        self.sig_noise_max = float(sig_noise_max)
+        self.sig_noise_min = float(sig_noise_min)
+        self.wt_noise_floor = float(wt_noise_floor)
+        if self.nb_actions == self.nb_turbine + 1:
+            amp_e = np.array([self.wt_noise] * self.nb_turbine + [self.sig_noise_max],
+                             dtype=np.float32)
+            floor_e = np.array([self.wt_noise_floor] * self.nb_turbine + [self.sig_noise_min],
+                               dtype=np.float32)
+        else:
+            amp_e = np.full(self.nb_actions, self.wt_noise, dtype=np.float32)
+            floor_e = np.full(self.nb_actions, self.wt_noise_floor, dtype=np.float32)
+        self.explore_amp = amp_e
+        self.explore_floor = floor_e
         self.s_t = None  # Most recent state
         self.a_t = None  # Most recent action
         self.is_training = True
@@ -168,7 +191,6 @@ class SP_TD3(object):
         self.PER_beta = args.PER_beta
         self.PER_epsilon = args.PER_epsilon
         self.beta_increment_per_sampling = args.beta_increment_per_sampling
-        self.nb_turbine = args.nb_turbine
 
         # ---- H 层更新数据记录（每批统计；主循环块末汇总写入 TB/csv） ----
         self.record_update_stats = record_update_stats
@@ -533,8 +555,9 @@ class SP_TD3(object):
         action = to_numpy(self.actor(to_tensor(np.array([s_t])))).squeeze(0)
         if self.is_training:
             eps = max(self.epsilon, 0.0)
-            hw = float(getattr(self, 'noise_halfwidth', 0.05))
-            action = action + (np.random.random(self.nb_actions) - 0.5) * 2.0 * hw * eps
+            # 与 td3per 同格式：逐维独立噪声，幅度线性收敛到地板（ε=0 时为 floor）
+            amp = self.explore_amp * eps + self.explore_floor * (1.0 - eps)
+            action = action + (np.random.random(self.nb_actions) - 0.5) * 2.0 * amp
 
         if decay_epsilon:
             self.epsilon -= self.depsilon
