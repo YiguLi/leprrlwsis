@@ -1049,8 +1049,12 @@ if __name__ == "__main__":
                         help='WT 5 维探索噪声幅度 (±wt_noise*eps)')
     parser.add_argument('--sig_noise_max', default=0.2, type=float,
                         help='SOC 目标信号维探索噪声幅度上限 (±sig_noise_max*eps)')
-    parser.add_argument('--sig_noise_min', default=0.05, type=float,
-                        help='SOC 目标信号维探索噪声幅度地板 (eps 衰减完后保底)')
+    parser.add_argument('--sig_noise_min', default=0.01, type=float,
+                        help='SOC 目标信号维探索噪声**地板** (eps 收敛到它, 不再降到 0); '
+                             '0.01 ⇒ SOC 目标抖动 ±0.05 MWh = SOC_TOL(0.1) 的一半')
+    parser.add_argument('--wt_noise_floor', default=0.01, type=float,
+                        help='WT 5 维探索噪声**地板** (0 = 20k 步后这些维完全不再探索); '
+                             '0.01 = 行为带 [0,0.5] 的 2%, 折算单机功率抖动约 ±2.4%')
 
     # ---- 24h 相位特征 (--phase_feat) ----
     parser.add_argument('--phase_feat', default=1, type=int, choices=[0, 1, 2],
@@ -1159,6 +1163,7 @@ if __name__ == "__main__":
                      wt_noise=args.wt_noise,
                      sig_noise_max=args.sig_noise_max,
                      sig_noise_min=args.sig_noise_min,
+                     wt_noise_floor=args.wt_noise_floor,
                      nstep=args.nstep, target_agg=args.target_agg)
     print('[H] nstep={} target_agg={} (n 步回报: 自助传播深度 50->{:.1f}; '
           '复现历史 run1~run10 请传 --nstep 1)'.format(

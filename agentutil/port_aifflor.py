@@ -160,49 +160,6 @@ MAIN_EDITS = [
         "                             ' aifflor: TB 的 scalar tag 与 td3per 逐字同名(便于跨 run 对齐),'\n"
         "                             ' 故方法区分靠此目录名 + CSV 名 (df_aifflor.csv)')",
         1, "--env 默认 TD3PER → AIFFLOR（输出目录名 = TB run 名）"),
-    # ---- `--rmsize` 口径更正：把 nstep 从"环境步"换算里去掉 ----
-    #   2026-10 更正：滑窗 stride-1 下**每来一个块结算一条**（1 块 = 5 环境步）
-    #   ⇒ **1 条 = 5 环境步，与 nstep 无关**。旧注释写 "rmsize x 5 x nstep" 是错的；
-    #   nstep 只改变**目标深度**（自助传播 50 → 50/n），不改变覆盖比例。
-    #   n 步的全部代价只是 `_pending` 队列恒为 n-1 条（+ episode 末逐条截断补齐）
-    #   ⇒ **只浪费 n-1 条**（n=5 时 4 条），相对 rmsize 可忽略。
-    #   同一处修正已直接落在 `td3per/td3per_main.py` 与 `yawflor/yawflor_main.py`。
-    (
-        "    # ---- memory 容量 ----\n"
-        "    #   ✅ 口径 = **环境步**（2026-10 更正）: 滑窗 stride-1 下**每来一个块结算一条**\n"
-        "    #      （1 块 = 5 环境步）⇒ **1 条 = 5 环境步，与 nstep 无关**。\n"
-        "    #      旧注释写的 \"rmsize x 5 x nstep\" 把 nstep 也算进去是错的 —— 滑窗实现让\n"
-        "    #      **每个块都是某条转移的起点**，状态覆盖 = 块数，条目数 ≈ 块数；\n"
-        "    #      nstep 只改变**目标深度**（自助传播 50 → 50/n），不改变覆盖比例。\n"
-        "    #      n 步的全部代价只是 `_pending` 队列恒为 n-1 条 + episode 末按截断逐条补齐\n"
-        "    #      ⇒ **只浪费 n-1 条**（n=5 时 4 条），相对 rmsize 可忽略。\n"
-        "    #   覆盖环境步 = rmsize x 5。\n"
-        "    #   默认 20000 (生产口径, 与 run12/run13 一致) ⇒ 100k 环境步 ≈ 69 天。\n"
-        "    #   复现历史 run1~run10 (1-step) 请传 --rmsize 80000 (= 400k 步, 且与当时一致)。\n"
-        "    #   其它五个方法没有 n 步 ⇒ 维持 80000 不动 (见 agentutil/test_phase_uniform.py 的例外表)。\n"
-        "    parser.add_argument('--rmsize',\n"
-        "                        default=20000,\n"
-        "                        type=int,\n"
-        "                        help='H 层 memory 条数 (覆盖环境步 = rmsize x 5; '\n"
-        "                             '默认 20000 = 生产口径; 复现 run1~run10 传 80000)')",
-        "    # ---- memory 容量 ----\n"
-        "    #   ✅ 口径 = **环境步**（2026-10 更正）: 滑窗 stride-1 下**每来一个块结算一条**\n"
-        "    #      （1 块 = 5 环境步）⇒ **1 条 = 5 环境步，与 nstep 无关**。\n"
-        "    #      旧注释写的 \"rmsize x 5 x nstep\" 把 nstep 也算进去是错的 —— 滑窗实现让\n"
-        "    #      **每个块都是某条转移的起点**，状态覆盖 = 块数，条目数 ≈ 块数；\n"
-        "    #      nstep 只改变**目标深度**（自助传播 50 → 50/n），不改变覆盖比例。\n"
-        "    #      n 步的全部代价只是 `_pending` 队列恒为 n-1 条 + episode 末按截断逐条补齐\n"
-        "    #      ⇒ **只浪费 n-1 条**（n=5 时 4 条），相对 rmsize 可忽略。\n"
-        "    #   覆盖环境步 = rmsize x 5。\n"
-        "    #   默认 20000 (生产口径, 与 run12/run13 一致) ⇒ 100k 环境步 ≈ 69 天（与 td3per 同）。\n"
-        "    #   复现历史 run1~run10 (1-step) 请传 --rmsize 80000 (= 400k 步, 且与当时一致)。\n"
-        "    #   其它五个方法没有 n 步 ⇒ 维持 80000 不动 (见 agentutil/test_phase_uniform.py 的例外表)。\n"
-        "    parser.add_argument('--rmsize',\n"
-        "                        default=20000,\n"
-        "                        type=int,\n"
-        "                        help='H 层 memory 条数 (覆盖环境步 = rmsize x 5; '\n"
-        "                             '默认 20000 = 生产口径; 复现 run1~run10 传 80000)')",
-        1, "--rmsize 口径更正：去掉 nstep（1 条 = 5 环境步）"),
 ]
 
 #: `myfunc` **逐字复制、零改动**（见模块 docstring 的论证）

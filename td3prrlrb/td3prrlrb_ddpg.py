@@ -41,7 +41,8 @@ class SP_TD3(object):
                  record_update_stats=False,
                  policy_delay=2, policy_noise=0.1, noise_clip=0.3,
                  cost_critic_mode='max',
-                 wt_noise=0.05, sig_noise_max=0.2, sig_noise_min=0.05,
+                 wt_noise=0.05, sig_noise_max=0.2, sig_noise_min=0.01,
+                 wt_noise_floor=0.01,
                  nstep=1, target_agg='min'):
 
         # Determine device first
@@ -214,14 +215,15 @@ class SP_TD3(object):
         self.wt_noise = float(wt_noise)
         self.sig_noise_max = float(sig_noise_max)
         self.sig_noise_min = float(sig_noise_min)
+        self.wt_noise_floor = float(wt_noise_floor)
         if self.nb_actions == self.nb_turbine + 1:
             amp_e = np.array([self.wt_noise] * self.nb_turbine + [self.sig_noise_max],
                              dtype=np.float32)
-            floor_e = np.array([0.0] * self.nb_turbine + [self.sig_noise_min],
+            floor_e = np.array([self.wt_noise_floor] * self.nb_turbine + [self.sig_noise_min],
                                dtype=np.float32)
         else:
             amp_e = np.full(self.nb_actions, self.wt_noise, dtype=np.float32)
-            floor_e = np.zeros(self.nb_actions, dtype=np.float32)
+            floor_e = np.full(self.nb_actions, self.wt_noise_floor, dtype=np.float32)
         self.explore_amp = amp_e
         self.explore_floor = floor_e
 
@@ -561,7 +563,11 @@ class SP_TD3(object):
         # (信号维幅值 0.2*eps 且地板 0.05; WT 维 0.05*eps; 见 __init__)
         if self.is_training:
             eps = max(self.epsilon, 0.0)
-            amp = np.maximum(self.explore_amp * eps, self.explore_floor)
+            # ε 收敛到**地板**而非 0: amp = amp_full·ε + floor·(1−ε)
+            #   ε=1 ⇒ amp = explore_amp（起始幅度不变）
+            #   ε=0 ⇒ amp = explore_floor（**永不完全停止探索**）
+            #   ε 线性降到 0 的用时 = args.epsilon 决策（H=4000⇒20k 环境步）
+            amp = self.explore_amp * eps + self.explore_floor * (1.0 - eps)
             action = action + (np.random.random(self.nb_actions) - 0.5) * 2.0 * amp
 
         if decay_epsilon:
