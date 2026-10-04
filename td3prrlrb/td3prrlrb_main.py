@@ -730,12 +730,9 @@ if __name__ == "__main__":
     #     0-20k 块奖励   n=5: 181 / 160  vs  n=1: 55.5 / 90.7 (元)
     #     自洽比 @30k    n=5: 0.59/0.60  vs  n=1: 0.34 / 0.47
     #   **复现历史 run1~run10 请显式传 --nstep 1** (那条路径逐位不变)。
-    #   口径变更: 生产默认 10 → 5 (上面的 n=10 实测是选型记录, 仍然有效;
-    #   复现旧生产口径请显式传 --nstep 10)。
-    parser.add_argument('--nstep', default=5, type=int,
-                        help='H 层 n 步回报, 滑窗 stride-1 (默认 5; '
-                             '1 = 复现 run1~run10 的 1-step 历史口径; '
-                             '10 = 旧生产口径)')
+    parser.add_argument('--nstep', default=10, type=int,
+                        help='H 层 n 步回报, 滑窗 stride-1 (默认 10 = 生产口径; '
+                             '1 = 复现 run1~run10 的 1-step 历史口径; 建议 10)')
     parser.add_argument('--target_agg', default='min', type=str,
                         choices=['min', 'mean'],
                         help='H 层 twin profit-critic 的 target 聚合 '
