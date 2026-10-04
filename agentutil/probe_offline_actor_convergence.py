@@ -14,7 +14,10 @@
 据此**离线重建 H 层块级 buffer**（无需 MATLAB / env），然后**冻结 critic**、只精调 actor：
 
   Arm A（full-batch）：确定性梯度（无采样噪声）
-  Arm B（minibatch） ：与训练同配方（batch=64）
+                       ⚠ "full" = 当前 `--blocks` 条离线 buffer（曾跑 300/2000/3000/4000），
+                         **不是**训练的 `--rmsize=40000`；它只排除 minibatch 采样噪声。
+  Arm B（minibatch） ：训练 bsize 口径（`--bsize=256`，8 个项目一致）
+                       （早期版本误用 batch=64 并标注"同训练配方"，已更正）
 
 判读（实测，run48 ckpt92000；指标 = 后段相邻位移 rms/a_scale = "收敛地板"）
 --------------------------------------------------------------------------
@@ -236,10 +239,11 @@ def main():
     if args.synthetic is not None:
         synth = torch.full((6,), float(args.synthetic), dtype=torch.float32)
         arms = [('对照·合成二次目标 / full-batch', None, 'adam'),
-                ('对照·合成二次目标 / minibatch', 64, 'adam')]
+                ('对照·合成二次目标 / minibatch', 256, 'adam')]
     else:
         arms = [('%s / full-batch (无采样噪声)' % o.upper(), None, o) for o in args.optim] + \
-               [('%s / minibatch=64 (同训练配方)' % o.upper(), 64, o) for o in args.optim]
+               [('%s / minibatch=256 (训练 bsize 口径)' % o.upper(), 256, o)
+                for o in args.optim]
 
     for label, batch, optm in arms:
         actor = load_nets(ckpt)[0]                       # 每个 arm 从同一权重重开
@@ -269,7 +273,11 @@ def main():
 
     print('\n读法（实测结论，run48 ckpt92000；指标 = 后段相邻位移 rms/a_scale，即"收敛地板"）:')
     print('  * 地板随 **lr** 近似线性上升；**Adam 高于 SGD**；**minibatch 高于 full-batch**。')
-    print('    三者叠加（Adam + minibatch + 训练 lr=1e-4）⇒ 地板 0.045，与训练实测量级一致。')
+    print('    Adam + minibatch + 训练 lr=1e-4 ⇒ 地板 ~0.045，与训练实测量级一致。')
+    print('  * ⚠ 复测 batch 64 vs 256 (lr=1e-4, Adam): 0.0449 vs 0.0465 ⇒ **几乎不变**')
+    print('    ⇒ 地板**不是** CLT 意义的 minibatch 采样噪声。更可能是离线 buffer 的')
+    print('      **时间相关性**(转移来自同一条连续轨迹 ⇒ 有效独立样本数 << 名义 batch)。')
+    print('      ⇒ **"加大 batch" 这条建议被本次复测否掉**，不要再按 CLT 去调 bsize。')
     print('  * SGD + full-batch + lr=3e-5 可降到 0.0006（真冻结）⇒ critic 曲面**是可优化的**。')
     print('  * 合成二次对照在同 lr=3e-4 下到 0.003 ⇒ 真 critic 曲面"更难"（曲率更高、')
     print('    对步长更敏感，lr=3e-4 时 SGD 甚至发散），但并非"没有不动点"。')
