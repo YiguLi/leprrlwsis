@@ -56,8 +56,15 @@ class InvertGradClip(torch.autograd.Function):
         (x,) = ctx.saved_tensors
         lo, hi = ctx.lo, ctx.hi
         g = g.clone()
-        over = (x >= hi) & (g > 0)      # 上界外且往外推 → 取反（反射回界内）
-        under = (x <= lo) & (g < 0)     # 下界外且往外推 → 取反
+        # ⚠ 符号约定（写错会直接导致 actor 往界外 runaway）：
+        #   传入的 g = ∂loss/∂a，而 loss = -(Q_p - λQ_c) ⇒ g = -G，
+        #   其中 G := ∂(Q_p - λQ_c)/∂a 是 actor 要"上升"的目标梯度。
+        #   "往界外推" = G 指向上界之上(G>0) 或下界之下(G<0)，换算成 g 即：
+        #     上界外往界外推 ⟺ g < 0 ；下界外往界外推 ⟺ g > 0
+        #   （曾误写成 (g>0)/(g<0)，结果在"内部最优"这一最常见情形下
+        #     把动作反推向界外 —— 实测 step2999 H 动作炸到 ±30。）
+        over = (x >= hi) & (g < 0)      # 上界外且目标还想更大 → 取反（反射回界内）
+        under = (x <= lo) & (g > 0)     # 下界外且目标还想更小 → 取反
         g[over] = -g[over]
         g[under] = -g[under]
         return g, None, None

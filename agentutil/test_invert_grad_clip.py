@@ -60,22 +60,26 @@ def test_forward_is_clamp():
 def test_backward_reflection():
     lo = torch.tensor([0.0])
     hi = torch.tensor([0.5])
-    # 4 个样本（1 维动作）: [界内 0.3, 上界外 0.7, 下界外 -0.2, 上界外但梯度往内 0.6]
-    x = torch.tensor([[0.3], [0.7], [-0.2], [0.6]], requires_grad=True)   # (4,1)
-    y = InvertGradClip.apply(x, lo, hi)                                    # lo/hi 广播到 (4,1)
-    # w = "critic 梯度" g 的方向:
-    #   样本0 界内 g=+1 / 样本1 上界外往外 g=+1 / 样本2 下界外往外 g=-1 / 样本3 上界外往内 g=-1
-    w = torch.tensor([[1.0], [1.0], [-1.0], [-1.0]])
-    loss = (y * w).sum()
-    g = torch.autograd.grad(loss, x)[0]
-    # 期望:
-    #   样本0 界内:  原样 → +1
-    #   样本1 上界外 g>0: 取反 → -1
-    #   样本2 下界外 g<0: 取反 → +1
-    #   样本3 上界外 g<0(往内): 原样 → -1
-    expected = torch.tensor([[1.0], [-1.0], [1.0], [-1.0]])
+    # 5 个样本（1 维动作）覆盖 界内 / 上界外(角点·内部) / 下界外(角点·内部)
+    #   x :  0.3    0.7    0.6    -0.3   -0.2
+    #   g :  +1     -1     +1     +1     -1
+    #   g<0 且上界外 ⇒ 目标梯度 G=-g>0 指向界外(角点) ⇒ 取反
+    #   g>0 且上界外 ⇒ G<0 指向界内(内部最优)      ⇒ 原样
+    #   g>0 且下界外 ⇒ G<0 指向界外(角点)          ⇒ 取反
+    #   g<0 且下界外 ⇒ G>0 指向界内                ⇒ 原样
+    x = torch.tensor([[0.3], [0.7], [0.6], [-0.3], [-0.2]], requires_grad=True)
+    y = InvertGradClip.apply(x, lo, hi)
+    w = torch.tensor([[1.0], [-1.0], [1.0], [1.0], [-1.0]])
+    (y * w).sum().backward()
+    g = x.grad
+    expected = torch.tensor([[1.0], [1.0], [1.0], [-1.0], [-1.0]])
     assert torch.equal(g, expected), (g, expected)
-    print('[3] InvertGradClip.backward 边界反射: 界内原样/界外往外推取反/往内推原样 ✓')
+    # 关键不变量：界外时 x 的更新方向 -g 必须指回界内（绝不能往外）
+    upd = -g.squeeze(1)
+    assert float(upd[1]) < 0 and float(upd[2]) < 0, upd   # 上界外 → x 减小(回界内)
+    assert float(upd[3]) > 0 and float(upd[4]) > 0, upd   # 下界外 → x 增大(回界内)
+    print('[3] InvertGradClip.backward: 界内原样 / 界外"往外推"取反 / "往内推"原样; '
+          '且界外 x 更新恒指回界内 ✓')
 
 
 def test_grad_never_vanishes():
@@ -84,9 +88,9 @@ def test_grad_never_vanishes():
     hi = torch.tensor([0.5])
     x = torch.tensor([0.8], requires_grad=True)   # 上界外
     y = InvertGradClip.apply(x, lo, hi)
-    loss = y.sum()                                # g = +1（往外推）
+    loss = -y.sum()                               # g = -1（目标 G=-g=+1>0，角点/往外推）
     g = torch.autograd.grad(loss, x)[0]
-    assert float(g[0]) == -1.0, g                 # 取反 → -1，非 0
+    assert float(g[0]) == 1.0, g                  # 取反 → +1（非 0）
     print('[4] 界外梯度永不消失 (普通 clamp 为 0, 此处 = %+.1f) ✓' % float(g[0]))
 
 
