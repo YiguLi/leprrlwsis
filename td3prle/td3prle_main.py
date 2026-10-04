@@ -52,7 +52,7 @@ Lagrange multiplier updates (EMA dual ascent on ACTUAL block cost):
      d_block_L 初始 hst.L_D_BLOCK = 1.2 (⇔ 0.02 MWh/块), curriculum 减半地板 hst.L_D_BLOCK_MIN = 0.15
 
 折扣 (γ):
-  H 层 γ = --discount (默认 0.98, 块级语义: 1/(1−γ)=50 块视野);
+  H 层 γ = --discount (默认 0.95, 块级语义: 1/(1−γ)=20 块视野);
   L 层 γ = --l_discount (默认 0.98, 步级语义; L 层每 5 步块终止 → bootstrap 视野 ≤5 步,
   γ 只影响块内 5 步的加权, 故取与 H 相同的 0.98)。
 
@@ -973,7 +973,8 @@ if __name__ == "__main__":
                         default=200,
                         type=int,
                         help='time without training but only filling the replay memory')
-    parser.add_argument('--discount', default=0.98, type=float, help='')
+    # 0.95: H 层 γ 块级语义 ⇒ 半衰期 13.5 块 ≈ 68 min; 1/(1−γ) = 20 块 ≈ 100 min
+    parser.add_argument('--discount', default=0.95, type=float, help='')
     # ---- 24h 相位特征 (--phase_feat) ----
     parser.add_argument('--phase_feat', default=1, type=int, choices=[0, 1, 2],
                         help='H 层观测的 24h 相位特征: 0=关(4维); 1=sin/cos(6维, 默认); '

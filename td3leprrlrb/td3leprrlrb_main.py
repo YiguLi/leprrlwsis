@@ -1006,7 +1006,8 @@ if __name__ == "__main__":
                         default=200,
                         type=int,
                         help='time without training but only filling the replay memory')
-    parser.add_argument('--discount', default=0.98, type=float, help='')
+    # 0.95: H 层 γ 块级语义 ⇒ 半衰期 13.5 块 ≈ 68 min; 1/(1−γ) = 20 块 ≈ 100 min
+    parser.add_argument('--discount', default=0.95, type=float, help='')
     # ---- H 层 n 步回报 / twin-target 聚合 ----
     #   冻结批离线验证 (agentutil/test_nstep_h.py 的动机, 见 2026-09 记录):
     #   1-step + min-target 在 40k 次更新后只到 MC 真值的 34 %;

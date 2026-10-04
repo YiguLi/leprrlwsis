@@ -783,7 +783,8 @@ if __name__ == "__main__":
                         default=200,
                         type=int,
                         help='time without training but only filling the replay memory')
-    parser.add_argument('--discount', default=0.98, type=float, help='')
+    # 0.95: H 层 γ 块级语义 ⇒ 半衰期 13.5 块 ≈ 68 min; 1/(1−γ) = 20 块 ≈ 100 min
+    parser.add_argument('--discount', default=0.95, type=float, help='')
     # ---- 24h 相位特征 (--phase_feat) ----
     parser.add_argument('--phase_feat', default=1, type=int, choices=[0, 1, 2],
                         help='H 层观测的 24h 相位特征: 0=关(4维); 1=sin/cos(6维, 默认); '
