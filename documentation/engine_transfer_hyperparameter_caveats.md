@@ -10,6 +10,21 @@
   观测归一化除数、动作先验带、`--discount`/`--window_length`、探索噪声振幅）——
   **不可直接迁移**，其中一部分必须显式重标定。
 
+> ### ⚠ 口径更正（2026-10-05，后续工作追加，原分析未改动）
+>
+> 本文 §2 表格里的电平比 **1.74×**（以及由它派生的 `COST_SCALE_TD3 → 331`、`VALUE_SCALE`、
+> `obs[3]/10` 除数等"×1.74"建议）来自 **FLORIS 随包默认尾流参数（stock）** 这一**非生产**口径。
+> `agentutil/probe_u10_engine_forms.py` 的裁决（硬判据：路径 A 逐位复现
+> `clip_check_fullrange.json`，`max|Δ| = 0.000e+00`）：u=10 同一批行为上
+> **stock `1.7164`** vs **生产（`calibrated=True`）`0.9892`**。
+>
+> ⇒ **生产口径下这些"×1.74"整体系数不应再被使用**；`obs[3]` 的分布右移量、
+> `VALUE_SCALE` 的尺度红利都要按 `calibrated` 口径重算。
+> ⚠ 但 **`COST_SCALE_TD3` 的 ×3.31 不是纯电平比**（它是 `c1` 块和越限率的松紧比，
+> 与动作分布和阈值耦合），本文未重算 ⇒ 该行只作"**需按生产口径重做**"标记，
+> 不能反向断定 331 是错的。详见 `documentation/engine_u10_three_forms.md` §0。
+
+
 下面给出**实测依据**。数据来自 `output/engine_minute_compare.json`（单排 5 台 5D、
 `a≡0.3333`、`γ≡0`、风速 = `FFC_speed_noise_1.csv` 第 1 日列前 100 min、均值 7.524 m/s），
 分析脚本 `agentutil/analyse_engine_cost_scale.py`（口径取自 `hsrl_cost.py` 单一真源）。
@@ -61,7 +76,7 @@
 | `COST_SCALE_TD3 = 100` | `hsrl_cost.py:63` | 定标时 cost 块奖励 ≈0.04；FLORIS 下 **0.1323**（×3.31），两通道"块奖励同量级"失衡 | ≈ **331**（= 100×3.31） |
 | `VALUE_SCALE = 1000` | `hsrl_cost.py:57` | 同理，r1 也 ×1.74；利润通道虽被 scale 归一，但"尺度/条件数"红利是相对该 scale 定的 | ≈ 1000×1.74 |
 | `Normalize` 的 `obs[3]/10` | `td3per_myfunc.py:458` | **`obs[3]` = `PowerOutput(u, a)`（引擎出力）**，FLORIS 下大 1.74× ⇒ 同一维在 [0,1] 里的分布整体右移 | 除数 ×1.74 |
-| `--discount 0.98` / `--window_length 1` | `td3per_main.py:886/940` | 两者都与"有效 horizon / 记忆需求"绑定，而两引擎的**动态性不同**：FLORIS 准稳态无输运延迟（观测 4 维即马尔可夫），WFSim 有输运延迟（同上观测即部分可观测） | 不可直接搬；WFSim 侧反而**可能**受益于 `window_length>1` |
+| `--discount 0.98` / `--window_length 1` | `td3per_main.py:886/940` | 两者都与"有效 horizon / 记忆需求"绑定。⚠ **原写的"FLORIS 无输运延迟、WFSim 有输运延迟"已证伪**（`documentation/engine_u10_three_forms.md` §3：`WFSim_port` 每次调用重置流场为均匀流、只积分 5 s ⇒ 调用间**无状态**，跨调用滞后不可能存在；输运尺度 5D/u=50 s、全场 200 s 被跳过）⇒ **两引擎在当前耦合下都是无记忆映射**，"记忆需求不同"这条理由**不成立** | ~~WFSim 侧可能受益于 `window_length>1`~~ ⇒ 该条不再构成迁移差异；`--discount` 仍可按"有效 horizon"独立调 |
 | 动作先验带 `WT_LO/WT_HI = 0.05/0.45` | `hsrl_warmup.py:60` | 两引擎的 `Cp(a)`/`CT(a)` 关系不同（WFSim `CT_prime=4a(1−a)²` vs FLORIS `CT=4a(1−a)`）；且 myfunc 的 `CheckAction` 夹到 `[0,0.5]` | 需按各引擎重扫（本项目已实测 FLORIS 侧偏差点在 a≈0.40） |
 | 探索噪声振幅（`wt_noise`/`sig_noise_*`、`policy_noise`） | `td3per_main.py:1035-1039` | 噪声是"动作空间里的距离"，而同一动作在两引擎的**物理后果**差 1.87×（尾流深度比） | 需按引擎调 |
 

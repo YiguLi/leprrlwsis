@@ -5,6 +5,21 @@
 程序：`agentutil/probe_engine_random_actions.py`
 分析：`agentutil/analyse_engine_a_response.py`、`agentutil/analyse_engine_a_shape.py`
 
+> ### ⚠ 口径更正（2026-10-05，后续工作追加，原分析未改动）
+>
+> **本文全部数字是 `output/engine_random_actions.json` 的结果，该 artifact 用的是 FLORIS
+> 随包默认尾流参数（stock），即 `aifflor` 的 <u>非生产</u> 配置。**
+> `agentutil/probe_u10_engine_forms.py` 已裁决（硬判据：路径 A 逐位复现
+> `clip_check_fullrange.json`，`max|Δ| = 0.000e+00`）：同一批 u=10 行为上
+> **stock `1.7164`** vs **生产（`calibrated=True`）`0.9892`**。
+>
+> ⇒ 本文的 **1.67× / +66.9% / 常数残差 10.58% / "两引擎地形一凹一凸"** 都**不能**当
+> "生产配置的形态一量级"引用；生产口径下 u=10 的电平差只有 **−1.08%**。
+> 另外 §4.3 称"WFSim 有输运延迟"，经代码级核查在**当前耦合下不成立**
+> （见 `documentation/engine_u10_three_forms.md` §3）。
+> 同风速 u=10 的受控重做见该文档。
+
+
 ---
 
 ## 0. 一句话结论
@@ -147,8 +162,11 @@ WFSim 的推力系数还在随 a 上升、FLORIS 的也同样上升——差异�
 2. **动作先验带 `[0.05, 0.45]`（`hsrl_warmup.py:60`）**：旧环境里 WFSim 最优 ≈0.20 落在
    带内中部；FLORIS 最优 ≈0.40 落在带的上边缘 ⇒ **同一条带在两引擎里的"覆盖质量"不同**，
    迁移时会把探索推到带的边界。这一条**必须分别核查**（项目已有 `relax_wt_prior.py` 类工具）。
-3. **`--discount` / `--window_length`**：仍是动态性差异（FLORIS 无记忆、WFSim 有输运延迟），
-   与本文结论独立、但同向。
+3. **`--discount` / `--window_length`**：**原写"FLORIS 无记忆、WFSim 有输运延迟"——后半句已证伪**
+   （`documentation/engine_u10_three_forms.md` §3：`WFSim_port` 每次调用都重置流场为均匀流、
+   只积分 5 s，调用间**无状态** ⇒ 跨调用滞后不可能存在；输运尺度 5D/u = 50 s、全场 200 s 被跳过）。
+   ⇒ 两引擎在**当前耦合下都是无记忆映射**，`--discount`/`--window_length` 的"记忆需求"差异
+   **不成立**；该条不能再作为迁移差异的理由。
 4. **纯算法超参数**（网络/lr/bsize/τ/PER 三项/乘性对偶）仍可迁移——它们在归一化空间工作，
    对"地形形状不同"不敏感；但注意 TD3 是近似算法，**近似误差本身**在两引擎上不同。
 
