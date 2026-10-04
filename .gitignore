@@ -28,3 +28,6 @@ __pycache__/
 /agentutil/*.log
 /agentutil/*.tb
 /agentutil/runs/
+
+# agentutil/ ????: ?? dump ??
+agentutil/_scratch*.txt
