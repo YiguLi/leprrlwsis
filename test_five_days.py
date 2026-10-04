@@ -57,6 +57,8 @@
   td3prrlrb      SP_TD3         + td3prrlrb_rule_bess  (L=规则 SocTracker, H 带相位)
   td3perrb       SP_TD3         + td3perrb_rule_bess   (同 td3prrlrb, 但奖励**非分段**)
   td3leprrlrb    SP_TD3_LEPRRLRB+ td3leprrlrb_rule_bess(L=规则 SocTracker, H 带相位)
+  aifflor        SP_TD3         + rbb/rbb_rule_bess.RuleBasedBESS      L 5 维(规则原配料)
+                 (FLORIS 训练 -> **WFSim 引擎**评测的跨引擎迁移臂；label=AIFFLOR@WFSIM)
 
 关键细节（都按各自 main 的写法对齐，不混用）：
   * agent 类、CheckAction / Normalize(_H)、RuleBasedBESS 各自取自本项目模块；
@@ -194,7 +196,7 @@ WIND_CSV = 'FFC_speed_noise_1.csv'
 PROJECT_ORDER = ['per', 'prrbb', 'prle',
                  'td3per', 'td3prrbb', 'td3prle',
                  'td3prrlrb', 'td3perrb', 'td3leprrlrb',
-                 'yawflor']
+                 'yawflor', 'aifflor']
 
 # 每天的三项核心指标（CSV 列名 = TensorBoard tag 末级）
 DAY_METRICS = ('viol_count', 'viol_excess_mw', 'profit_rmb')
@@ -375,6 +377,35 @@ PROJECTS = {
         l_cost_limit=0.1,   # = 生产 agent_L.cost_limit (L 口径 ÷100)
         soc_random=True,
         ref='yawflor/yawflor_main.py',
+    ),
+    # ------------------------------------------------------------------
+    # 方法 11: AIFFLOR —— **跨引擎迁移评测**（FLORIS 训练的策略 → WFSim 引擎）
+    #   `aifflor` 自己的物理引擎是 FLORIS（纯 Python，见 aifflor/README.md），
+    #   但**本条目刻意不给 `env` / `env_physics`** ⇒ 走默认 `env.WindBattery`
+    #   + MATLAB `WFSim_port`，即"把 FLORIS 里学到的策略搬到 WFSim 上跑"。
+    #   因此 label 带 `@WFSIM` 后缀，避免与"同引擎自评"的读数混淆。
+    #   为什么可零口径改动：`aifflor/aifflor_ddpg.py` 与 `aifflor/aifflor_myfunc.py`
+    #   是 `td3per` 对应文件的**逐字复制**（Compare-Object = 0 行差异）⇒ agent/myfunc
+    #   只换模块名，h/l kwargs、动作语义、观测构造与 td3per 条目完全相同。
+    #   ⚠ 跨引擎的 profit 绝对值不可直接比较（电平差 + 状态相关分量，
+    #     见 aifflor/README.md §2 / §3.7）⇒ 只与 WFSim 里的 td3per 同轨比较。
+    # ------------------------------------------------------------------
+    'aifflor': dict(
+        label='AIFFLOR@WFSIM',
+        residual=True,          # 下层 = 残余动作 (命令 = hst.rule_action + Δ)
+        agent=('aifflor.aifflor_ddpg', 'SP_TD3'),
+        myfunc='aifflor.aifflor_myfunc',
+        rule_bess=('rbb.rbb_rule_bess', 'RuleBasedBESS'),
+        lower='rl', l_obs='distilled', h_obs='normalize_H',
+        # 引擎 = WFSim（**不**注册 env/env_physics）⇒ matlab=True，与 td3per 同一条路径
+        h_kwargs={**_EMA, **_TD3_H, 'lam_max': 100.0, 'lam_min': 3.0,
+                  'record_update_stats': True,
+                  'wt_noise': 0.05, 'sig_noise_max': 0.2, 'sig_noise_min': 0.05},
+        h_lam=5.0,
+        l_kwargs={**_EMA_L, **_TD3_L, 'lam_max': 500.0, 'lam_min': 10.0},
+        l_cost_limit=0.1,   # = 生产 agent_L.cost_limit (L 口径 ÷100)
+        soc_random=True,
+        ref='aifflor/aifflor_main.py',
     ),
 }
 
