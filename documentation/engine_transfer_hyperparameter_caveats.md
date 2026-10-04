@@ -76,7 +76,7 @@
 | `COST_SCALE_TD3 = 100` | `hsrl_cost.py:63` | 定标时 cost 块奖励 ≈0.04；FLORIS 下 **0.1323**（×3.31），两通道"块奖励同量级"失衡 | ≈ **331**（= 100×3.31） |
 | `VALUE_SCALE = 1000` | `hsrl_cost.py:57` | 同理，r1 也 ×1.74；利润通道虽被 scale 归一，但"尺度/条件数"红利是相对该 scale 定的 | ≈ 1000×1.74 |
 | `Normalize` 的 `obs[3]/10` | `td3per_myfunc.py:458` | **`obs[3]` = `PowerOutput(u, a)`（引擎出力）**，FLORIS 下大 1.74× ⇒ 同一维在 [0,1] 里的分布整体右移 | 除数 ×1.74 |
-| `--discount 0.98` / `--window_length 1` | `td3per_main.py:886/940` | 两者都与"有效 horizon / 记忆需求"绑定。⚠ **原写的"FLORIS 无输运延迟、WFSim 有输运延迟"已证伪**（`documentation/engine_u10_three_forms.md` §3：`WFSim_port` 每次调用重置流场为均匀流、只积分 5 s ⇒ 调用间**无状态**，跨调用滞后不可能存在；输运尺度 5D/u=50 s、全场 200 s 被跳过）⇒ **两引擎在当前耦合下都是无记忆映射**，"记忆需求不同"这条理由**不成立** | ~~WFSim 侧可能受益于 `window_length>1`~~ ⇒ 该条不再构成迁移差异；`--discount` 仍可按"有效 horizon"独立调 |
+| `--discount 0.98` / `--window_length 1` | `td3per_main.py:886/940` | 两者都与"有效 horizon / 记忆需求"绑定。⚠ **原写的"FLORIS 无输运延迟、WFSim 有输运延迟"已证伪**（`documentation/engine_u10_three_forms.md` §3：`WFSim_port` 每次调用重置流场为均匀流，且 `Make_Ax_b.m:7-11` 在 `k==1 && startUniform==0` 时令 **`dt=Inf`** ⇒ 直接解**稳态方程** ⇒ 调用间**无状态**，跨调用滞后不可能存在；输运尺度 5D/u=50 s、全场 200 s **根本未被建模**）⇒ **两引擎在当前耦合下都是无记忆稳态映射**，"记忆需求不同"这条理由**不成立** | ~~WFSim 侧可能受益于 `window_length>1`~~ ⇒ 该条不再构成迁移差异；`--discount` 仍可按"有效 horizon"独立调 |
 | 动作先验带 `WT_LO/WT_HI = 0.05/0.45` | `hsrl_warmup.py:60` | 两引擎的 `Cp(a)`/`CT(a)` 关系不同（WFSim `CT_prime=4a(1−a)²` vs FLORIS `CT=4a(1−a)`）；且 myfunc 的 `CheckAction` 夹到 `[0,0.5]` | 需按各引擎重扫（本项目已实测 FLORIS 侧偏差点在 a≈0.40） |
 | 探索噪声振幅（`wt_noise`/`sig_noise_*`、`policy_noise`） | `td3per_main.py:1035-1039` | 噪声是"动作空间里的距离"，而同一动作在两引擎的**物理后果**差 1.87×（尾流深度比） | 需按引擎调 |
 

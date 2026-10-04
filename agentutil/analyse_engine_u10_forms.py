@@ -34,11 +34,14 @@ u=10.0 恰好有 **10 个不同行为**（同一风速、10 组随机 a 向量�
 * **数值类（形态一）**：本脚本从配对数据直接算。
 * **结构性（形态二/三）**：由 WFSim 侧入口代码决定 —— `WFSim_port.m:53` 每次调用都跑一次
   完整 `WFSim(Wind,Control)`；`InitWFSim.m:14-17` 把流场重置为**均匀流**；windTunnel 场景
-  `h=1, L=5`（`meshing.m:189-190`）⇒ 只推进 **5 s**；`startUniform=false`（`meshing.m:207`）
-  ⇒ k=1 步用 `max_it=50` 迭代到"完全发展的尾流场"（`WFSim.m:103-107`），k>1 每步
-  `max_it_dyn=1`（`WFSim.m:81`）。⇒ **每次调用都是从零重解的准稳态映射**，调用之间没有
-  任何状态延续。故形态二（跨调用滞后）与形态三（内部波动/蜿蜒）在此耦合下**不可能出现**：
-  日志里的一切时间结构都来自外生风速序列，而两引擎吃的是同一条序列。
+  `startUniform=false`（`meshing.m:207`）⇒ **`Make_Ax_b.m:7-11` 令 `dt = Inf`，非定常项
+  `1/dt` 整个被丢掉 ⇒ 直接解稳态方程 `A·x = b`**；k=1 步用 `max_it=50` 把稳态非线性迭代到
+  `conv_eps=1e-6`（`WFSim.m:103-107`），k=2..5 用 `max_it_dyn=1` + `dt=h=1s`（`WFSim.m:81`）
+  从**已收敛的稳态**出发、输入未变 ⇒ 是恒等松弛。故 `meshing.m:189-190` 的 `h=1, L=5`
+  （共 5 步）**不是物理时间窗口**，只是稳态确认；返回值 = **稳态解**。
+  ⇒ **每次调用都是从零重解的稳态映射**，调用之间没有任何状态延续。故形态二（跨调用滞后）
+  与形态三（内部波动/蜿蜒）在此耦合下**不可能出现**：日志里的一切时间结构都来自外生风速
+  序列，而两引擎吃的是同一条序列。
 
 用法: python agentutil/analyse_engine_u10_forms.py [--u 10.0] [--bin 0.5] [--json output/x.json]
 """
@@ -387,12 +390,15 @@ def main():
     print('  入口行为（逐行读代码）：')
     print('    · WFSim_port.m:53        每次调用执行一次**完整** WFSim(Wind,Control)')
     print('    · InitWFSim.m:14-17      流场被重置为**均匀流**（"no turbines present yet"）')
-    print('    · meshing.m:189-190      windTunnel: h=1, L=5 ⇒ time=0:1:5，**只推进 %.0f s**'
-          % SIM_WINDOW_S)
-    print('    · meshing.m:207          startUniform=false ⇒ k=1 步 max_it=50 迭代到'
-          '"完全发展的尾流场"')
-    print('    · WFSim.m:81             max_it_dyn=1 ⇒ k>1 每步只解一次（松弛，非动力学推进）')
-    print('  ⇒ 该入口是"**从零重解的准稳态映射**"：调用之间无状态延续')
+    print('    · meshing.m:207          startUniform = false')
+    print('    · **Make_Ax_b.m:7-11**   `k==1 && startUniform==0 ⇒ dt = Inf` ⇒ **非定常项')
+    print('                             (1/dt) 整个被丢掉** ⇒ 直接解**稳态方程** A·x = b')
+    print('    · WFSim.m:103-107        k=1 步 max_it=50（把稳态非线性迭代到 conv_eps=1e-6）')
+    print('    · WFSim.m:81 / :25-29    k>1 用 max_it_dyn=1 + dt=h=1s ⇒ 从**已收敛的稳态**出发')
+    print('                             且输入未变（时间导数项 ≡0）⇒ 是恒等松弛，不是推进')
+    print('    · meshing.m:189-190      h=1, L=5 ⇒ 共 5 步；这 5 步**不是物理时间窗口**，')
+    print('                             只是"稳态确认" ⇒ 返回值 `sol_array{1,5}` = **稳态解**')
+    print('  ⇒ 该入口是"**每次从零重解的稳态映射**"：调用之间无状态延续')
     print('     ⇒ 形态二（跨调用滞后）在此耦合下**不可能出现**（无状态可滞后）；')
     print('     ⇒ 形态三（内部波动/蜿蜒/恢复序列）也**不可能出现**：')
     print('        - 无随机源：InitWFSim 每次同一均匀初值，无湍流脉动实现；')
@@ -400,21 +406,31 @@ def main():
     print('          它决定尾流恢复的**速率**，不产生时间上的波动序列；')
     print('        - 日志里的一切时间结构都来自**外生风速序列**，而两引擎吃同一条序列。')
     print()
+    print('  设定即口径（**已定决策**）：WFSim 训练就是这么跑的 ⇒ FLORIS 侧同口径对齐，')
+    print('  **不**在调用间引入输运延迟/动态耦合。核实结果：两边本来就同为无记忆稳态映射——')
+    print('    · `aifflor_env.AifflorPhysics`：只有纯查表缓存（`test_yaw_env_contract.py` ②')
+    print('      已证"预取路径 ≡ 直算路径"逐位相同 ⇒ 缓存无数值影响，不是状态）')
+    print('    · `yawflor_env`：`YAW_TRANSPORT_DELAY` 默认 False，且置 True 被**显式拒绝**')
+    print('    ⇒ 本决策**不需要改任何代码**，只需停止在文档/超参论证里把"记忆需求不同"当理由。')
+    print()
     dx = SPACING_D * D_ROTOR
     t1, tf = dx / args.u, dx * (N_TURB - 1) / args.u
     print('  量级对照（u = %g m/s, 间距 %gD = %.0f m）：' % (args.u, SPACING_D, dx))
     print('    · 单跨尾流输运时间 5D/u = %.0f s；全风场 %.0f m / u = %.0f s'
           % (t1, dx * (N_TURB - 1), tf))
-    print('    · 入口积分窗口只有 %.0f s ⇒ 若真靠"输运"，下游机组在窗口内根本来不及'
-          % SIM_WINDOW_S)
-    print('      感受上游尾流；它能给出合理亏损正说明靠 k=1 步 50 次迭代直接解出已发展的场。')
+    print('    · 这些时间尺度**根本没有被建模**：`dt=Inf` 已把时间项消掉，下游尾流亏损是')
+    print('      **稳态方程的解**，不存在"来不及感受上游尾流"的问题（那是对暂态积分的描述）。')
     print('  ⇒ 要让形态二/三出现，必须**换耦合**（调用间保留 sol、让 time 轴连续、逐时步改')
-    print('     Wind/Control），而不是换引擎。')
+    print('     Wind/Control、并把 startUniform 改为 true 或去掉 dt=Inf），而不是换引擎。')
     print('  ⇒ 可证伪的检验（本沙箱内 MATLAB 起不来，未执行）：'
           '`agentutil/probe_wfsim_memoryless.py`')
     print('     —— 同参数连调 20 次是否逐位相同、穿插别的 (u,a) 后能否复原、两实例共享')
     print('     engine 是否互不干扰。三节全过 ⇒ 无记忆，形态二/三被确证不存在。')
-    res['transport'] = dict(dx_m=dx, t_5D_s=t1, t_farm_s=tf, sim_window_s=SIM_WINDOW_S)
+    print('  ⚠ 同口径**不**保证同一收敛质量：FLORIS 是解析稳态；WFSim 是 `dt=Inf` + 50 次')
+    print('     迭代逼近（`conv_eps=1e-6`）。若该步未真收敛，WFSim 会带一个**稳态残差**，')
+    print('     它是形态一的一部分、属"设定本身的产物"，而非模型形状差。本次无 MATLAB 未测。')
+    res['transport'] = dict(dx_m=dx, t_5D_s=t1, t_farm_s=tf, sim_window_s=SIM_WINDOW_S,
+                            dt_inf_steady_solve=True)
 
     # ------------------------------------------------------------ 4 结论
     print()
@@ -429,8 +445,8 @@ def main():
                                  '偏低' if r_exact['ratio_mean'] < 1 else '偏高',
                                  r_exact['resid_const_pct'], r_exact['ladder'][3]['rms_pct'])))
     print('  %-4s %-16s %s' % ('二', '**否（本耦合下）**',
-                              '入口每次重置 + %.0f s 积分 ⇒ 无状态、无从滞后；'
-                              '输运尺度 %.0f s 被跳过' % (SIM_WINDOW_S, tf)))
+                              '入口每次重置 + `dt=Inf` 直接解稳态 ⇒ 无状态、无从滞后；'
+                              '输运尺度 %.0f s 未被建模' % tf))
     print('  %-4s %-16s %s' % ('三', '**否（本耦合下）**',
                               '无随机源、无湍流脉动实现；时间结构 100%% 外生'))
     print()
