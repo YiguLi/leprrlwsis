@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 
-from model import (Actor, Critic, InvertGradClip, action_bounds)
+from model import (Actor, Critic)
 from td3prle.td3prle_buffer import PRLEBuffer
 from random_process import OrnsteinUhlenbeckProcess
 from util import *
@@ -236,10 +236,6 @@ class SP_TD3_PRLE(object):
         else:
             amp = np.ones(self.nb_actions)
         self.action_amp = np.asarray(amp, dtype=np.float32)
-        # ---- 逐维动作边界 (InvertGradClip 用; 与 CheckAction 合法区间一致) ----
-        # H 层 (nb_actions > 1) 才启用; L 层残余 Δ 由 update_policy 门控跳过。
-        self.action_lo, self.action_hi = action_bounds(
-            self.nb_actions, self.nb_turbine, wt_lo=0.0, wt_hi=0.5)
 
     # ---- TD3 helper: aggregate a critic pair (min or max) ----
     def _pair_min(self, q1, q2):
@@ -286,14 +282,10 @@ class SP_TD3_PRLE(object):
         # ---- TD3: target policy smoothing (clipped Gaussian noise,
         #      scaled per dimension by action amplitude) ----
         amp_t = torch.tensor(self.action_amp, dtype=torch.float32, device=self.device)
-        lo_t = torch.tensor(self.action_lo, dtype=torch.float32, device=self.device)
-        hi_t = torch.tensor(self.action_hi, dtype=torch.float32, device=self.device)
         a_next = self.actor_target(next_state_batch)
         noise = torch.randn_like(a_next) * (self.policy_noise * amp_t)
         noise = noise.clamp(-self.noise_clip * amp_t, self.noise_clip * amp_t)
         a_smoothed = a_next + noise
-        if self.nb_actions > 1:
-            a_smoothed = a_smoothed.clamp(lo_t, hi_t)
 
         # ---- TD3: twin targets, take min of the pair (clipped double Q) ----
         q_p1_next = self.critic_target_p([next_state_batch, a_smoothed])
@@ -366,17 +358,14 @@ class SP_TD3_PRLE(object):
         if self.update_count % self.policy_delay == 0:
             self.actor.zero_grad()
             # Fresh forward through the (just updated) critics: min of twins.
-            a_cur = self.actor(state_batch)
-            if self.nb_actions > 1:
-                a_cur = InvertGradClip.apply(a_cur, lo_t, hi_t)
             min_p_cur = self._pair_min(
-                self.critic_p([state_batch, a_cur]),
-                self.critic_p2([state_batch, a_cur]))
+                self.critic_p([state_batch, self.actor(state_batch)]),
+                self.critic_p2([state_batch, self.actor(state_batch)]))
             # clamp(min=0) on cost: prevents the actor from exploiting a
             # (pathological) negative cost Q inside the Lagrangian objective.
             min_c_cur = self._aggregate_pair(
-                self.critic_c([state_batch, a_cur]),
-                self.critic_c2([state_batch, a_cur])).clamp(min=0.0)
+                self.critic_c([state_batch, self.actor(state_batch)]),
+                self.critic_c2([state_batch, self.actor(state_batch)])).clamp(min=0.0)
 
             # cost 为 +
             policy_loss = -(min_p_cur - self.lam * min_c_cur)  # TODO

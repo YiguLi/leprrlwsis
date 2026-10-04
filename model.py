@@ -32,68 +32,6 @@ def fanout_init(size, fanout=None):
     v = 1. / np.sqrt(fanout)
     return torch.Tensor(size).uniform_(-v, v)
 
-
-class InvertGradClip(torch.autograd.Function):
-    """有界动作 + 确定性策略的**反向边界反射**（Hausknecht & Stone 2016, ICLR,
-    "Deep RL in Parameterized Action Space" 的 inverting gradients）。
-
-    forward  = 逐维 ``clamp(x, lo, hi)`` ⇒ critic 永远只见界内动作（消除 OOD 外推）。
-    backward = 界外且梯度往外推时**取反**（反射回界内），其余原样 —— 梯度永不消失
-              （区别于普通 clamp 的界外死区，也区别于 tanh 的边界饱和）。
-
-    仅用于 H 层（``Actor`` 故意无界输出）；L 层（``nb_actions==1`` 的残余 Δ）由
-    调用方用 ``nb_actions > 1`` 门控跳过。``lo/hi`` 为可广播的逐维张量。
-    """
-    @staticmethod
-    def forward(ctx, x, lo, hi):
-        ctx.save_for_backward(x)
-        ctx.lo = lo
-        ctx.hi = hi
-        return x.clamp(lo, hi)
-
-    @staticmethod
-    def backward(ctx, g):
-        (x,) = ctx.saved_tensors
-        lo, hi = ctx.lo, ctx.hi
-        g = g.clone()
-        # ⚠ 符号约定（写错会直接导致 actor 往界外 runaway）：
-        #   传入的 g = ∂loss/∂a，而 loss = -(Q_p - λQ_c) ⇒ g = -G，
-        #   其中 G := ∂(Q_p - λQ_c)/∂a 是 actor 要"上升"的目标梯度。
-        #   "往界外推" = G 指向上界之上(G>0) 或下界之下(G<0)，换算成 g 即：
-        #     上界外往界外推 ⟺ g < 0 ；下界外往界外推 ⟺ g > 0
-        #   （曾误写成 (g>0)/(g<0)，结果在"内部最优"这一最常见情形下
-        #     把动作反推向界外 —— 实测 step2999 H 动作炸到 ±30。）
-        over = (x >= hi) & (g < 0)      # 上界外且目标还想更大 → 取反（反射回界内）
-        under = (x <= lo) & (g > 0)     # 下界外且目标还想更小 → 取反
-        g[over] = -g[over]
-        g[under] = -g[under]
-        return g, None, None
-
-
-def action_bounds(nb_actions, nb_turbine, wt_lo=0.0, wt_hi=0.5,
-                  sig_lo=-0.5, sig_hi=0.5, charge=10.0):
-    """逐维动作边界 ``(lo, hi)``，与各项目 ``CheckAction`` 的合法区间一致。
-
-    H 层: 前 ``nb_turbine`` 维 = 机组动作 ``[wt_lo, wt_hi]``（轴向因子 ``[0,0.5]``
-          或 yawflor 偏航 ``[-1,1]``），信号维 = ``[sig_lo, sig_hi] = [-0.5,0.5]``。
-    L 层: ``nb_actions == 1`` 的残余 Δ 无固定界，返回 ``[-charge, charge]`` 仅作占位
-          （调用方应对 ``nb_actions == 1`` 跳过 InvertGradClip）。
-    返回 ``(lo, hi)`` float32 numpy 数组，长度 = ``nb_actions``。
-    """
-    if nb_actions == nb_turbine:
-        lo = np.full(nb_actions, wt_lo)
-        hi = np.full(nb_actions, wt_hi)
-    elif nb_actions == nb_turbine + 1:
-        lo = np.array([wt_lo] * nb_turbine + [sig_lo])
-        hi = np.array([wt_hi] * nb_turbine + [sig_hi])
-    elif nb_actions == 1:
-        lo = np.full(1, -charge)
-        hi = np.full(1, charge)
-    else:
-        lo = np.full(nb_actions, -1.0)
-        hi = np.full(nb_actions, 1.0)
-    return lo.astype(np.float32), hi.astype(np.float32)
-
 class Actor(nn.Module):
     def __init__(self, nb_states, nb_actions, hidden1=400, hidden2=300, init_w=3e-3):
         super(Actor, self).__init__()
