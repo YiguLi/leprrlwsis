@@ -12,8 +12,10 @@
 ② **test9**：两臂 `df_test9.csv` 的 OVERALL 逐 step 对比（同 step 配对）。mode 0 **结构上
    不依赖任何相位约定**；mode 1 的相位是评测脚手架假造的（`rep_minute_for_price_level`），
    已实测同一权重换约定会摆动 6–9%。
-③ **BESS 通道**：`degradation` / `bess_profit` 中位（元/episode）与净额。生产基线（run54）
-   是退化 10.8k、现金 +0.98k ⇒ 净 **−9.9k 元/天**；去掉时钟不应让它恶化。
+③ **BESS 通道**：`degradation` / `bess_profit` 中位（元/episode）与净额。生产基线（run54/run62
+   成熟期）是退化 ~10.8k、现金 ~+1.0k ⇒ 净 ~−9.9k 元/episode；去掉时钟不应让它恶化。
+   ⚠ **必须同长度比较**：实测早训期（前 13.9 episode）所有 run 的退化都是 24.8k~26.6k，
+   拿成熟期整段中位比短程 pilot 会得出反向的错误结论 ⇒ 用 `--ref` 截到相同 episode 数。
 ④ **归因**：日志里 `applied_action_H` 被 minute-of-day（时钟）/ `pr`（电价）/ `u`（风速）
    解释的方差比例（复用 `probe_phase_reliance.log_attribution`）。
    ⚠ 训练分布内 `pr` 是时钟的确定性函数 ⇒ 两者**观测等价**，单看④无法区分"靠价"与"靠钟"；
@@ -99,14 +101,23 @@ def test9(d):
                                   c1=('c1', 'mean'), pf_viol=('pf_viol', 'sum')).reset_index()
 
 
-def bess_medians(d, n_ep):
+def bess_medians(d, n_ep=None):
+    """元/episode 中位。`n_ep` 给了就**只取前 n_ep 个 episode**。
+
+    ⚠ 为什么必须能限长度：BESS 退化在**早训期**极高（实测生产 run 的前 13.9 episode
+    退化 24.8k~26.6k 元/episode），收敛后才降到 ~10.8k。拿成熟 run 的**整段中位**
+    去比短程 pilot 会得出"去掉时钟导致退化翻倍"的**错误结论**（本会话踩过）。
+    """
     df = pd.read_csv(find_log_csv(d), usecols=['degradation', 'bess_profit', 'revenue'])
+    if n_ep:
+        df = df.iloc[:min(len(df), int(n_ep) * EP)]
     df = df.iloc[:(len(df) // EP) * EP]
     g = df.groupby(np.arange(len(df)) // EP).sum()
     return dict(deg=float(g.degradation.median()), cash=float(g.bess_profit.median()),
                 net=float((g.bess_profit - g.degradation).median()),
                 rev=float(g.revenue.median()),
-                deg_pct=float(100 * (g.degradation / g.revenue).median()))
+                deg_pct=float(100 * (g.degradation / g.revenue).median()),
+                n_ep=int(len(g)))
 
 
 def main():
@@ -114,6 +125,9 @@ def main():
     ap.add_argument('--arm', action='append', required=True,
                     help='run 名/目录，可给两次（建议按 mode 0 / mode 1 顺序）')
     ap.add_argument('--json', default=None, help='把结果写 JSON')
+    ap.add_argument('--ref', action='append', default=None,
+                    help='生产对照 run（可给多次，如 --ref AIFFLOR-run62 --ref TD3PER-run54）；'
+                         '会按**与臂相同的 episode 数**截取，避免早训期长度混淆')
     args = ap.parse_args()
 
     infos = [arm_info(p) for p in args.arm]
@@ -168,15 +182,27 @@ def main():
                 median=float(t.profit_econ.median()), last=float(t.profit_econ.iloc[-1]),
                 best=float(t.profit_econ.max()))
 
-    # ---------------- ③ BESS 通道 ----------------
-    print('\n③ BESS 通道（元/episode 中位；生产基线 run54 = 退化 10845 / 现金 +977 / 净 −9868）')
+    # ---------------- ③ BESS 通道（同长度对照，防早训期混淆） ----------------
+    n_ep_arm = min(len(pd.read_csv(find_log_csv(d), usecols=['u'])) // EP for d, _, _, _ in infos)
+    print('\n③ BESS 通道（元/episode 中位；**同长度**：各 run 只取前 %d 个 episode）' % n_ep_arm)
     print('   %-20s %12s %12s %12s %10s' % ('臂', 'degradation', 'bess_profit', '净额', '退化/收入'))
     rep['bess'] = {}
     for d, tag, _, _ in infos:
-        m = bess_medians(d, None)
+        m = bess_medians(d, n_ep_arm)
         rep['bess'][tag] = m
-        print('   %-20s %12.0f %+12.0f %+12.0f %9.1f%%'
-              % (tag, m['deg'], m['cash'], m['net'], m['deg_pct']))
+        print('   %-20s %12.0f %+12.0f %+12.0f %9.1f%%' % (tag, m['deg'], m['cash'], m['net'], m['deg_pct']))
+    if args.ref:
+        rep['bess_ref'] = {}
+        for r in args.ref:
+            try:
+                rd = resolve_run(r)
+                m = bess_medians(rd, n_ep_arm)
+                rep['bess_ref'][os.path.basename(rd)] = m
+                print('   %-20s %12.0f %+12.0f %+12.0f %9.1f%%   ← 生产对照(同长度)'
+                      % (os.path.basename(rd), m['deg'], m['cash'], m['net'], m['deg_pct']))
+            except SystemExit as e:
+                print('   %-20s 跳过（%s）' % (r, str(e).splitlines()[0]))
+        print('   ⚠ 不要拿生产 run 的**整段**中位（成熟期 ~10.8k）比短程 pilot：早训期本来就 ~25k')
 
     # ---------------- ④ 归因 ----------------
     print('\n④ 日志方差归因（决策点；clock=minute-of-day, price=pr, wind=u）')
