@@ -1,5 +1,10 @@
 # -*- coding: utf-8 -*-
-"""检查某个 run 的健康度（通用，默认 `output/TD3PER-run48`）。
+"""检查某个 run 的健康度（**任意前缀**：TD3PER / AIFFLOR / SINGLEAIF / YAWFLOR …；默认 `output/TD3PER-run48`）。
+
+CSV 名**不写死**：逐步日志表用 `runpaths.find_log_csv`（历史名 `df_td3per.csv` 优先，否则按
+`original_action_H` + `turbine_profit` 两列识别 `df_<tag>.csv`），episode 汇总表按 `df_episode*`
+通配。此前写死 `df_td3per.csv` / `df_episode_td3per.csv` ⇒ **对 aifflor run 会静默跳过 ①② 两节**
+（只剩 test9 / update_stats），看着"健康"其实根本没查。
 
 检查项
 ------
@@ -27,6 +32,8 @@ sys.path.insert(0, _HERE)
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
+
+from runpaths import find_log_csv  # noqa: E402  （逐步日志表：按列识别，不写死文件名）
 
 FAIL, WARN = [], []
 
@@ -100,8 +107,14 @@ def main():
           % (len(cks), max(cks) if cks else '—'))
 
     # ---------------- episode 层 ----------------
-    if 'df_episode_td3per.csv' in files:
-        df = pd.read_csv(files['df_episode_td3per.csv'])
+    ep_csv = files.get('df_episode_td3per.csv')
+    if ep_csv is None:                 # aifflor / singleaif / yawflor 的 episode 表名不同
+        for k in sorted(files):
+            if k.startswith('df_episode'):
+                ep_csv = files[k]
+                break
+    if ep_csv:
+        df = pd.read_csv(ep_csv)
         print('\n① episode 层面（n=%d）' % len(df))
         finite_report(df, ['episode_reward', 'episode_cost', 'episode_cost2',
                            'episode_gap_pen', 'episode_profit', 'bess_profit',
@@ -122,8 +135,9 @@ def main():
                   % (len(np.unique(wd)), int(np.nanmin(wd)), int(np.nanmax(wd))))
 
     # ---------------- 步层 ----------------
-    if 'df_td3per.csv' in files:
-        df = pd.read_csv(files['df_td3per.csv'])
+    step_csv = find_log_csv(d)         # df_td3per.csv 优先，否则按列识别 df_<tag>.csv
+    if step_csv:
+        df = pd.read_csv(step_csv)
         print('\n② 步层面（n=%d，列 %d）' % (len(df), df.shape[1]))
         key = ['r1', 'c1', 'c2', 'r2', 'gap_pen', 'soc', 'soc_target', 'lam1',
                'lam2', 'd1', 'd2', 'P_F', 'wind_speed', 'reward', 'cost']

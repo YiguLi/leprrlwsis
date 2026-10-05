@@ -70,11 +70,15 @@ class StubEngine:
     def __init__(self):
         self.calls = []
 
-    def WFSim_port(self, u, phi, act, phi2):
+    def WFSim_port(self, u, phi, act, phi2, want_full=False):
+        # env.py::PowerOutput 实传 5 个实参（第 5 个 want_full=False）。收下并记录，
+        # 以便下面把"生产调用形状"钉成判据 —— 本 stub 曾只收 4 个 ⇒ 判据⑤ 会走
+        # env.py 的 except 分支后在 target_result['out'] 抛 UnboundLocalError。
         u_v = float(np.asarray(u).reshape(-1)[0])
         act_v = [float(x) for x in np.asarray(act).reshape(-1)]
         self.calls.append(dict(u=u_v, phi=float(np.asarray(phi).reshape(-1)[0]),
-                               act=act_v, phi2=float(np.asarray(phi2).reshape(-1)[0])))
+                               act=act_v, phi2=float(np.asarray(phi2).reshape(-1)[0]),
+                               want_full=bool(want_full)))
         return {'out': 1e6 * (0.001 * u_v + float(np.sum(act_v)))}
 
     @staticmethod
@@ -115,6 +119,8 @@ def check_legacy_env(r):
     r.check('调用形状：WFSim_port(u, 0.0, act(5 维), 0.0)',
             last['u'] == u and last['phi'] == 0.0 and last['phi2'] == 0.0
             and last['act'] == act, str(last))
+    r.check('调用形状第 5 实参 = False（env.py 的 want_full=False，省 sol_array 回传）',
+            last.get('want_full') is False, 'want_full=%r' % last.get('want_full'))
 
     # 守卫
     n0 = len(stub.calls)

@@ -3,7 +3,8 @@
 
 为什么需要"共同面板"
 --------------------
-单 run 审计时，面板通常取自该 run 自己的 `df_td3per.csv`（它访问过的状态）。
+单 run 审计时，面板通常取自该 run 自己的逐步日志表（`df_td3per.csv`；aifflor 等其它前缀是
+`df_aifflor.csv` —— 由 `runpaths.find_log_csv` 按列识别，不写死文件名）。
 但不同 run 的状态分布不同，于是 `D_pi = E_s[|pi_b(s) - pi_a(s)|]` 的**绝对值不可跨 run 比**：
 状态分布不同会系统性地改变这个期望。要做"runA 的策略比 runB 稳吗"这类判断，
 必须让所有 run 在**同一组状态**上被查询。
@@ -101,7 +102,7 @@ def ckpt_steps(d, actor='actor_6.pkl'):
 
 
 def read_log(d, every=1):
-    """读 df_td3per.csv。
+    """读逐步日志表（`runpaths.find_log_csv`：`df_td3per.csv` 优先，否则按列识别）。
 
     返回 (rows, sampled):
       rows[step]     = (r1, lam1)            —— 全量, 供锚点/lam 滚动统计

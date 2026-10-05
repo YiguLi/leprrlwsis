@@ -10,7 +10,8 @@
   (b) **critic 曲面本身**：即使给确定性梯度，critic 的固定曲面也没有稳定不动点
       （过拟合出高频假结构）⇒ actor 被推到某个方向又被拉回。
 
-做法：`df_td3per.csv` 里有逐步 `(observation, original_action_H, r1, c1_step)`，
+做法：逐步日志表（`runpaths.find_log_csv` 解析，TD3PER 是 `df_td3per.csv`、aifflor 是
+`df_aifflor.csv`）里有逐步 `(observation, original_action_H, r1, c1_step)`，
 据此**离线重建 H 层块级 buffer**（无需 MATLAB / env），然后**冻结 critic**、只精调 actor：
 
   Arm A（full-batch）：确定性梯度（无采样噪声）

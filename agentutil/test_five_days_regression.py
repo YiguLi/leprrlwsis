@@ -71,7 +71,12 @@ class _StubWFSim:
     def __init__(self):
         self.calls = 0
 
-    def WFSim_port(self, u, phi, a, phi2):
+    def WFSim_port(self, u, phi, a, phi2, want_full=False):
+        # ⚠ `env.py::PowerOutput` 传的是 **5 个实参**（第 5 个 = want_full=False，
+        #   见 env.py:150-160 的注释：不回传 5 步完整流场解）。本 stub 曾经只收 4 个，
+        #   于是 env.py 的 `except:` 吞掉 TypeError、接着在 `target_result['out']`
+        #   抛 UnboundLocalError ⇒ 本回归的 post 臂直接崩。stub 只被本文件两条臂使用，
+        #   而它们只读 `'out'` ⇒ 收下该实参并忽略即可（保持"确定、有限、对动作敏感"）。
         u0 = float(np.asarray(u).reshape(-1)[0])
         acts = [float(x) for x in np.asarray(a).reshape(-1)][:5]
         self.calls += 1
