@@ -87,8 +87,17 @@ def h_state(obs, minute, mode=1):
     return np.array(base + [np.sin(ang), np.cos(ang)])
 
 
-def build_panel(d, n_panel, every):
-    rows, phase_err = [], 0.0
+def build_panel(d, n_panel, every, price='ANY'):
+    """抽面板状态（H 层 6 维）。
+
+    `price` ∈ {ANY, LOW, MEDIUM, HIGH}：按日志 `pr` 列**筛时段**。
+    为什么要这个：Q 剖面是在面板上平均的，而 `r1 = pr·ptur·t` 把电价乘进奖励 ⇒
+    **峰段与谷段的 Q 曲面本来就不同**。不筛时段时，峰段的"低 a"偏好会被谷段平均掉，
+    于是看不到"策略为什么在峰段把 a 压到 0.02"。
+    """
+    levels = {'LOW': (300.0,), 'MEDIUM': (580.0,), 'HIGH': (980.0,)}
+    want = levels.get(str(price).upper())
+    rows, phase_err, n_seen = [], 0.0, 0
     with open(_log_csv(d), newline='') as f:
         rd = csv.reader(f)
         head = next(rd)
@@ -96,10 +105,14 @@ def build_panel(d, n_panel, every):
         for i, r in enumerate(rd):
             if i % every:
                 continue
+            n_seen += 1
             try:
+                if want is not None:
+                    if abs(float(r[ix['pr']]) - want[0]) > 1.0:
+                        continue
                 obs = np.array([float(x) for x in r[ix['observation']].strip().strip('[]').split()])[:4]
                 pm = float(r[ix['phase_minute']])
-            except (ValueError, IndexError):
+            except (ValueError, IndexError, KeyError):
                 continue
             st = h_state(obs, pm, 1)
             try:
@@ -109,9 +122,9 @@ def build_panel(d, n_panel, every):
                 pass
             rows.append(st)
     if not rows:
-        raise SystemExit('%s 里没抽到面板状态' % d)
+        raise SystemExit('%s 里没抽到面板状态（price=%s）' % (d, price))
     idx = np.linspace(0, len(rows) - 1, min(n_panel, len(rows))).astype(int)
-    return np.stack([rows[i] for i in idx]), phase_err
+    return np.stack([rows[i] for i in idx]), phase_err, (len(rows), n_seen)
 
 
 def load_nets(d, st, which='p'):
@@ -161,6 +174,9 @@ def main():
     ap.add_argument('--exp-coef', type=float, default=5.0, help='拟议指数罚的指数系数 c（默认 5）')
     ap.add_argument('--td-error', type=float, default=None,
                     help='critic 自身 TD 误差（原始单位=块奖励；给了才算"反差 vs 噪声"）')
+    ap.add_argument('--price', default='ANY', choices=['ANY', 'LOW', 'MEDIUM', 'HIGH'],
+                    help='只在该电价档的状态上建面板（默认 ANY=不筛）。'
+                         '峰段(980)与谷段(300)的 Q 曲面不同 ⇒ 判"峰段压 a"必须筛时段')
     args = ap.parse_args()
 
     grid = np.round(np.arange(args.grid[0], args.grid[1] + 1e-9, args.grid[2]), 6)
@@ -176,11 +192,12 @@ def main():
     for name in args.runs:
         d = run_dir(name)
         steps = args.steps if args.steps else [ckpt_steps(d)[-1]]
-        X, perr = build_panel(d, args.panel, args.every)
+        X, perr, (n_pan_raw, n_seen) = build_panel(d, args.panel, args.every, args.price)
         X = torch.tensor(X, dtype=torch.float32)
         print('\n' + '=' * 108)
-        print('=== %s: 面板 %d 状态 (H dim=%d; 相位口径自校验偏差 %.2e) ==='
-              % (os.path.basename(d.rstrip('/\\')), len(X), X.shape[1], perr))
+        print('=== %s: 面板 %d 状态 (H dim=%d; 相位口径自校验偏差 %.2e; 时段=%s: %d/%d 行入选) ==='
+              % (os.path.basename(d.rstrip('/\\')), len(X), X.shape[1], perr,
+                 args.price, n_pan_raw, n_seen))
         print('=' * 108)
         for st in steps:
             if not os.path.exists(os.path.join(d, 'checkpoint_%d' % st, 'actor_6.pkl')):
