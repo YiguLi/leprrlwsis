@@ -74,14 +74,17 @@ def pairing(a, b, tag_a, tag_b):
         ok = (mx == 0.0)
         print('   %-4s 逐行全等: %-5s  相等比例 %.6f  max|Δ| %.3g' % (c, 'OK' if ok else '**FAIL**', eq, mx))
         out['pair_' + c] = dict(equal_frac=eq, max_abs=mx, ok=bool(ok))
-    # 真实重置点：env.ScenarioReset 写死 self.E = 5.0 ⇒ 直接找 SOC≈5.0 的行，顺带量出日志行偏移
+    # 真实 episode 边界：重置写死 E=5.0，但日志里看不到恰好 5.0（重置后第一步立刻被动作改掉）。
+    # 改用**物理上不可能的跳变**定位：单步 |ΔSOC| ≤ PB/η/60 = 0.170 MWh（含放电 10 MW 满功率），
+    # 超过 0.2 只可能是 episode 重置 ⇒ 该行的行号即边界，顺带量出日志的 warmup 偏移。
     for tag, df in ((tag_a, a), (tag_b, b)):
-        hit = np.where(np.abs(df['SOC'].values[:m].astype(float) - 5.0) < 1e-9)[0]
+        soc = df['SOC'].values[:m].astype(float)
+        hit = np.where(np.abs(np.diff(soc)) > 0.2)[0] + 1
         d = np.diff(hit)
-        print('   %-20s 真实重置点 %2d 个 | 间隔 %s（预期 1440）| 首个重置点行号 %s（=日志行偏移）'
+        print('   %-20s 检出 episode 边界 %2d 处 | 间隔 %s（预期 1440）| 首个边界行号 %s（=日志 warmup 偏移）'
               % (tag, len(hit), (np.unique(d).tolist()[:3] if len(d) else '—'),
                  (int(hit[0]) if len(hit) else '—')))
-        out['resets_' + tag] = dict(n=int(len(hit)), gaps=(np.unique(d).tolist() if len(d) else []),
+        out['bounds_' + tag] = dict(n=int(len(hit)), gaps=(np.unique(d).tolist() if len(d) else []),
                                     first_row=(int(hit[0]) if len(hit) else None))
     print('   ⚠ 探索噪声**不锁步**：mode0/mode1 的 H 输入维不同 ⇒ 参数个数不同 ⇒ 构造期 RNG')
     print('      消耗不同 ⇒ 之后随机流错位。故本对照 = 同 seed + 同环境序列 + 同超参的**组间对照**，')
