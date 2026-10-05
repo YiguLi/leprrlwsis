@@ -207,7 +207,8 @@ def make_plot(path, us, pw, pf, s, cfg):
 
 
 def main():
-    ap = argparse.ArgumentParser(description='随机日+随机行为：aifflor vs WFSim 各出一条出力曲线')    ap.add_argument('--day-seed', type=int, default=2026, help='抽"哪一天"的随机种子')
+    ap = argparse.ArgumentParser(description='随机日+随机行为：aifflor vs WFSim 各出一条出力曲线')
+    ap.add_argument('--day-seed', type=int, default=2026, help='抽"哪一天"的随机种子')
     ap.add_argument('--act-seed', type=int, default=7, help='随机动作的种子')
     ap.add_argument('--steps', type=int, default=1440, help='分钟数（1440 = 完整一天）')
     ap.add_argument('--block', type=int, default=1, help='动作保持的分钟数（1=i.i.d.；5=H 层周期）')
