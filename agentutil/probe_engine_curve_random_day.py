@@ -168,6 +168,89 @@ def run_wfsim(us, A, verbose=True, on_minute=None):
     return p
 
 
+def load_tb_series(tb_root, run, tag):
+    """从已有 TB logdir 读回一条 scalar 序列 → (steps, values)（按 step 去重，取最后写入）。
+
+    一个 run 目录里可能有**多个 event 文件**（每次 SummaryWriter 都会新建一个，
+    历史运行不会被覆盖）⇒ 必须按 step 去重，否则同一分钟会出现重复点。
+    """
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+    d = os.path.join(tb_root, run)
+    if not os.path.isdir(d):
+        return None
+    ea = EventAccumulator(d, size_guidance={'scalars': 0})   # 0 = 不限量
+    ea.Reload()
+    if tag not in ea.Tags()['scalars']:
+        return None
+    last = {}
+    for e in ea.Scalars(tag):
+        last[int(e.step)] = float(e.value)
+    steps = np.array(sorted(last), dtype=int)
+    return steps, np.array([last[int(s)] for s in steps], dtype=float)
+
+
+def rebuild_csv_from_tb(out_dir, verbose=True):
+    """**不跑引擎**，直接从已有 TB 日志重建两份 CSV（分钟级 + 5 分钟级）。
+
+    用途：引擎侧已经跑过（比如 WFSim 那趟要 MATLAB、耗时 8 min），现在只是要升级
+    CSV 口径（如补 5 分钟级）⇒ 从 TB 里把曲线读回来重算聚合即可，无需重跑引擎。
+    同时把缺失的 5 分钟级 TB 标签（`curve/blk/*`）补写进 `wfsim` / `compare` run。
+    """
+    tb_root = os.path.join(out_dir, 'tensorboard')
+    if not os.path.isdir(tb_root):
+        raise SystemExit('找不到 TB 目录: {}'.format(tb_root))
+    s_pf = load_tb_series(tb_root, 'aifflor', 'curve/P_farm')
+    s_pn = load_tb_series(tb_root, 'aifflor', 'curve/P_farm_nolift')
+    s_pw = load_tb_series(tb_root, 'wfsim', 'curve/P_farm')
+    s_u = load_tb_series(tb_root, 'wind', 'curve/u')
+    s_a = {j: load_tb_series(tb_root, 'actions', 'action/a%d' % j) for j in range(NT)}
+    for nm, s in [('aifflor/curve/P_farm', s_pf), ('wind/curve/u', s_u)] + \
+                 [('actions/action/a%d' % j, s_a[j]) for j in range(NT)]:
+        if s is None:
+            raise SystemExit('TB 里缺少 {} ⇒ 无法重建 CSV'.format(nm))
+    steps = s_pf[0]
+    for nm, s in [('wind/curve/u', s_u)] + [('actions/action/a%d' % j, s_a[j])
+                                            for j in range(NT)] + \
+                ([('aifflor/curve/P_farm_nolift', s_pn)] if s_pn is not None else []) + \
+                ([('wfsim/curve/P_farm', s_pw)] if s_pw is not None else []):
+        if not np.array_equal(s[0], steps):
+            raise SystemExit('TB 各 run 的 step 轴不一致（{}）'.format(nm))
+    n = len(steps)
+    if verbose:
+        print('=' * 96)
+        print('  --from-tb：不跑引擎，从 TB 日志重建两份 CSV')
+        print('=' * 96)
+        print('  TB logdir : %s' % tb_root)
+        print('  读回      : %d 分钟 × aifflor%s | 动作 a0..a4 | 风速'
+              % (n, ' + wfsim' if s_pw is not None else '（无 wfsim run）'))
+
+    rec = CsvRecorder(out_dir, block=5, flush_every=240, verbose=verbose)
+    for k in range(n):
+        row = {'minute': int(steps[k]), 'u': float(s_u[1][k]),
+               **{'a%d' % j: float(s_a[j][1][k]) for j in range(NT)},
+               'P_aifflor_mw': float(s_pf[1][k]),
+               'P_aifflor_nolift_mw': float(s_pn[1][k]) if s_pn is not None else float('nan')}
+        if s_pw is not None:
+            w = float(s_pw[1][k])
+            row['P_wfsim_mw'] = w
+            row['diff_mw'] = float(s_pf[1][k]) - w
+            row['ratio'] = (float(s_pf[1][k]) / w) if abs(w) > 1e-9 else float('nan')
+        rec.push(row)
+    n_min, n_blk = rec.close(verbose=verbose)
+    write_block_tb(tb_root, rec.block_rows, has_wfsim=(s_pw is not None))
+    if verbose:
+        print('  已补写 TB 的 5 分钟级标签: run `aifflor`%s 的 `curve/blk/*`'
+              % (' 与 `wfsim`/`compare`' if s_pw is not None else ''))
+        if s_pw is not None:
+            pa = np.array([r['P_aifflor_mean'] for r in rec.block_rows])
+            pwm = np.array([r['P_wfsim_mean'] for r in rec.block_rows])
+            rr = pa / pwm
+            print('\n  5 分钟级汇总: 均值 aifflor %.4f MW vs WFSim %.4f MW | '
+                  '块比值 min/中位/均值/max = %.4f/%.4f/%.4f/%.4f'
+                  % (pa.mean(), pwm.mean(), rr.min(), np.median(rr), rr.mean(), rr.max()))
+    return n_min, n_blk
+
+
 def stats(pw, pf, us, inside):
     d = pf - pw
     big = inside & (pw > 0.5)
@@ -369,30 +452,39 @@ def write_tensorboard(out_dir, us, A, pf, pf_nolift, pw, sumstats, meta, block_r
         w.close()
 
     # ---- 5 分钟级曲线（x 轴 = 上层周期序号）------------------------------------
-    # 与分钟级分开命名空间（curve/blk/*），避免与 curve/* 的 1440 点混在一条 x 轴上；
-    # 两个引擎仍用**同一个 tag** ⇒ 5 分钟分辨率下也是"一张图两条线"。
     if block_rows:
-        w = SummaryWriter(os.path.join(root, 'aifflor'))
-        for r in block_rows:
-            w.add_scalar('curve/blk/P_farm', r['P_aifflor_mean'], r['block'])
-            w.add_scalar('curve/blk/P_farm_first', r['P_aifflor_first'], r['block'])
-            w.add_scalar('curve/blk/u', r['u_mean'], r['block'])
-        w.flush()
-        w.close()
-        if pw is not None:
-            w = SummaryWriter(os.path.join(root, 'wfsim'))
-            for r in block_rows:
-                w.add_scalar('curve/blk/P_farm', r['P_wfsim_mean'], r['block'])
-                w.add_scalar('curve/blk/P_farm_first', r['P_wfsim_first'], r['block'])
-            w.flush()
-            w.close()
-            w = SummaryWriter(os.path.join(root, 'compare'))
-            for r in block_rows:
-                w.add_scalar('curve/blk/ratio_of_means', r['ratio_of_means'], r['block'])
-                w.add_scalar('curve/blk/diff_mean', r['diff_mean'], r['block'])
-            w.flush()
-            w.close()
+        write_block_tb(root, block_rows, has_wfsim=(pw is not None))
     return root
+
+
+def write_block_tb(root, block_rows, has_wfsim):
+    """把 **5 分钟级**曲线写进 TB（x 轴 = 上层周期序号 0..287）。
+
+    与分钟级分开命名空间（`curve/blk/*`），避免 288 点与 1440 点混在一条 x 轴上；
+    两个引擎仍用**同一个 tag** ⇒ 5 分钟分辨率下同样是"一张图两条线"。
+    """
+    from torch.utils.tensorboard import SummaryWriter
+    w = SummaryWriter(os.path.join(root, 'aifflor'))
+    for r in block_rows:
+        w.add_scalar('curve/blk/P_farm', float(r['P_aifflor_mean']), int(r['block']))
+        w.add_scalar('curve/blk/P_farm_first', float(r['P_aifflor_first']), int(r['block']))
+        w.add_scalar('curve/blk/u', float(r['u_mean']), int(r['block']))
+    w.flush()
+    w.close()
+    if not has_wfsim:
+        return
+    w = SummaryWriter(os.path.join(root, 'wfsim'))
+    for r in block_rows:
+        w.add_scalar('curve/blk/P_farm', float(r['P_wfsim_mean']), int(r['block']))
+        w.add_scalar('curve/blk/P_farm_first', float(r['P_wfsim_first']), int(r['block']))
+    w.flush()
+    w.close()
+    w = SummaryWriter(os.path.join(root, 'compare'))
+    for r in block_rows:
+        w.add_scalar('curve/blk/ratio_of_means', float(r['ratio_of_means']), int(r['block']))
+        w.add_scalar('curve/blk/diff_mean', float(r['diff_mean']), int(r['block']))
+    w.flush()
+    w.close()
 
 
 def make_plot(path, us, pw, pf, s, cfg):
@@ -450,9 +542,17 @@ def main():
                     help='不写 TensorBoard（默认写；曲线默认就用 TB 表示）')
     ap.add_argument('--plot', action='store_true',
                     help='额外输出静态 PNG（默认不写；两侧都跑了才有意义）')
+    ap.add_argument('--from-tb', action='store_true',
+                    help='不跑任何引擎：从已有 TB 日志重建 curve.csv / curve_5min.csv，'
+                         '并把 5 分钟级标签补写进 TB（引擎侧已跑过时用这个升级 CSV 口径）')
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
+    if args.from_tb:                          # 纯离线：读 TB → 重算两份 CSV
+        rebuild_csv_from_tb(args.out)
+        print('\n  输出: %s  (curve.csv / curve_5min.csv 已重建)'
+              % os.path.abspath(args.out))
+        return 0
     t_start = time.time()
     print('=' * 96)
     print('  随机风速日 + 随机行为 → aifflor(FLORIS) / WFSim(MATLAB) 各一条出力曲线')
