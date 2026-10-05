@@ -64,7 +64,7 @@ def load_arm(d):
 
 
 def pairing(a, b, tag_a, tag_b):
-    """① 配对性：外生量逐行全等；episode 重置点 SOC 全等；episode 内部 SOC 应分化。"""
+    """① 配对性：外生量逐行全等；episode 重置**确定**（写死 E=5.0）；噪声**不**锁步（如实声明）。"""
     m = min(len(a), len(b))
     out = {}
     print('\n① 配对性（取两臂公共前缀 %d 行 = %.2f episode）' % (m, m / EP))
@@ -74,19 +74,18 @@ def pairing(a, b, tag_a, tag_b):
         ok = (mx == 0.0)
         print('   %-4s 逐行全等: %-5s  相等比例 %.6f  max|Δ| %.3g' % (c, 'OK' if ok else '**FAIL**', eq, mx))
         out['pair_' + c] = dict(equal_frac=eq, max_abs=mx, ok=bool(ok))
-    k = min(len(a), len(b)) // EP
-    ra = a['SOC'].values[np.arange(k) * EP].astype(float)
-    rb = b['SOC'].values[np.arange(k) * EP].astype(float)
-    reset_eq = float(np.mean(ra == rb))
-    print('   episode 重置点 SOC（%d 个）: 全等比例 %.3f  max|Δ| %.3g  ⇒ %s'
-          % (k, reset_eq, float(np.abs(ra - rb).max()),
-             'OK（同 seed 的 RNG 流锁步）' if np.allclose(ra, rb, atol=1e-9) else '**FAIL**'))
-    mid = a['SOC'].values.astype(float)[:m]
-    mid_b = b['SOC'].values.astype(float)[:m]
-    print('   episode 内部 SOC: 相等比例 %.3f（**应当**明显 <1：动作不同 ⇒ 轨迹分化）'
-          % float(np.mean(mid == mid_b)))
-    out['pair_reset_soc'] = dict(equal_frac=reset_eq, max_abs=float(np.abs(ra - rb).max()))
-    out['pair_mid_soc_equal_frac'] = float(np.mean(mid == mid_b))
+    # 真实重置点：env.ScenarioReset 写死 self.E = 5.0 ⇒ 直接找 SOC≈5.0 的行，顺带量出日志行偏移
+    for tag, df in ((tag_a, a), (tag_b, b)):
+        hit = np.where(np.abs(df['SOC'].values[:m].astype(float) - 5.0) < 1e-9)[0]
+        d = np.diff(hit)
+        print('   %-20s 真实重置点 %2d 个 | 间隔 %s（预期 1440）| 首个重置点行号 %s（=日志行偏移）'
+              % (tag, len(hit), (np.unique(d).tolist()[:3] if len(d) else '—'),
+                 (int(hit[0]) if len(hit) else '—')))
+        out['resets_' + tag] = dict(n=int(len(hit)), gaps=(np.unique(d).tolist() if len(d) else []),
+                                    first_row=(int(hit[0]) if len(hit) else None))
+    print('   ⚠ 探索噪声**不锁步**：mode0/mode1 的 H 输入维不同 ⇒ 参数个数不同 ⇒ 构造期 RNG')
+    print('      消耗不同 ⇒ 之后随机流错位。故本对照 = 同 seed + 同环境序列 + 同超参的**组间对照**，')
+    print('      不是噪声级配对（要给 profit 误差棒必须跑多 seed）')
     return out
 
 
