@@ -900,7 +900,10 @@ if __name__ == "__main__":
     args.train_iter_H = 1000 * args.max_episode_length
     if getattr(args, 'max_steps', 0) and args.max_steps > 0:
         args.train_iter_H = int(args.max_steps)
-    args.seed = np.random.randint(0, 10000)
+    # 只在**未显式指定**（--seed 默认 -1）时随机化。显式 --seed >= 0 必须被尊重，
+    # 否则"同 seed 配对 A/B"会被随机种子混淆（历史 bug：本行曾无条件覆盖用户传入的 --seed）。
+    if args.seed is None or int(args.seed) < 0:
+        args.seed = np.random.randint(0, 10000)
     args.cost_single_limit = 1000.0
 
     # Set device and random seeds

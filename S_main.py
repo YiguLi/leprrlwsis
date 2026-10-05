@@ -344,7 +344,10 @@ if __name__ == "__main__":
     use_csv = True
     args.max_episode_length = 500  # 1d*24h*60m/5m = 288, 2d:576
     args.train_iter_H = 1000 * args.max_episode_length
-    args.seed = np.random.randint(0, 10000)
+    # 只在**未显式指定**（--seed 默认 -1）时随机化。显式 --seed >= 0 必须被尊重，
+    # 否则"同 seed 配对 A/B"会被随机种子混淆（历史 bug：本行曾无条件覆盖用户传入的 --seed）。
+    if args.seed is None or int(args.seed) < 0:
+        args.seed = np.random.randint(0, 10000)
 
     args.warmup = 5
 
