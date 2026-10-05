@@ -638,6 +638,8 @@ def main():
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
+    if args.tb_reset and not args.from_tb:
+        raise SystemExit('--tb-reset 只在 --from-tb 下生效（它要先读回数据再清空重写）')
     if args.from_tb:                          # 纯离线：读 TB → 重算两份 CSV + 重写标签
         rebuild_csv_from_tb(args.out, tb_reset=args.tb_reset)
         print('\n  输出: %s  (curve.csv / curve_5min.csv 已重建)'
