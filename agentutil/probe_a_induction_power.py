@@ -47,13 +47,19 @@ import pandas as pd
 BOUNDS = [(0.0, 0.5)] * 5 + [(-0.5, 0.5)]
 
 
+def _csv_of(d):
+    """该 run 的**逐步日志表**（单一真源见 `agentutil/runpaths.py`）。"""
+    from runpaths import find_log_csv
+    return find_log_csv(d)
+
+
 def run_dir(name):
-    if os.path.isdir(name) and os.path.exists(os.path.join(name, 'df_td3per.csv')):
-        return name
-    d = os.path.join('output', 'TD3PER-' + name)
-    if not os.path.isdir(d):
-        raise SystemExit('找不到 run: %s' % name)
-    return d
+    """解析 run（显式目录 / `output/<name>` / **任意前缀** `output/*-<name>`）。
+
+    例：`run62` → `output/AIFFLOR-run62`；也可直接给 `output/AIFFLOR-run62`。
+    """
+    from runpaths import resolve_run
+    return resolve_run(name)
 
 
 def vec_col(s):
@@ -126,7 +132,7 @@ def analyse(name, act_col, ubins, minn, dims, dec=2):
     d = run_dir(name)
     cols = ['step', 'observation', 'pr', 'u', 'w_wind', 'turbine_profit',
             'r1', 'c1_step', 'bess_profit', 'penalty_NN_H', act_col]
-    df = pd.read_csv(os.path.join(d, 'df_td3per.csv'), usecols=cols)
+    df = pd.read_csv(_csv_of(d), usecols=cols)
     obs = vec_col(df['observation'])
     A = vec_col(df[act_col])
     pg_same = obs[:, 3]

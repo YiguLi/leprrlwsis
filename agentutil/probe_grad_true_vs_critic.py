@@ -101,12 +101,11 @@ def load_critic(ckpt_dir, which='p'):
 
 
 def resolve(run, step):
-    """run 名（自动补 output/TD3PER-<name>）或直接给 checkpoint 目录。"""
+    """run 名（任意前缀，如 AIFFLOR-run62 / run15）或直接给 checkpoint 目录。"""
     if os.path.isdir(run) and os.path.exists(os.path.join(run, 'actor_6.pkl')):
         return run
-    d = os.path.join('output', 'TD3PER-' + run)
-    if not os.path.isdir(d):
-        raise SystemExit('找不到 run/checkpoint: %s' % run)
+    from runpaths import resolve_run
+    d = resolve_run(run)
     if step is not None and os.path.isdir(os.path.join(d, 'checkpoint_%d' % step)):
         return os.path.join(d, 'checkpoint_%d' % step)
     cks = sorted(int(re.search(r'(\d+)$', p).group(1))

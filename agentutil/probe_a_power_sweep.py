@@ -53,8 +53,12 @@ RUN15_MEANS = [0.206, 0.340, 0.442, 0.228, 0.268]
 
 
 def log_means(run='run15'):
-    p = os.path.join('output', 'TD3PER-' + run, 'df_td3per.csv')
-    if not os.path.exists(p):
+    from runpaths import find_log_csv, resolve_run
+    try:
+        p = find_log_csv(resolve_run(run))
+    except SystemExit:
+        return None
+    if not p:
         return None
     tot = np.zeros(5)
     n = 0

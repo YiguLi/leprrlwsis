@@ -85,12 +85,9 @@ LAYERS = {
 # 数据读取
 # ---------------------------------------------------------------------------
 def run_dir(name):
-    if os.path.isdir(name) and os.path.exists(os.path.join(name, 'df_td3per.csv')):
-        return name
-    d = os.path.join('output', 'TD3PER-' + name)
-    if os.path.isdir(d):
-        return d
-    raise SystemExit('找不到 run: %s' % name)
+    """解析 run（单一真源 `agentutil/runpaths.py`）：支持任意前缀，如 AIFFLOR-run62。"""
+    from runpaths import resolve_run
+    return resolve_run(name)
 
 
 def ckpt_steps(d, actor='actor_6.pkl'):
@@ -114,7 +111,10 @@ def read_log(d, every=1):
                        的消费者不受影响（只有 [F] 的 `--layers L` 会读它）。
     obs 只在需要时解析 (run9 日志 140MB, 逐行解析 4 个 float 太贵)。
     """
-    p = os.path.join(d, 'df_td3per.csv')
+    from runpaths import find_log_csv
+    p = find_log_csv(d)
+    if not p:
+        raise SystemExit('%s 里找不到逐步日志表' % d)
     with open(p, newline='') as f:
         rd = csv.reader(f)
         head = next(rd)

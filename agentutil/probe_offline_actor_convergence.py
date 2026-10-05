@@ -210,16 +210,15 @@ def main():
                     help='对照臂: 用合成二次目标 (极大值在 a*=该值) 替换 critic')
     args = ap.parse_args()
 
-    d = args.run if os.path.isdir(args.run) else os.path.join('output', 'TD3PER-' + args.run)
-    if not os.path.isdir(d):
-        raise SystemExit('找不到 run: %s' % d)
+    from runpaths import find_log_csv, resolve_run
+    d = resolve_run(args.run)
     cks = sorted(int(re.search(r'(\d+)$', p).group(1))
                  for p in glob.glob(os.path.join(d, 'checkpoint_*'))
                  if os.path.exists(os.path.join(p, 'actor_6.pkl')))
     ckpt = os.path.join(d, 'checkpoint_%d' % (args.step or cks[-1]))
     print('checkpoint: %s' % ckpt)
 
-    S, A, R, C, S2, lam_last = build_buffer(os.path.join(d, 'df_td3per.csv'), args.blocks)
+    S, A, R, C, S2, lam_last = build_buffer(find_log_csv(d), args.blocks)
     print('离线 buffer: %d 块 (含 lam1=%s)' % (len(S), lam_last))
     lam = float(lam_last if lam_last is not None else 1.0)
     print('λ = %.4f' % lam)

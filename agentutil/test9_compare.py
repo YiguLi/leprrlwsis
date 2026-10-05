@@ -61,8 +61,12 @@ def resolve(arg):
     if arg.endswith('.csv'):
         cands.append((os.path.basename(os.path.dirname(arg)) or arg, arg))
     else:
-        d = arg if os.path.isdir(arg) and 'TD3PER-' in os.path.basename(arg.rstrip('/\\')) \
-            else os.path.join('output', 'TD3PER-' + arg)
+        d = arg if os.path.isdir(arg) else os.path.join('output', arg)
+        if not os.path.isdir(d):                       # 兜底：任意前缀 output/*-<arg>
+            import glob as _glob
+            hits = [h for h in sorted(_glob.glob(os.path.join('output', '*-' + str(arg))))]
+            if hits:
+                d = hits[0]
         cands.append((os.path.basename(d.rstrip('/\\')), os.path.join(d, 'df_test9.csv')))
     for name, p in cands:
         if os.path.exists(p):

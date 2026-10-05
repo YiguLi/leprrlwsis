@@ -55,12 +55,18 @@ DEFAULT_BOUNDS = [(0.0, 0.5)] * 5 + [(-0.5, 0.5)]
 
 
 def run_dir(name):
-    if os.path.isdir(name) and os.path.exists(os.path.join(name, 'df_td3per.csv')):
-        return name
-    d = os.path.join('output', 'TD3PER-' + name)
-    if not os.path.isdir(d):
-        raise SystemExit('找不到 run: %s' % name)
-    return d
+    """解析 run（单一真源见 `agentutil/runpaths.py`）：支持任意前缀，如 AIFFLOR-run62。"""
+    from runpaths import resolve_run
+    return resolve_run(name)
+
+
+def _log_csv(d):
+    """该 run 的逐步日志表（`df_td3per.csv` 或 `df_<tag>.csv`，按列识别）。"""
+    from runpaths import find_log_csv
+    p = find_log_csv(d)
+    if not p:
+        raise SystemExit('%s 里找不到逐步日志表（需含 original_action_H/turbine_profit）' % d)
+    return p
 
 
 def ckpt_steps(d):
@@ -83,7 +89,7 @@ def h_state(obs, minute, mode=1):
 
 def build_panel(d, n_panel, every):
     rows, phase_err = [], 0.0
-    with open(os.path.join(d, 'df_td3per.csv'), newline='') as f:
+    with open(_log_csv(d), newline='') as f:
         rd = csv.reader(f)
         head = next(rd)
         ix = {c.strip(): i for i, c in enumerate(head)}
