@@ -32,7 +32,8 @@ D. 接线契约（静态扫描）：
    * 两个接收方（td3prrbb/td3prle）的 `nine_case_test` **接受** phase_mode/phase_table、
      **调用** `Normalize_H`、且函数体内**不再有** `Normalize(obs)` / `Normalize(obs2)`；
      main 向 `nine_case_test` 传 `phase_mode=phase_mode, phase_table=phase_table`；
-   * `test_five_days.py` 的 **六个** TD3 项目 `h_obs='normalize_H'`，三个旧项目仍为 `'normalize'`
+   * `test_five_days.py` 的 **八个** 项目 `h_obs='normalize_H'`（TD3 六 + yawflor + aifflor），
+     三个旧项目仍为 `'normalize'`
      （`h_obs='normalize'` 时该文件**强制**要求 4 维权重，故这是 6 维 checkpoint 能加载的前提）。
 
 注意: 纯静态 + 纯 Python 数值比对, **不依赖 MATLAB**。
@@ -218,8 +219,8 @@ for k in ('td3prrbb', 'td3prle'):
 tf = read_text('test_five_days.py')
 n_phase = len(re.findall(r"h_obs='normalize_H'", tf))
 n_plain = len(re.findall(r"h_obs='normalize'(?!_H)", tf))
-check(n_phase == 7 and n_plain == 3,
-      "test_five_days.py: 7 个项目 h_obs='normalize_H' (2026-09-30 起含 yawflor) "
+check(n_phase == 8 and n_plain == 3,
+      "test_five_days.py: 8 个项目 h_obs='normalize_H' (2026-09-30 起含 yawflor；其后含 aifflor) "
       "+ 3 个旧项目 'normalize' (实得 %d/%d)"
       % (n_phase, n_plain))
 
