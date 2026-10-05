@@ -288,7 +288,44 @@ def _solver_hook():
     return ctx
 
 
-def build_floris_model(stock=False, verbose=False):
+def _switch_to_empirical_gauss(m, verbose=False):
+    """把 `m` 从 GCH(`gauss`) 换成 **empirical_gauss** 族（四个配套项必须一起换）。
+
+    实测踩坑（`probe_empirical_gauss_segments.py:75-105` 首次记录，此处为单一真源）：
+      ① **挠曲也必须是 `empirical_gauss`** —— 给它 `gauss` 挠曲会报
+         `GaussVelocityDeflection.function() takes 7 positional arguments but 8 were given`；
+      ② **湍流必须是 `wake_induced_mixing`** —— `empirical_gauss` 自带求解器要求湍流模型提供
+         `atmospheric_ti_gain`，只有它和 `wake_induced_mixing` 有；用 `crespo_hernandez` 报
+         `'CrespoHernandez' object has no attribute 'atmospheric_ti_gain'`；
+      ③ **GCH 三开关必须全 False** —— empirical_gauss 求解器对三者直接 raise
+         （`Secondary steering not available for this model.` 等）；
+      ④ 参数：`len(wake_expansion_rates) == len(breakpoints_D) + 1`（分段线性 σ(x)）。
+
+    这里显式写入的值 = FLORIS 随包 `empirical_gauss` 的默认值（写出来是为了可审计）。
+    """
+    params = dict(wake_expansion_rates=[0.023, 0.008], breakpoints_D=[10.0],
+                  sigma_0_D=0.3536, mixing_gain_velocity=2.0,
+                  smoothing_length_D=2.0, awc_mode='baseline')
+    m.set_param(['wake', 'wake_velocity_parameters', 'empirical_gauss'], params)
+    m.set_param(['wake', 'wake_turbulence_parameters', 'wake_induced_mixing'],
+                dict(atmospheric_ti_gain=0.0))
+    m.set_param(['wake', 'wake_deflection_parameters', 'empirical_gauss'],
+                dict(horizontal_deflection_gain_D=3.0, vertical_deflection_gain_D=-1.0,
+                     deflection_rate=22.0, mixing_gain_deflection=0.0,
+                     yaw_added_mixing_gain=0.0))
+    m.set_param(['wake', 'model_strings', 'velocity_model'], 'empirical_gauss')
+    m.set_param(['wake', 'model_strings', 'deflection_model'], 'empirical_gauss')
+    m.set_param(['wake', 'model_strings', 'turbulence_model'], 'wake_induced_mixing')
+    for flag in ('enable_secondary_steering', 'enable_transverse_velocities',
+                 'enable_yaw_added_recovery'):
+        m.set_param(['wake', flag], False)
+    if verbose:
+        print('[wake-model] empirical_gauss 族已生效：velocity/deflection=empirical_gauss、'
+              'turbulence=wake_induced_mixing、GCH 三开关全 False')
+    return m
+
+
+def build_floris_model(stock=False, verbose=False, wake_model='gauss'):
     """构造"逐台 a"的 FLORIS 模型。
 
     Parameters
@@ -298,11 +335,24 @@ def build_floris_model(stock=False, verbose=False):
             （对 WFSim 的验证集误差：常数重标定后 1.098%）；
         `True` ⇒ 用 FLORIS **随包默认**参数（对它自己的基线，如
             `analyse_calibrated_cost_scale.py` 的"默认 vs 标定"对照）。
+    wake_model : {'gauss', 'empirical_gauss'}
+        尾流**速度模型族**（默认 `'gauss'`）：
+        * `'gauss'` = Bastankhah 经典高斯 + `gauss` 挠曲 + `crespo_hernandez` 湍流 +
+          `sosfs` 叠加 + GCH 三开关（= 官方 `default_inputs.yaml` 的 GCH 口径）；
+        * `'empirical_gauss'` = 随包 empirical 高斯（LES 拟合的**分段**扩展率），
+          配套项见 `_switch_to_empirical_gauss()`。
+        ⚠ `'empirical_gauss'` **只允许配 `stock=True`**：标定表里的 `ka/kb/alpha/beta`
+        是 **gauss 族**参数，不可跨族平移。
     """
     import yawflor.yawflor_turbine as YT
     from floris import FlorisModel
     from floris_calibrated_defaults import (apply_calibrated_wake_params,
                                             describe)
+    if wake_model not in ('gauss', 'empirical_gauss'):
+        raise ValueError("wake_model 只支持 'gauss' / 'empirical_gauss'，收到 %r" % (wake_model,))
+    if wake_model == 'empirical_gauss' and not stock:
+        raise ValueError("标定参数 (ka/kb/alpha/beta) 只属于 gauss 族，不可平移 ⇒ "
+                         "wake_model='empirical_gauss' 必须配 stock=True")
     name = register_op_model()
     m, _ = YT.build_model(turbine_type=None)
     m.set(turbine_type=[dict(
@@ -318,6 +368,8 @@ def build_floris_model(stock=False, verbose=False):
     ])
     m.set(wind_shear=YT.WIND_SHEAR, reference_wind_height=YT.HUB_HEIGHT,
           air_density=YT.RHO)
+    if wake_model == 'empirical_gauss':
+        _switch_to_empirical_gauss(m, verbose=verbose)
     if not stock:
         apply_calibrated_wake_params(m)
         if verbose:

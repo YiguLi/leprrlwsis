@@ -62,11 +62,12 @@ class AifflorPhysics:
     """
 
     def __init__(self, nt=AT.NT, calibrated=True, cache_enabled=True,
-                 power_scale=1.0, verbose=False):
+                 power_scale=1.0, verbose=False, wake_model='gauss'):
         self.model, self.info = AT.build_model(nt=nt, calibrated=calibrated,
-                                               verbose=verbose)
+                                               verbose=verbose, wake_model=wake_model)
         self.nt = int(nt)
         self.calibrated = bool(calibrated)
+        self.wake_model = str(wake_model)
         self.cache_enabled = bool(cache_enabled)
         self.power_scale = float(power_scale)
         self._cache = {}
@@ -173,12 +174,12 @@ class AifflorPhysics:
     def summary(self):
         tot = self.n_batch + self.n_direct
         fs = AT.stats()
-        return ('[aifflor-physics] FLORIS {} | 标定={} | 电平系数={:.6f} | '
+        return ('[aifflor-physics] FLORIS {} | 标定={} | 尾流族={} | 电平系数={:.6f} | '
                 '批量 {} 次 / 单条 {} 次 / '
                 '命中 {} 次 | 单条占比 {:.1%} | 出口兜底 {} 次 / 坏缓存 {} 条 || '
                 'FLORIS 层: 评估点 {} | 坏点 {} ({:.3f}%) | 重试救回 {} | 退回标称 {}'
                 .format(self.info.get('floris_version', '?'), self.calibrated,
-                        self.power_scale,
+                        self.wake_model, self.power_scale,
                         self.n_batch, self.n_direct, self.n_hit,
                         (self.n_direct / tot if tot else 0.0), self.n_nonfinite,
                         self.n_cache_bad, fs['n_eval'], fs['n_bad_in_batch'],

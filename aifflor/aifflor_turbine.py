@@ -118,7 +118,7 @@ def stats():
 # ===========================================================================
 # 2. 模型构造（**唯一入口**）
 # ===========================================================================
-def build_model(nt=NT, calibrated=True, verbose=False):
+def build_model(nt=NT, calibrated=True, verbose=False, wake_model='gauss'):
     """构造"逐台 a"的 FLORIS 模型；返回 `(model, info)`。
 
     Parameters
@@ -127,14 +127,26 @@ def build_model(nt=NT, calibrated=True, verbose=False):
     calibrated : bool   `True`（默认）施加 `floris_calibrated_defaults` 的标定尾流参数；
                         `False` 用 FLORIS 随包默认（**"只用电平系数"模式**用这个；
                         此时必须配 `AifflorPhysics(power_scale=LEVEL_COEF)` 才与 WFSim 对齐）
+    wake_model : {'gauss', 'empirical_gauss'}
+        尾流速度模型族；`'gauss'`（默认）= Bastankhah 经典高斯（GCH 口径），
+        `'empirical_gauss'` = 随包 empirical 高斯（分段扩展率，配套项见
+        `probe_engine_random_actions._switch_to_empirical_gauss`）。
+        ⚠ `'empirical_gauss'` 只允许 `calibrated=False`（标定参数是 gauss 族、不可平移）。
     """
     import agentutil.probe_engine_random_actions as _R
+    if wake_model not in ('gauss', 'empirical_gauss'):
+        raise ValueError("wake_model 只支持 'gauss' / 'empirical_gauss'，收到 %r" % (wake_model,))
+    if wake_model != 'gauss' and calibrated:
+        raise ValueError("尾流族 %r 没有对应的标定参数（标定表只覆盖 gauss 族）⇒ 必须 "
+                         "calibrated=False" % (wake_model,))
     _R.register_op_model()
-    m = _R.build_floris_model(stock=not calibrated)
+    m = _R.build_floris_model(stock=not calibrated, wake_model=wake_model, verbose=verbose)
     info = dict(
         engine='floris',
         floris_version=_R._floris_version(),
         calibrated=bool(calibrated),
+        wake_model=str(wake_model),
+        model_strings=dict(m.core.wake.model_strings),
         nt=int(nt),
         a_lo=A_LO, a_hi=A_HI, a_nominal=A_NOMINAL,
         u_min=U_MIN_ENV, u_max=U_MAX_ENV,

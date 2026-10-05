@@ -110,14 +110,21 @@ def random_actions(act_seed, steps, block):
     return raw
 
 
-def run_floris(us, A, verbose=True, on_minute=None):
+def run_floris(us, A, verbose=True, on_minute=None, wake_model='gauss'):
     """aifflor 生产物理：WindBatteryAIF + AifflorPhysics（含围栏/抬升/守卫/预取）。
+
+    `wake_model='empirical_gauss'` 时切到随包 empirical 高斯族（配套项自动一起换，
+    见 `probe_engine_random_actions._switch_to_empirical_gauss`；只允许 calibrated=False）。
 
     `on_minute(i, p_i, p_nolift_i)` 逐分钟回调（用于**增量落盘**）。
     不带 `A_PHYS_LO` 抬升的对照曲线**先整批算完**（一次 `eval_batch`，~1 s），
     这样回调时两条曲线都已就绪 ⇒ 分钟级 CSV 可以在本趟就写全。
     """
-    phy = AifflorPhysics(nt=NT, calibrated=False, power_scale=AT.LEVEL_COEF)
+    phy = AifflorPhysics(nt=NT, calibrated=False, power_scale=AT.LEVEL_COEF,
+                         wake_model=wake_model)
+    if verbose:
+        print('  [aifflor] 尾流族 = %s | model_strings = %s'
+              % (wake_model, phy.info.get('model_strings')))
     # 诊断曲线：关掉 A_PHYS_LO 抬升（学习带 [0,0.5] 内原样送引擎）。生产口径永远带抬升。
     _farm_nolift, _ = AT.eval_batch(phy.model, us, np.clip(A, A_LO, A_HI))
     p_nolift = np.asarray(_farm_nolift, dtype=float) * AT.LEVEL_COEF
@@ -304,6 +311,30 @@ def _reset_tb_event_files(tb_root, verbose=True):
         print('  [--tb-reset] 已删除 %d 个旧 event 文件（仅 %s 之下）：' % (len(hits), root_abs))
         for p in hits:
             print('      - %s' % os.path.relpath(p, root_abs))
+
+
+def load_wfsim_reuse(src, verbose=True):
+    """从**既有产物**读回 WFSim 曲线（`--wfsim-from`：不跑 MATLAB）。
+
+    `src` 可以是目录（读 `<dir>/curve.csv`）或直接给那个 CSV 路径。
+    返回 `(us, A, pw)`，供调用方**校验同一天/同一串动作**后再复用。
+    """
+    path = src if os.path.isfile(src) else os.path.join(src, 'curve.csv')
+    if not os.path.isfile(path):
+        raise SystemExit('--wfsim-from 找不到 %s' % path)
+    d = pd.read_csv(path)
+    need = ['u', 'P_wfsim_mw'] + ['a%d' % j for j in range(NT)]
+    miss = [c for c in need if c not in d.columns]
+    if miss:
+        raise SystemExit('%s 缺列 %s ⇒ 该产物不含 WFSim 曲线（要跑过 MATLAB 那一趟）'
+                         % (path, miss))
+    us = d['u'].to_numpy(dtype=float)
+    A = d[['a%d' % j for j in range(NT)]].to_numpy(dtype=float)
+    pw = d['P_wfsim_mw'].to_numpy(dtype=float)
+    if verbose:
+        print('  [WFSim] **复用既有曲线**（不跑 MATLAB）: %s  n=%d  均值 %.4f MW'
+              % (path, len(pw), pw.mean()))
+    return us, A, pw
 
 
 def stats(pw, pf, us, inside):
@@ -635,6 +666,12 @@ def main():
     ap.add_argument('--tb-reset', action='store_true',
                     help='配合 --from-tb：先删掉 TB logdir 下所有旧 event 文件再重写'
                          '（去掉改名前的旧标签名；数据已在 CSV 里，会被逐点重写回 TB）')
+    ap.add_argument('--wake-model', default='gauss', choices=['gauss', 'empirical_gauss'],
+                    help="aifflor 侧尾流族：'gauss'（默认，GCH 口径）/ "
+                         "'empirical_gauss'（随包 empirical 高斯；只允许 calibrated=False）")
+    ap.add_argument('--wfsim-from', default=None, metavar='DIR_OR_CSV',
+                    help='**不跑 MATLAB**：从既有产物（目录下的 curve.csv 或直接给 CSV）'
+                         '读回 WFSim 曲线当 wfsim 侧；会先校验风速/动作序列逐位一致')
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -660,10 +697,11 @@ def main():
     print('  随机动作: seed=%d  block=%d min  a∈[%.2f,%.2f]^%d  '
           '实测范围 [%.4f, %.4f] 均值 %.4f'
           % (args.act_seed, args.block, A_LO, A_HI, NT, A.min(), A.max(), A.mean()))
-    print('  物理口径: aifflor = AifflorPhysics(calibrated=False, power_scale=LEVEL_COEF=%.6f)'
-          % AT.LEVEL_COEF)
-    print('            （FLORIS %s；WFSim = MATLAB WFSim_port 稳态解）'
-          % AT.build_model.__module__)
+    print('  物理口径: aifflor = AifflorPhysics(calibrated=False, wake_model=%r, '
+          'power_scale=LEVEL_COEF=%.6f)' % (args.wake_model, AT.LEVEL_COEF))
+    print('            （FLORIS %s；WFSim = MATLAB WFSim_port 稳态解%s）'
+          % (AT.build_model.__module__,
+             '；本次 **复用既有 WFSim 曲线，不跑 MATLAB**' if args.wfsim_from else ''))
 
     # ---- CSV 记录器（分钟级 + 5 分钟级；增量落盘）----
     rec = CsvRecorder(args.out, block=5, flush_every=240)
@@ -681,14 +719,33 @@ def main():
 
     t0 = time.time()
     pw = None
-    if args.no_matlab:
+    if args.wfsim_from:
+        # **不跑 MATLAB**：复用既有 WFSim 曲线；先校验"同一天 + 同一串动作"再复用
+        u_ref, A_ref, pw = load_wfsim_reuse(args.wfsim_from)
+        if len(u_ref) != len(us):
+            raise SystemExit('复用曲线的分钟数 %d ≠ 本次 %d（--steps 不一致）'
+                             % (len(u_ref), len(us)))
+        if not np.allclose(u_ref, us, atol=1e-9):
+            raise SystemExit('复用曲线的**风速序列**与本次不一致 ⇒ 拒绝复用'
+                             '（--day-seed/--steps 必须一致）')
+        if not np.allclose(A_ref, A, atol=1e-12):
+            raise SystemExit('复用曲线的**动作序列**与本次不一致 ⇒ 拒绝复用'
+                             '（--act-seed/--block 必须一致）')
+        print('  [WFSim] 复用校验通过：风速/动作序列与本次逐位一致')
+
+        def _cb_ai(i, pf_i, pn_i):
+            rec.push(_row(i, pf_i, pn_i, pw[i]))
+        pf, pf_nolift, phy, env_ai = run_floris(us, A, on_minute=_cb_ai,
+                                                wake_model=args.wake_model)
+    elif args.no_matlab:
         # 只有 aifflor 一趟 ⇒ 本趟就把分钟级写全（少两列：wfsim / Δ / 比值）
         def _cb_ai(i, pf_i, pn_i):
             rec.push(_row(i, pf_i, pn_i))
-        pf, pf_nolift, phy, env_ai = run_floris(us, A, on_minute=_cb_ai)
+        pf, pf_nolift, phy, env_ai = run_floris(us, A, on_minute=_cb_ai,
+                                                wake_model=args.wake_model)
     else:
         # 两趟：分钟级 CSV 在**第二趟（WFSim，慢）**里边跑边写 ⇒ 中途中断也已有数据
-        pf, pf_nolift, phy, env_ai = run_floris(us, A)
+        pf, pf_nolift, phy, env_ai = run_floris(us, A, wake_model=args.wake_model)
 
         def _cb_ws(i, pw_i):
             rec.push(_row(i, pf[i], pf_nolift[i], pw_i))
@@ -716,6 +773,9 @@ def main():
         n_turbine_minute_lifted=int(lifted),
         frac_turbine_minute_lifted=float(lifted / max(A.size, 1)),
         level_coef=float(AT.LEVEL_COEF),
+        wake_model=str(args.wake_model),
+        model_strings=dict(phy.info.get('model_strings') or {}),
+        wfsim_source=('reused:' + str(args.wfsim_from)) if args.wfsim_from else 'matlab',
         fence=[U_LO, U_HI],
         csv_minute=dict(path=os.path.join(args.out, 'curve.csv'), rows=int(n_min_rows),
                         granularity_min=1),
