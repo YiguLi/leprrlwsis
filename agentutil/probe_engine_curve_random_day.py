@@ -25,16 +25,24 @@
 输出
 ----
   <out>/tensorboard/        ★ 曲线用 TensorBoard 表示（默认；`--no-tb` 关闭）
-      aifflor/   curve/P_farm(=主曲线), curve/P_farm_nolift(诊断)
-      wfsim/     curve/P_farm
+      aifflor/   curve/P_farm(分钟级), curve/P_farm_nolift(诊断),
+                 curve/blk/P_farm, curve/blk/P_farm_first（5 分钟级）
+      wfsim/     同 aifflor 的 tag（分钟级 + 5 分钟级）
       wind/      curve/u
       actions/   action/a0..a4
-      compare/   curve/ratio, curve/diff_mw, curve/abs_rel_err, summary/*（仅在两侧都跑时）
-      ⇒ `aifflor/` 与 `wfsim/` 用**同一个 tag `curve/P_farm`** 写进两个 run
-        ⇒ TB 里是**一张图两条线**（引擎直接叠加对比）
-  <out>/curve.csv    逐分钟：u、a0..a4、P_wfsim、P_aifflor、P_aifflor_nolift、Δ、比值
-  <out>/curve.json   元信息（抽中的日列/两个种子/块长/物理口径/计数器）+ 统计量
-  <out>/curve.png    可选（`--plot`）：静态图，仅两侧都跑时才生成
+      compare/   curve/ratio, curve/diff_mw, curve/abs_rel_err,
+                 curve/blk/ratio_of_means, curve/blk/diff_mean, summary/*（两侧都跑时）
+      ⇒ `aifflor/` 与 `wfsim/` 用**同一个 tag** 写进两个 run
+        ⇒ TB 里是**一张图两条线**（分钟级与 5 分钟级各一张）
+  <out>/curve.csv         ★ CSV 记录器（分钟级）：1440 行，1 分钟/行
+  <out>/curve_5min.csv    ★ CSV 记录器（5 分钟级）：288 行，1 个上层周期/行，块内聚合
+                             `*_mean`(5 分钟均值) / `*_first`(块首那一分钟 = 引擎按
+                             5 分钟分辨率调一次的结果) / `*_last` / `*_min` / `*_max`
+  <out>/curve.json        元信息（抽中的日列/两个种子/块长/物理口径/计数器）+ 统计量
+  <out>/curve.png         可选（`--plot`）：静态图，仅两侧都跑时才生成
+
+  两份 CSV 都是**增量落盘**（复用 `util.flush_csv_append_batch`，每 240 分钟行 / 每个
+  5 分钟行立刻 flush）⇒ 长跑中途中断也已有数据；分钟级在**慢的那一趟（WFSim）**里边跑边写。
 
 查看
 ----
@@ -68,6 +76,7 @@ import pandas as pd                                    # noqa: E402
 import env as ENV                                      # noqa: E402
 from aifflor.aifflor_env import AifflorPhysics, WindBatteryAIF   # noqa: E402
 from aifflor import aifflor_turbine as AT              # noqa: E402
+from util import flush_csv_append_batch                # noqa: E402  唯一增量落盘实现
 
 WIND_CSV = 'FFC_speed_noise_1.csv'
 NT = 5
@@ -100,9 +109,17 @@ def random_actions(act_seed, steps, block):
     return raw
 
 
-def run_floris(us, A, verbose=True):
-    """aifflor 生产物理：WindBatteryAIF + AifflorPhysics（含围栏/抬升/守卫/预取）。"""
+def run_floris(us, A, verbose=True, on_minute=None):
+    """aifflor 生产物理：WindBatteryAIF + AifflorPhysics（含围栏/抬升/守卫/预取）。
+
+    `on_minute(i, p_i, p_nolift_i)` 逐分钟回调（用于**增量落盘**）。
+    不带 `A_PHYS_LO` 抬升的对照曲线**先整批算完**（一次 `eval_batch`，~1 s），
+    这样回调时两条曲线都已就绪 ⇒ 分钟级 CSV 可以在本趟就写全。
+    """
     phy = AifflorPhysics(nt=NT, calibrated=False, power_scale=AT.LEVEL_COEF)
+    # 诊断曲线：关掉 A_PHYS_LO 抬升（学习带 [0,0.5] 内原样送引擎）。生产口径永远带抬升。
+    _farm_nolift, _ = AT.eval_batch(phy.model, us, np.clip(A, A_LO, A_HI))
+    p_nolift = np.asarray(_farm_nolift, dtype=float) * AT.LEVEL_COEF
     env_ai = WindBatteryAIF(MAX_E, NT, False, None, physics=phy)
     env_ai.wind_day = pd.Series(us)          # 让生产预取路径可用（数值与直算逐位相同）
     p = np.zeros(len(us), dtype=float)
@@ -111,16 +128,21 @@ def run_floris(us, A, verbose=True):
         env_ai.count_wind = i
         env_ai.u = float(u)
         p[i] = float(env_ai.PowerOutput(float(u), A[i]))
+        if on_minute is not None:
+            on_minute(i, float(p[i]), float(p_nolift[i]))
         if verbose and (i + 1) % 200 == 0:
             print('  [aifflor] %4d/%d  (%.1f s)' % (i + 1, len(us), time.time() - t0),
                   flush=True)
     if verbose:
         print('  [aifflor] 完成 %.1f s | %s' % (time.time() - t0, env_ai.summary()), flush=True)
-    return p, phy, env_ai
+    return p, p_nolift, phy, env_ai
 
 
-def run_wfsim(us, A, verbose=True):
-    """WFSim 生产物理：env.WindBattery.PowerOutput → MATLAB WFSim_port。"""
+def run_wfsim(us, A, verbose=True, on_minute=None):
+    """WFSim 生产物理：env.WindBattery.PowerOutput → MATLAB WFSim_port。
+
+    `on_minute(i, p_i)` 逐分钟回调（用于**增量落盘**）。
+    """
     import matlab
     import matlab.engine
     if verbose:
@@ -135,6 +157,8 @@ def run_wfsim(us, A, verbose=True):
     t0 = time.time()
     for i, u in enumerate(us):
         p[i] = float(env_ws.PowerOutput(float(u), A[i]))
+        if on_minute is not None:
+            on_minute(i, float(p[i]))
         if verbose and (i + 1) % 200 == 0:
             print('  [WFSim] %4d/%d  (%.1f s)' % (i + 1, len(us), time.time() - t0),
                   flush=True)
@@ -175,7 +199,115 @@ def stats(pw, pf, us, inside):
     return s
 
 
-def write_tensorboard(out_dir, us, A, pf, pf_nolift, pw, sumstats, meta):
+class CsvRecorder:
+    """**分钟级 + 5 分钟级两份 CSV** 的增量记录器（落盘复用 `util.flush_csv_append_batch`）。
+
+    产物
+    ----
+    * `curve.csv`      —— 分钟级：1440 行，每行 1 分钟（u / a0..a4 / 两引擎出力 / Δ / 比值）
+    * `curve_5min.csv` —— 5 分钟级：288 行（= 1440/5），每行 1 个**上层周期**，内容是该块
+      5 分钟的**聚合**：`u_mean/first/last/min/max`、`a*_first`（块首决策值，= H 层实际下发的
+      动作）、`a*_mean`、以及每个引擎的 `P_*_mean/first/last/min/max`、`diff_mean`、
+      `ratio_of_means`（均值之比）、`ratio_mean`（逐分钟比值再平均）。
+
+    关于"5 分钟级出力"的两种口径，这里把**两种都记进同一行**（避免歧义）：
+      * `P_*_mean`  = 块内 5 个分钟的算术平均（"5 分钟平均出力"）
+      * `P_*_first` = 块首那一分钟的引擎返回值。**在"引擎无记忆"的前提下**（WFSim 的
+        `WFSim_port` 是 `dt=Inf` 稳态解、FLORIS 是准稳态闭式解，二者都无跨调用状态），
+        它**逐位等于**"把引擎按 5 分钟分辨率调一次（动作保持整块）"的结果。
+    两条口径给不同的东西，故都保留；末块不足 5 分钟时 `n_minutes` 会小于 5。
+    """
+
+    def __init__(self, out_dir, block=5, flush_every=240, verbose=True):
+        self.dir = out_dir
+        self.block = int(block)
+        self.flush_every = int(flush_every)
+        self.min_path = os.path.join(out_dir, 'curve.csv')
+        self.blk_path = os.path.join(out_dir, 'curve_5min.csv')
+        self._min_buf, self._min_written = [], 0
+        self._blk_buf, self._blk_written = [], 0
+        self._cur = []                      # 当前块内已收的分钟行
+        self.block_rows = []                # 已落盘的 5 分钟行（供 TB 复用）
+        for p in (self.min_path, self.blk_path):
+            if os.path.exists(p):
+                os.remove(p)                # 覆盖旧同名表（首次写表头）
+        if verbose:
+            print('  [CSV] 记录器就绪: %s (分钟级) + %s (5 分钟级, 每 %d 分钟一行)'
+                  % (self.min_path, self.blk_path, self.block))
+
+    # -- 分钟级 ---------------------------------------------------------------
+    def push(self, rec):
+        """喂一行**分钟级**记录（列必须与首行一致）；满 flush_every 行即落盘。"""
+        self._min_buf.append(rec)
+        self._cur.append(rec)
+        if len(self._min_buf) >= self.flush_every:
+            self._min_written = flush_csv_append_batch(
+                self.min_path, self._min_buf, self._min_written, index=False)
+            self._min_buf = []
+        if len(self._cur) >= self.block:      # 一个上层周期收满 ⇒ 立刻出 5 分钟行
+            row = self._rollup(self._cur)
+            self._cur = []
+            self._blk_buf.append(row)
+            self.block_rows.append(row)
+            self._blk_written = flush_csv_append_batch(
+                self.blk_path, self._blk_buf, self._blk_written, index=False)
+            self._blk_buf = []
+
+    # -- 5 分钟级（块聚合） ----------------------------------------------------
+    def _rollup(self, rows):
+        b = len(self.block_rows)
+        us = np.array([r['u'] for r in rows], dtype=float)
+        Amat = np.array([[r['a%d' % j] for j in range(NT)] for r in rows], dtype=float)
+        out = {'block': int(b), 'minute_start': int(rows[0]['minute']),
+               'minute_end': int(rows[-1]['minute']), 'n_minutes': int(len(rows)),
+               'u_mean': float(us.mean()), 'u_first': float(us[0]),
+               'u_last': float(us[-1]), 'u_min': float(us.min()), 'u_max': float(us.max())}
+        for j in range(NT):
+            out['a%d_first' % j] = float(Amat[0, j])
+            out['a%d_mean' % j] = float(Amat[:, j].mean())
+        for key, name in (('P_aifflor_mw', 'P_aifflor'),
+                          ('P_aifflor_nolift_mw', 'P_aifflor_nolift'),
+                          ('P_wfsim_mw', 'P_wfsim')):
+            if key in rows[0]:
+                v = np.array([r[key] for r in rows], dtype=float)
+                out[name + '_mean'] = float(v.mean())
+                out[name + '_first'] = float(v[0])
+                out[name + '_last'] = float(v[-1])
+                out[name + '_min'] = float(v.min())
+                out[name + '_max'] = float(v.max())
+        if 'P_wfsim_mw' in rows[0]:
+            pa = np.array([r['P_aifflor_mw'] for r in rows], dtype=float)
+            pwm = np.array([r['P_wfsim_mw'] for r in rows], dtype=float)
+            out['diff_mean'] = float((pa - pwm).mean())
+            out['ratio_of_means'] = (float(pa.mean() / pwm.mean())
+                                     if abs(pwm.mean()) > 1e-9 else float('nan'))
+            rr = [a / w for a, w in zip(pa, pwm) if w > 1e-9]
+            out['ratio_mean'] = float(np.mean(rr)) if rr else float('nan')
+        return out
+
+    # -- 收尾 ----------------------------------------------------------------
+    def close(self, verbose=True):
+        if self._min_buf:
+            self._min_written = flush_csv_append_batch(
+                self.min_path, self._min_buf, self._min_written, index=False)
+            self._min_buf = []
+        if self._cur:                         # 末块不足 block 分钟也记一行
+            row = self._rollup(self._cur)
+            self._cur = []
+            self._blk_buf.append(row)
+            self.block_rows.append(row)
+        if self._blk_buf:
+            self._blk_written = flush_csv_append_batch(
+                self.blk_path, self._blk_buf, self._blk_written, index=False)
+            self._blk_buf = []
+        if verbose:
+            print('  [CSV] 完成：%s = %d 行（分钟级）| %s = %d 行（5 分钟级）'
+                  % (os.path.basename(self.min_path), self._min_written,
+                     os.path.basename(self.blk_path), self._blk_written))
+        return self._min_written, self._blk_written
+
+
+def write_tensorboard(out_dir, us, A, pf, pf_nolift, pw, sumstats, meta, block_rows=None):
     """把曲线写进 TensorBoard。
 
     关键设计：两个引擎写成**两个 run 子目录**（`aifflor/`、`wfsim/`），但用
@@ -235,6 +367,31 @@ def write_tensorboard(out_dir, us, A, pf, pf_nolift, pw, sumstats, meta):
                 w.add_scalar('summary/' + k, float(sumstats[k]), 0)
         w.flush()
         w.close()
+
+    # ---- 5 分钟级曲线（x 轴 = 上层周期序号）------------------------------------
+    # 与分钟级分开命名空间（curve/blk/*），避免与 curve/* 的 1440 点混在一条 x 轴上；
+    # 两个引擎仍用**同一个 tag** ⇒ 5 分钟分辨率下也是"一张图两条线"。
+    if block_rows:
+        w = SummaryWriter(os.path.join(root, 'aifflor'))
+        for r in block_rows:
+            w.add_scalar('curve/blk/P_farm', r['P_aifflor_mean'], r['block'])
+            w.add_scalar('curve/blk/P_farm_first', r['P_aifflor_first'], r['block'])
+            w.add_scalar('curve/blk/u', r['u_mean'], r['block'])
+        w.flush()
+        w.close()
+        if pw is not None:
+            w = SummaryWriter(os.path.join(root, 'wfsim'))
+            for r in block_rows:
+                w.add_scalar('curve/blk/P_farm', r['P_wfsim_mean'], r['block'])
+                w.add_scalar('curve/blk/P_farm_first', r['P_wfsim_first'], r['block'])
+            w.flush()
+            w.close()
+            w = SummaryWriter(os.path.join(root, 'compare'))
+            for r in block_rows:
+                w.add_scalar('curve/blk/ratio_of_means', r['ratio_of_means'], r['block'])
+                w.add_scalar('curve/blk/diff_mean', r['diff_mean'], r['block'])
+            w.flush()
+            w.close()
     return root
 
 
@@ -316,38 +473,48 @@ def main():
     print('            （FLORIS %s；WFSim = MATLAB WFSim_port 稳态解）'
           % AT.build_model.__module__)
 
+    # ---- CSV 记录器（分钟级 + 5 分钟级；增量落盘）----
+    rec = CsvRecorder(args.out, block=5, flush_every=240)
+
+    def _row(i, pf_i, pn_i, pw_i=None):
+        r = {'minute': int(i), 'u': float(us[i]),
+             **{'a%d' % j: float(A[i, j]) for j in range(NT)},
+             'P_aifflor_mw': float(pf_i), 'P_aifflor_nolift_mw': float(pn_i)}
+        if pw_i is not None:
+            r['P_wfsim_mw'] = float(pw_i)
+            r['diff_mw'] = float(pf_i) - float(pw_i)
+            r['ratio'] = (float(pf_i) / float(pw_i)) if abs(float(pw_i)) > 1e-9 \
+                else float('nan')
+        return r
+
     t0 = time.time()
-    pf, phy, env_ai = run_floris(us, A)
-    print('  [aifflor] 曲线完成（%.1f s）' % (time.time() - t0))
-    # ---- 诊断列：关掉 A_PHYS_LO 抬升（学习带 [0,0.5] 内原样送引擎），量化它对曲线的贡献。
-    #      注意这是**诊断口径**、不是生产口径：生产口径永远带 0.025 抬升。
-    _farm_nolift, _ = AT.eval_batch(phy.model, us, np.clip(A, A_LO, A_HI))
-    pf_nolift = np.asarray(_farm_nolift, dtype=float) * AT.LEVEL_COEF
-    print('  [aifflor] 诊断：不带 A_PHYS_LO 抬升的对照曲线已算完 '
-          '（平均抬升 %+.4f MW，%d/%d 分钟受影响）'
-          % ((pf - pf_nolift).mean(), int((np.abs(pf - pf_nolift) > 1e-9).sum()), len(us)))
     pw = None
-    if not args.no_matlab:
-        pw = run_wfsim(us, A)
+    if args.no_matlab:
+        # 只有 aifflor 一趟 ⇒ 本趟就把分钟级写全（少两列：wfsim / Δ / 比值）
+        def _cb_ai(i, pf_i, pn_i):
+            rec.push(_row(i, pf_i, pn_i))
+        pf, pf_nolift, phy, env_ai = run_floris(us, A, on_minute=_cb_ai)
     else:
+        # 两趟：分钟级 CSV 在**第二趟（WFSim，慢）**里边跑边写 ⇒ 中途中断也已有数据
+        pf, pf_nolift, phy, env_ai = run_floris(us, A)
+
+        def _cb_ws(i, pw_i):
+            rec.push(_row(i, pf[i], pf_nolift[i], pw_i))
+        pw = run_wfsim(us, A, on_minute=_cb_ws)
+    print('  [aifflor] 曲线完成（%.1f s）' % (time.time() - t0))
+    print('  [aifflor] 诊断：不带 A_PHYS_LO 抬升的对照曲线（平均抬升 %+.4f MW，'
+          '%d/%d 分钟受影响）'
+          % ((pf - pf_nolift).mean(), int((np.abs(pf - pf_nolift) > 1e-9).sum()), len(us)))
+    if args.no_matlab:
         print('  [WFSim] 已按 --no-matlab 跳过')
+    n_min_rows, n_blk_rows = rec.close()
 
     # ---- 统计 ----
     sumstats = {}
     if pw is not None:
         sumstats = stats(pw, pf, us, inside)
 
-    # ---- 落盘 ----
-    df = pd.DataFrame({'minute': np.arange(len(us)), 'u': us,
-                       **{'a%d' % j: A[:, j] for j in range(NT)},
-                       'P_aifflor_mw': pf,
-                       'P_aifflor_nolift_mw': pf_nolift})
-    if pw is not None:
-        df['P_wfsim_mw'] = pw
-        df['diff_mw'] = pf - pw
-        df['ratio'] = np.divide(pf, pw, out=np.full_like(pf, np.nan), where=pw > 1e-9)
-    df.to_csv(os.path.join(args.out, 'curve.csv'), index=False)
-
+    # ---- 落盘：两份 CSV 已由记录器增量写完（见 CsvRecorder）；这里只写 JSON ----
     lifted = int((A < AT.A_PHYS_LO).sum())
     meta = dict(
         wind_csv=WIND_CSV, wind_col=col, wind_col_name=colname,
@@ -358,6 +525,12 @@ def main():
         frac_turbine_minute_lifted=float(lifted / max(A.size, 1)),
         level_coef=float(AT.LEVEL_COEF),
         fence=[U_LO, U_HI],
+        csv_minute=dict(path=os.path.join(args.out, 'curve.csv'), rows=int(n_min_rows),
+                        granularity_min=1),
+        csv_5min=dict(path=os.path.join(args.out, 'curve_5min.csv'), rows=int(n_blk_rows),
+                      granularity_min=5,
+                      note='块内聚合：*_mean=5 分钟均值；*_first=块首那一分钟的值'
+                           '（引擎无记忆时 = 5 分钟分辨率单次调用的结果）'),
         aifflor_side='WindBatteryAIF + AifflorPhysics(calibrated=False, power_scale=LEVEL_COEF)',
         wfsim_side='env.WindBattery -> MATLAB WFSim_port',
         aifflor_physics_summary=env_ai.summary(),
@@ -378,7 +551,8 @@ def main():
 
     tb_root = None
     if args.tb:                                  # ★ 曲线默认用 TensorBoard 表示
-        tb_root = write_tensorboard(args.out, us, A, pf, pf_nolift, pw, sumstats, meta)
+        tb_root = write_tensorboard(args.out, us, A, pf, pf_nolift, pw, sumstats, meta,
+                                    block_rows=rec.block_rows)
     if args.plot and pw is not None:             # PNG 仅在显式要求且两侧都跑时输出
         make_plot(os.path.join(args.out, 'curve.png'), us, pw, pf, sumstats, meta)
 
@@ -418,12 +592,16 @@ def main():
              meta['lift_effect']['mean_gain_mw'], meta['lift_effect']['mean_gain_pct'],
              meta['lift_effect']['max_gain_mw']))
     print('  %-28s %s' % ('aifflor 计数器', meta['aifflor_counters']))
+    print('  %-28s %d 行（分钟级，1 分钟/行）' % ('curve.csv', n_min_rows))
+    print('  %-28s %d 行（5 分钟级，1 上层周期/行；块内聚合 *_mean + 块首 *_first）'
+          % ('curve_5min.csv', n_blk_rows))
     if tb_root is not None:
         print('\n  ★ 曲线（TensorBoard）: %s' % tb_root)
-        print('      同一张图两条线 = run `aifflor` 与 run `wfsim` 的 tag `curve/P_farm`'
+        print('      分钟级：run `aifflor` 与 run `wfsim` 的 tag `curve/P_farm`（一张图两条线）'
               + ('' if pw is not None else '（run `wfsim` 待 MATLAB 那次运行写入）'))
+        print('      5 分钟级：同名 run 的 tag `curve/blk/P_farm`（x 轴 = 上层周期序号）')
         print('      查看: tensorboard --logdir="%s"' % tb_root)
-    print('  输出: %s  (curve.csv / curve.json%s)'
+    print('  输出: %s  (curve.csv / curve_5min.csv / curve.json%s)'
           % (args.out, ' / curve.png' if (args.plot and pw is not None) else ''))
     return 0
 
