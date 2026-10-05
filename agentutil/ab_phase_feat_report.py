@@ -131,7 +131,7 @@ def main():
 
     # ---------------- ② test9 ----------------
     ts = [(tag, test9(d)) for d, tag, _, _ in infos]
-    if all(t is not None for _, t in ts):
+    if len(ts) == 2 and all(t is not None for _, t in ts):        # 两臂：同 step 配对
         print('\n② test9 OVERALL 逐 step（同 step 配对）')
         mrg = ts[0][1].rename(columns={'profit': 'p0', 'profit_econ': 'e0'})[
             ['step', 'p0', 'e0']].merge(
@@ -154,6 +154,19 @@ def main():
                                       e=[float(mrg.e0.iloc[-1]), float(mrg.e1.iloc[-1])]))
         print('   ⚠ mode 1 的相位是评测脚手架假造的：已实测换约定同权重摆动 6–9%'
               '（profit 2036→1908 / profit_econ 1716→1566）。mode 0 无相位输入 ⇒ 该敏感性为 0。')
+    else:                                                          # 单臂（或某臂缺 test9）：各报各的趋势
+        print('\n② test9（单臂）')
+        for tag, t in ts:
+            if t is None:
+                print('   %-20s 无 df_test9.csv' % tag)
+                continue
+            print('   %-20s n=%3d 轮 | profit_econ 首/中/末 = %8.1f / %8.1f / %8.1f | 最优 %8.1f'
+                  % (tag, len(t), t.profit_econ.iloc[0], t.profit_econ.median(),
+                     t.profit_econ.iloc[-1], t.profit_econ.max()))
+            rep.setdefault('test9_single', {})[tag] = dict(
+                n=int(len(t)), first=float(t.profit_econ.iloc[0]),
+                median=float(t.profit_econ.median()), last=float(t.profit_econ.iloc[-1]),
+                best=float(t.profit_econ.max()))
 
     # ---------------- ③ BESS 通道 ----------------
     print('\n③ BESS 通道（元/episode 中位；生产基线 run54 = 退化 10845 / 现金 +977 / 净 −9868）')

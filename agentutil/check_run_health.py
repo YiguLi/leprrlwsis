@@ -127,7 +127,7 @@ def main():
         sg = nums(df, 'episode_gap_pen')
         if sg is not None:
             rep(float(np.nanmax(np.abs(sg))) < 5.0,
-                'episode_gap_pen 最大值 %.4f < 5（SOC 目标可行性罚受控）'
+                'episode_gap_pen 最大值 %.4f（判据 <5 ⇔ SOC 目标可行性罚受控）'
                 % float(np.nanmax(np.abs(sg))), warn_only=True)
         wd = nums(df, 'wind_day')
         if wd is not None:
