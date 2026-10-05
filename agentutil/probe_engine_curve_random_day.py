@@ -24,9 +24,21 @@
 
 输出
 ----
-  <out>/curve.csv    逐分钟：u、a0..a4、P_wfsim、P_aifflor、Δ、比值
+  <out>/tensorboard/        ★ 曲线用 TensorBoard 表示（默认；`--no-tb` 关闭）
+      aifflor/   curve/P_farm(=主曲线), curve/P_farm_nolift(诊断)
+      wfsim/     curve/P_farm
+      wind/      curve/u
+      actions/   action/a0..a4
+      compare/   curve/ratio, curve/diff_mw, curve/abs_rel_err, summary/*（仅在两侧都跑时）
+      ⇒ `aifflor/` 与 `wfsim/` 用**同一个 tag `curve/P_farm`** 写进两个 run
+        ⇒ TB 里是**一张图两条线**（引擎直接叠加对比）
+  <out>/curve.csv    逐分钟：u、a0..a4、P_wfsim、P_aifflor、P_aifflor_nolift、Δ、比值
   <out>/curve.json   元信息（抽中的日列/两个种子/块长/物理口径/计数器）+ 统计量
-  <out>/curve.png    上下两栏：①两条曲线 + 风速；②比值 vs 风速
+  <out>/curve.png    可选（`--plot`）：静态图，仅两侧都跑时才生成
+
+查看
+----
+    tensorboard --logdir="output/engine_curve_random_day/tensorboard"
 
 用法（**需要 MATLAB 写工作区外的权限**；只在 FLORIS 侧自检可加 --no-matlab）
 ----
@@ -163,6 +175,69 @@ def stats(pw, pf, us, inside):
     return s
 
 
+def write_tensorboard(out_dir, us, A, pf, pf_nolift, pw, sumstats, meta):
+    """把曲线写进 TensorBoard。
+
+    关键设计：两个引擎写成**两个 run 子目录**（`aifflor/`、`wfsim/`），但用
+    **同一个 scalar tag `curve/P_farm`** ⇒ TB 的 scalar 面板里就是**一张图两条线**，
+    可以直接叠加看两条出力曲线；风速、动作、比值各放自己的 run，互不干扰。
+    """
+    from torch.utils.tensorboard import SummaryWriter
+    root = os.path.join(out_dir, 'tensorboard')
+    os.makedirs(root, exist_ok=True)
+    n = len(us)
+
+    w = SummaryWriter(os.path.join(root, 'aifflor'))
+    for i in range(n):
+        w.add_scalar('curve/P_farm', float(pf[i]), i)
+        w.add_scalar('curve/P_farm_nolift', float(pf_nolift[i]), i)
+    for k, v in meta['lift_effect'].items():
+        w.add_scalar('summary/lift_' + k, float(v), 0)
+    w.add_scalar('summary/level_coef', float(meta['level_coef']), 0)
+    w.add_scalar('summary/a_phys_lo', float(meta['a_phys_lo']), 0)
+    w.flush()
+    w.close()
+
+    if pw is not None:                       # WFSim run（仅在跑了 MATLAB 时）
+        w = SummaryWriter(os.path.join(root, 'wfsim'))
+        for i in range(n):
+            w.add_scalar('curve/P_farm', float(pw[i]), i)
+        w.flush()
+        w.close()
+
+    w = SummaryWriter(os.path.join(root, 'wind'))       # 风速（两侧同一条）
+    for i in range(n):
+        w.add_scalar('curve/u', float(us[i]), i)
+    w.flush()
+    w.close()
+
+    w = SummaryWriter(os.path.join(root, 'actions'))    # 随机动作（两侧同一串）
+    for j in range(NT):
+        for i in range(n):
+            w.add_scalar('action/a%d' % j, float(A[i, j]), i)
+    w.flush()
+    w.close()
+
+    if pw is not None:                       # 对照量（只有两侧都有才有定义）
+        w = SummaryWriter(os.path.join(root, 'compare'))
+        for i in range(n):
+            w.add_scalar('curve/diff_mw', float(pf[i] - pw[i]), i)
+            if pw[i] > 1e-9:
+                w.add_scalar('curve/ratio', float(pf[i] / pw[i]), i)
+            if abs(pw[i]) > 1e-9:
+                w.add_scalar('curve/abs_rel_err',
+                             abs(float(pf[i] - pw[i]) / pw[i]), i)
+        for k in ('energy_ratio', 'mape', 'median_ape', 'mean_rel_diff',
+                  'median_rel_diff', 'corr', 'k_best', 'resid_rms_mw',
+                  'mean_wfsim_mw', 'mean_aifflor_mw', 'energy_wfsim_mwh',
+                  'energy_aifflor_mwh'):
+            if isinstance(sumstats, dict) and sumstats.get(k) is not None:
+                w.add_scalar('summary/' + k, float(sumstats[k]), 0)
+        w.flush()
+        w.close()
+    return root
+
+
 def make_plot(path, us, pw, pf, s, cfg):
     import matplotlib
     matplotlib.use('Agg')
@@ -214,7 +289,10 @@ def main():
     ap.add_argument('--block', type=int, default=1, help='动作保持的分钟数（1=i.i.d.；5=H 层周期）')
     ap.add_argument('--out', default='output/engine_curve_random_day', help='输出目录')
     ap.add_argument('--no-matlab', action='store_true', help='只跑 aifflor(FLORIS) 侧')
-    ap.add_argument('--no-plot', action='store_true', help='不画 PNG')
+    ap.add_argument('--no-tb', dest='tb', action='store_false',
+                    help='不写 TensorBoard（默认写；曲线默认就用 TB 表示）')
+    ap.add_argument('--plot', action='store_true',
+                    help='额外输出静态 PNG（默认不写；两侧都跑了才有意义）')
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
@@ -298,7 +376,10 @@ def main():
     with open(os.path.join(args.out, 'curve.json'), 'w', encoding='utf-8') as fh:
         json.dump(meta, fh, ensure_ascii=False, indent=2)
 
-    if not args.no_plot and pw is not None:      # --no-matlab 时不画对比图（会误导）
+    tb_root = None
+    if args.tb:                                  # ★ 曲线默认用 TensorBoard 表示
+        tb_root = write_tensorboard(args.out, us, A, pf, pf_nolift, pw, sumstats, meta)
+    if args.plot and pw is not None:             # PNG 仅在显式要求且两侧都跑时输出
         make_plot(os.path.join(args.out, 'curve.png'), us, pw, pf, sumstats, meta)
 
     # ---- 打印 ----
@@ -337,8 +418,13 @@ def main():
              meta['lift_effect']['mean_gain_mw'], meta['lift_effect']['mean_gain_pct'],
              meta['lift_effect']['max_gain_mw']))
     print('  %-28s %s' % ('aifflor 计数器', meta['aifflor_counters']))
-    print('\n  输出: %s  (curve.csv / curve.json%s)'
-          % (args.out, ' / curve.png' if (not args.no_plot and pw is not None) else ''))
+    if tb_root is not None:
+        print('\n  ★ 曲线（TensorBoard）: %s' % tb_root)
+        print('      同一张图两条线 = run `aifflor` 与 run `wfsim` 的 tag `curve/P_farm`'
+              + ('' if pw is not None else '（run `wfsim` 待 MATLAB 那次运行写入）'))
+        print('      查看: tensorboard --logdir="%s"' % tb_root)
+    print('  输出: %s  (curve.csv / curve.json%s)'
+          % (args.out, ' / curve.png' if (args.plot and pw is not None) else ''))
     return 0
 
 
