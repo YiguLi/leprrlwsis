@@ -1170,8 +1170,8 @@ if __name__ == "__main__":
                         help='P0.1 起始点: 1(默认)=把 H 层 actor 输出层 bias 覆写为 '
                              'WT∈U(0.05,0.45) + 信号维 0 (中性宽带, 消除"初始停机"病态); '
                              '0=保留 PyTorch 默认 bias U(±0.25) (复现旧 run)')
-    parser.add_argument('--phase_feat', default=1, type=int, choices=[0, 1, 2],
-                        help='P0.3 24h 相位特征: 0=无(4 维) / 1(默认)=sin,cos(6 维) / '
+    parser.add_argument('--phase_feat', default=0, type=int, choices=[0, 1, 2],
+                        help='P0.3 24h 相位特征: 0=无(4 维, 默认) / 1=sin,cos(6 维) / '
                              '2=+[段内剩余比例, 剩余小时/8, 下一段电价/1000] (9 维)')
 
     parser.add_argument('--value_scale', default=hc.VALUE_SCALE, type=float,

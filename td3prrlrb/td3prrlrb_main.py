@@ -863,9 +863,9 @@ if __name__ == "__main__":
                              '0.01 = 行为带 [0,0.5] 的 2%, 折算单机功率抖动约 ±2.4%')
 
     # ---- 24h 相位特征 (--phase_feat) ----
-    parser.add_argument('--phase_feat', default=1, type=int, choices=[0, 1, 2],
-                        help='H 层观测的 24h 相位特征: 0=关(4维, 复现旧run); '
-                             '1=sin/cos(2π·minute/1440) (6维, 默认); '
+    parser.add_argument('--phase_feat', default=0, type=int, choices=[0, 1, 2],
+                        help='H 层观测的 24h 相位特征: 0=关(4维, 默认, 时钟过拟合治理见 README); '
+                             '1=sin/cos(2π·minute/1440) (6维, 复现旧 run); '
                              '2=1 + [段内剩余比例, 剩余小时/8, 下一段电价/1000] (9维)')
 
     # ---- 输出层 bias 初始化 (P0.1; 见 init_wt_action_bias) ----

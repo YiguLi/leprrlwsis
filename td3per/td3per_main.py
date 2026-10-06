@@ -9,7 +9,7 @@ TD3PER — 上层 = TD3PERRB 口径 (非分段奖励 + SOC 目标信号), 下层
       - a6 → soc_target = 3 + 5·a6 ∈ [0.5, 5.5] (块级(5 步)固定);
       - 非分段奖励 r1 / c1 (收益权重与风险系数恒 1.0, W_GAP = 10);
       - 块末 SOC 目标可行性罚 gap_pen = 10·max(0, |target − SOC_末| − 0.1);
-      - 观测 = Normalize(obs) 4 维 + 24h 相位特征 (--phase_feat 1 → 6 维);
+      - 观测 = Normalize(obs) 4 维 + 24h 相位特征 (--phase_feat 0/1/2 → 4/6/9 维; 默认 0 = 无时钟);
       - 对偶: lam1 ∈ [3, 100] 初值 5.0, d_block_H = 50 → 地板 5 (EMA 实际块成本);
       - 每块 2 次更新; 逐维探索噪声 (--wt_noise / --sig_noise_max / --sig_noise_min);
       - --epsilon 4000 (H 决策次数 ⇒ 20k 环境步); actor 输出层 WT bias 初始化到“中性宽带”。
@@ -1059,8 +1059,8 @@ if __name__ == "__main__":
                              '0.01 = 行为带 [0,0.5] 的 2%, 折算单机功率抖动约 ±2.4%')
 
     # ---- 24h 相位特征 (--phase_feat) ----
-    parser.add_argument('--phase_feat', default=1, type=int, choices=[0, 1, 2],
-                        help='H 层观测的 24h 相位特征: 0=关(4维); 1=sin/cos(6维, 默认); '
+    parser.add_argument('--phase_feat', default=0, type=int, choices=[0, 1, 2],
+                        help='H 层观测的 24h 相位特征: 0=关(4维, 默认, 时钟过拟合治理见 README); 1=sin/cos(6维); '
                              '2=1+[段内剩余比例, 剩余小时/8, 下一段电价/1000](9维)')
 
     # ---- 输出层 bias 初始化 (与 td3perrb 一致) ----

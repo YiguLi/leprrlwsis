@@ -25,7 +25,7 @@ td3perrb/
 - H 是**唯一决策者**：既要收益，也要为一个"不可行的 SOC 目标"付费。
 - L 只做一件事——**追踪目标**；"物理可行 + 平抑波动"由 RBB 可行窗口 `[pbrulemin, pbrulemax]`
   硬保证，因此下层不需要 RL（无 actor/critic/λ2/c2/PBRS）。
-- H 观测 = `Normalize(obs)` 4 维 + `--phase_feat 1` 的 24h 相位 2 维 = 6 维。
+- H 观测 = `Normalize(obs)` 4 维（`--phase_feat 0`，**现默认 = 无时钟**）；旧档 `--phase_feat 1` 再 +24h 相位 2 维 = 6 维。
 - `--wt_bias_init 1`：构造后把 actor 输出层前 5 维 bias 覆写到 Cp 高效区 `U(0.25,0.40)`。
 
 ## 2. 奖励 / 成本（仅 H，非分段）
@@ -83,7 +83,7 @@ H 每块更新 2 次; H 层越界罚 penalty_NN_H 系数 100/单位, 不封顶 (
 | `W_GAP` | **10.0** | td3per 为 50.0 |
 | `--soc_tol` / `--tracker_soc_tol` | 0.1 / 0.0 | 0.1 豁免只属于上层 gap 罚；下层尽力追随 |
 | `--pb_cap` | −1（不限制） | 仅实验用 |
-| `--phase_feat` | 1（H 观测 4→6 维） | 0=关 / 1=sin·cos / 2=+分段剩余特征 |
+| `--phase_feat` | **0**（H 观测 4 维） | 0=关(默认, 无时钟) / 1=sin·cos(4→6 维) / 2=+分段剩余特征(4→9 维) |
 | `--wt_bias_init` | 1 | Cp 高效区 bias 初始化 |
 | `--rbb_fluctuation_limit` / `--rbb_rated_power` | 3.0 / 10.0 | RBB 窗口参数 |
 

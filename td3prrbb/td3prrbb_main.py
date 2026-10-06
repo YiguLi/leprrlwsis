@@ -786,8 +786,8 @@ if __name__ == "__main__":
     # 0.95: H 层 γ 块级语义 ⇒ 半衰期 13.5 块 ≈ 68 min; 1/(1−γ) = 20 块 ≈ 100 min
     parser.add_argument('--discount', default=0.95, type=float, help='')
     # ---- 24h 相位特征 (--phase_feat) ----
-    parser.add_argument('--phase_feat', default=1, type=int, choices=[0, 1, 2],
-                        help='H 层观测的 24h 相位特征: 0=关(4维); 1=sin/cos(6维, 默认); '
+    parser.add_argument('--phase_feat', default=0, type=int, choices=[0, 1, 2],
+                        help='H 层观测的 24h 相位特征: 0=关(4维, 默认, 时钟过拟合治理见 README); 1=sin/cos(6维); '
                              '2=1+[段内剩余比例, 剩余小时/8, 下一段电价/1000](9维)')
     # 0.99
     # ---- H 层 n 步回报 / twin-target 聚合 ----

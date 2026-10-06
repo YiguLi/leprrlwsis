@@ -178,8 +178,8 @@ BSIZE_DEFAULT = 256
 RMSIZE_DEFAULT = 40000
 for k in ALL6:
     src = read_text(P_MAIN[k])
-    check("'--phase_feat', default=1, type=int, choices=[0, 1, 2]" in src,
-          '%s: --phase_feat 默认 1 / choices [0,1,2]' % k)
+    check("'--phase_feat', default=0, type=int, choices=[0, 1, 2]" in src,
+          '%s: --phase_feat 默认 0（无时钟；时钟过拟合治理，2026 起）/ choices [0,1,2]' % k)
     check("'--bsize', default=%d" % BSIZE_DEFAULT in src
           and 'default=%d,' % RMSIZE_DEFAULT in src,
           '%s: --bsize %d / --rmsize %d' % (k, BSIZE_DEFAULT, RMSIZE_DEFAULT))
