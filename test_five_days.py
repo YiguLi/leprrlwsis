@@ -194,7 +194,7 @@ DEFAULT_DAYS = 5
 WIND_CSV = 'FFC_speed_noise_1.csv'
 
 PROJECT_ORDER = ['per', 'prrbb', 'prle',
-                 'td3per', 'td3prrbb', 'td3prle',
+                 'td3per', 'td3perseg', 'td3prrbb', 'td3prle',
                  'td3prrlrb', 'td3perrb', 'td3leprrlrb',
                  'yawflor', 'aifflor']
 
@@ -273,6 +273,28 @@ PROJECTS = {
         l_cost_limit=0.1,   # = 生产 agent_L.cost_limit (L 口径 ÷100)
         soc_random=True,
         ref='td3per/td3per_main.py',
+    ),
+    'td3perseg': dict(
+        # = td3per 的逐字复制 + **只加 piecewise（风况×电价 分段）奖励权重**：
+        #   训练端 `--seg {off,expert,percentile,kmeans}`（默认 off ⇒ 与 td3per 逐位相同，
+        #   基座 td3per/ 未被修改）；评估端必须用**同一**分段口径，否则权重表不同。
+        #   ⇒ 本条目带 `piecewise='expert'`，runner 会 set_piecewise(True) 并按方法设定风速阈值；
+        #     `--seg-method` 可临时覆盖。契约见 agentutil/test_piecewise_reward.py。
+        label='TD3PERSEG',
+        residual=True,          # 下层 = 残余动作（与 td3per 同）
+        agent=('td3perseg.td3perseg_ddpg', 'SP_TD3'),
+        myfunc='td3perseg.td3perseg_myfunc',
+        rule_bess=('rbb.rbb_rule_bess', 'RuleBasedBESS'),   # 与 td3per 同（未复制 prrbb 的本地副本）
+        lower='rl', l_obs='distilled', h_obs='normalize_H',
+        h_kwargs={**_EMA, **_TD3_H, 'lam_max': 100.0, 'lam_min': 3.0,
+                  'record_update_stats': True,
+                  'wt_noise': 0.05, 'sig_noise_max': 0.2, 'sig_noise_min': 0.05},
+        h_lam=5.0,
+        l_kwargs={**_EMA_L, **_TD3_L, 'lam_max': 500.0, 'lam_min': 10.0},
+        l_cost_limit=0.1,   # = 生产 agent_L.cost_limit (L 口径 ÷100)
+        soc_random=True,
+        piecewise='expert',     # 评估时打开分段权重（缺此键的臂行为完全不变）
+        ref='td3perseg/td3perseg_main.py',
     ),
     'td3prrbb': dict(
         label='TD3PRRBB',
@@ -574,6 +596,21 @@ class ProjectRunner:
         myfunc_mod_name = self.spec['myfunc']
         myf = importlib.import_module(myfunc_mod_name)
         self.myf = myf
+        # ---- piecewise（分段）奖励臂：评估必须用与训练**同一**分段口径 --------------
+        #   只在 spec 带 'piecewise' 键时生效（其它臂无此键 ⇒ 行为完全不变，零回归风险）。
+        #   值 = 分段方法（expert/percentile/kmeans）；`--seg-method` 可临时覆盖。
+        _pw = getattr(self.args, 'seg_method', None) or self.spec.get('piecewise')
+        if _pw:
+            if not hasattr(myf, 'set_piecewise'):
+                raise ValueError(
+                    '{}: spec 声明 piecewise={!r}，但 {} 没有 set_piecewise'
+                    .format(key, _pw, myfunc_mod_name))
+            myf.set_piecewise(True)
+            from data_piecewise.boundaries import apply_segmentation
+            apply_segmentation(str(_pw), myf.set_wind_thresholds)
+            if verbose:
+                print('    [{}] piecewise={} 已启用，风速阈值 {}'
+                      .format(key, _pw, myf.get_wind_thresholds()))
         self.check_action = myf.CheckAction
         # myfunc.py 顶层会 start_matlab()（已被 ensure_engine 指向共享引擎）
         engine = getattr(myf, 'engine', None) or engine
@@ -891,6 +928,9 @@ def parse_args():
     p.add_argument('--models', nargs='*', default=None, metavar='KEY=PATH',
                    help='另一种写法，同一 KEY 可重复以给多组模型: '
                         'td3per=output/a td3per=output/b ...')
+    p.add_argument('--seg-method', default=None, choices=['expert', 'percentile', 'kmeans'],
+                   help='覆盖 piecewise 臂（如 td3perseg）评估时的分段方法；'
+                        '默认 None = 用 spec 里的值（td3perseg 为 expert）')
     p.add_argument('--max-runs', type=int, default=0,
                    help='每个方法最多取前 N 组模型（0 = 不限制，默认 0）')
     p.add_argument('--projects', nargs='*', default=None, choices=PROJECT_ORDER,

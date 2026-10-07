@@ -219,8 +219,8 @@ for k in ('td3prrbb', 'td3prle'):
 tf = read_text('test_five_days.py')
 n_phase = len(re.findall(r"h_obs='normalize_H'", tf))
 n_plain = len(re.findall(r"h_obs='normalize'(?!_H)", tf))
-check(n_phase == 8 and n_plain == 3,
-      "test_five_days.py: 8 个项目 h_obs='normalize_H' (2026-09-30 起含 yawflor；其后含 aifflor) "
+check(n_phase == 9 and n_plain == 3,
+      "test_five_days.py: 9 个项目 h_obs='normalize_H' (2026-09-30 起含 yawflor；其后含 aifflor、td3perseg) "
       "+ 3 个旧项目 'normalize' (实得 %d/%d)"
       % (n_phase, n_plain))
 
