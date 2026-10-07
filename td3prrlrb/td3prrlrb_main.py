@@ -709,7 +709,7 @@ if __name__ == "__main__":
                         type=float,
                         help='policy net learning rate (only for DDPG)')
     parser.add_argument('--warmup',
-                        default=200,
+                        default=None,
                         type=int,
                         help='time without training but only filling the replay memory')
     parser.add_argument('--discount', default=0.95, type=float, help='')
@@ -897,6 +897,7 @@ if __name__ == "__main__":
                         help='>0 时覆盖 train_iter_H, 用于短程 A/B')
     hwarm.add_warmup_args(parser)
     args = parser.parse_args()
+    args = hwarm.resolve_warmup(args)   # WARMUP_AUTO: 正式口径 warmup=bsize*mult, 期零网络更新
     hc.set_mode(args.c1_mode)
     hc.set_value_scale(args.value_scale)   # 值函数回归空间归一化 (单一真源)
     hc.set_cost_scale(args.cost_scale)   # cost 通道缩放 (λ 自动跟随)

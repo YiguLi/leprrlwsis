@@ -65,6 +65,13 @@ DT = 1.0 / 60.0
 RATED_POWER = 10.0
 SOC_TOL = 0.0            # 下层无死区 (与各项目 SocTracker 默认一致)
 
+#: **warmup 时长口径**（正式方法统一）：未显式传 `--warmup` 时
+#: `warmup = WARMUP_BSIZE_MULT × --bsize` 步。绑定理由：首个 minibatch 按 bsize 抽，
+#: warmup 太短 ⇒ 缓冲条目 < 一个 batch ⇒ 同一条 transition 被复制多份
+#: （H 层每 5 步才产 1 条 transition：`--warmup 200` + bsize=256 时首 batch 每条被
+#:  复制 ~6 份）。warmup 期**不进行任何网络更新**（`BiasInitTracker` 运行期断言）。
+WARMUP_BSIZE_MULT = 4.0
+
 # ---------------------------------------------------------------- 偏航带（yawflor 专用）
 # `yawflor`（FLORIS 引擎）的动作是**无量纲偏航指令** `n ∈ [−1, 1]`，env 内 `γ = 25°·n`
 # （见 `yawflor/README.md` §4 的换算表：**按"占带宽比例"原样平移**，因此这里
@@ -319,6 +326,11 @@ def add_warmup_args(parser, yaw=False):
         h_step = 'warmup 风机动作每块随机步长 (默认 ±0.05)'
         h_lo = 'warmup 风机动作 clip 下界 (默认 0.05)'
         h_hi = 'warmup 风机动作 clip 上界 (默认 0.45)'
+    parser.add_argument('--warmup_bsize_mult', default=WARMUP_BSIZE_MULT, type=float,
+                        help='warmup 时长 = 该系数 × --bsize（默认 %.1f；仅当未显式传 '
+                             '--warmup 时生效）。warmup 期**不进行任何网络更新**'
+                             '（由 BiasInitTracker 断言）。要复现历史口径请显式传 '
+                             '--warmup 200' % WARMUP_BSIZE_MULT)
     parser.add_argument('--warmup_sched', default='fixed', choices=['fixed', 'random'],
                         help=sched_help)
     parser.add_argument('--warmup_wt_start', default=d_start, type=float, help=h_start)
@@ -421,3 +433,41 @@ def build_from_args(args, agent_H, agent_L=None):
             if getattr(args, 'warmup_bess', 'rule') != 'random' else None)
     stats = BessFillStats() if agent_L is not None else None
     return sched, rule, stats
+
+
+# =============================================================================
+# 6. warmup 时长口径（单一真源）：warmup = --warmup_bsize_mult × --bsize 步
+# =============================================================================
+def resolve_warmup(args, verbose=True):
+    """把 `args.warmup` 解析成**步数**并打印口径；返回 args（就地改写）。
+
+    口径（**正式方法统一**）：
+      * 未显式传 `--warmup`（默认 None）⇒ `warmup = warmup_bsize_mult × bsize`
+        （默认系数 4 ⇒ bsize=256 时 1024 步、bsize=64 时 256 步）。
+      * 显式传 `--warmup N` ⇒ **尊重 N**（复现历史 run 用 `--warmup 200`）。
+      * warmup 期**零网络更新**：由 `BiasInitTracker.on_block_end` 在运行期断言
+        （`agent.update_count` 必须仍为 0），并在触发点打印证明。
+
+    为什么把 warmup 与 bsize 绑定：首个 minibatch 是按 `bsize` 抽的，warmup 太短
+    ⇒ 缓冲里条目少于一个 batch ⇒ **同一条 transition 被复制多份**（H 层每 5 步才产
+    1 条 transition：`--warmup 200` 时 H 缓冲仅 40 条，而 bsize=256 ⇒ 首 batch 里
+    每条被复制 ~6 份）。绑到 4×bsize 后 H 缓冲 ≈ 4·bsize/5 条、L 缓冲 = 4·bsize 条。
+    """
+    bsize = int(getattr(args, 'bsize', 0) or 0)
+    mult = float(getattr(args, 'warmup_bsize_mult', WARMUP_BSIZE_MULT) or 0.0)
+    given = getattr(args, 'warmup', None)
+    auto = int(round(mult * max(bsize, 0)))
+    if given is None:
+        args.warmup = auto
+        src = 'bsize×%.1f（默认）' % mult
+    else:
+        args.warmup = int(given)
+        src = '显式 --warmup %d（覆盖 bsize×%.1f=%d）' % (args.warmup, mult, auto)
+    if args.warmup < 0:
+        raise ValueError('warmup 不能为负: %r' % (args.warmup,))
+    if verbose:
+        n_h = args.warmup // 5      # H 层每 5 个环境步产 1 条 transition
+        print('[warmup] 时长 = {} 步  ← {}  (--bsize={} ⇒ 首个 batch 前缓冲: '
+              'H≈{} 条 / L={} 条) | warmup 期**零网络更新**（运行期断言）'.format(
+                  args.warmup, src, bsize, n_h, args.warmup))
+    return args

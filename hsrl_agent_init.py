@@ -245,6 +245,8 @@ class BiasInitTracker:
         self.blocks = []
         self.applied = False
         self.info = None
+        #: warmup 期经过的块末数（配合"零网络更新"断言，触发时打印证明）
+        self.n_warmup_blocks = 0
 
     def scale(self):
         """生效的值函数缩放 s。
@@ -281,7 +283,19 @@ class BiasInitTracker:
         Returns
         -------
         None 或 dict(b_p, b_c, n_blocks, step, trigger_step)
+
+        ⚠ **warmup 期零网络更新的运行期断言**（正式口径，见 hsrl_warmup.resolve_warmup）：
+        `step <= warmup` 的每个块末都检查 `agent.update_count` 仍为 0；一旦在 warmup 期
+        发生了任何 `update_policy()`，这里直接抛错（而不是静默地把 warmup 语义破坏掉）。
+        触发点还会打印"warmup 期 N 个块 / 0 次更新"的证明。
         """
+        if int(step) <= int(self.warmup):
+            self.n_warmup_blocks += 1
+            _uc = int(getattr(agent, 'update_count', 0))
+            if _uc != 0:
+                raise AssertionError(
+                    '[warmup] 违反"warmup 期零网络更新": step={} <= warmup={}，'
+                    '但 agent.update_count={}'.format(step, self.warmup, _uc))
         if self.mode == 'none' or self.applied:
             return None
         self.blocks.append((float(sum_r1), float(sum_c1)))
@@ -316,4 +330,7 @@ class BiasInitTracker:
                            sp, sc,
                            -1.0 if b_p is None else float(b_p),
                            -1.0 if b_c is None else float(b_c)))
+            prCyan('[warmup] {} 步内经过 {} 个块末；网络更新 {} 次（正式口径要求 **0** 次，'
+                   '运行期已逐块断言）'.format(self.warmup, self.n_warmup_blocks,
+                                               int(getattr(agent, 'update_count', 0))))
         return self.info

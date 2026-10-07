@@ -906,7 +906,7 @@ if __name__ == "__main__":
                         type=float,
                         help='policy net learning rate (only for DDPG)')
     parser.add_argument('--warmup',
-                        default=200,
+                        default=None,
                         type=int,
                         help='time without training but only filling the replay memory')
     # 0.95: H 层 γ 以【块(5 min)】为单位生效 (observe_jump 聚合 5 步后 discount 只用一次)
@@ -1117,6 +1117,7 @@ if __name__ == "__main__":
     hwarm.add_warmup_args(parser, yaw=True)   # 偏航带 [−1,+1] / 起点 0 / 步长 0.2
     ydual.add_args(parser)                    # 双通道对偶开关（默认 ema = 历史口径）
     args = parser.parse_args()
+    args = hwarm.resolve_warmup(args)   # WARMUP_AUTO: 正式口径 warmup=bsize*mult, 期零网络更新
     hc.set_mode(args.c1_mode)
     hc.set_value_scale(args.value_scale)   # 值函数回归空间归一化 (单一真源)
     hc.set_cost_scale(args.cost_scale)   # cost 通道缩放 (λ 自动跟随)
