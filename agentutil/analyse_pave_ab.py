@@ -166,6 +166,8 @@ def main():
     ap.add_argument('--arms', nargs='*', default=None)
     ap.add_argument('--base', default='ABPAVE2-BASE')
     ap.add_argument('--ckpt', type=int, default=0, help='0 = 取各臂共同的最后一个 checkpoint')
+    ap.add_argument('--ckpts', nargs='*', type=int, default=[],
+                    help='多个 checkpoint 取平均（强烈建议：单 ckpt 的翻转率噪声可达 ±9pp）')
     ap.add_argument('--acts', nargs='*', default=[],
                     help='激活覆盖，形如 ABPAVE2-SILU=silu（默认用 DEFAULT_ACTS）')
     a = ap.parse_args()
@@ -186,8 +188,11 @@ def main():
                           for p in glob.glob(os.path.join(r, 'checkpoint_*')))
     common = min((c[-1] for c in ckpts.values() if c), default=0)
     ck = a.ckpt or common
+    ck_list = a.ckpts or [ck]
     lines = ['# aifflorpave A/B 报告', '',
-             '臂: %s ｜ 基线: %s ｜ 比较 checkpoint: %d' % (', '.join(tags), a.base, ck), '',
+             '臂: %s ｜ 基线: %s ｜ ckpt: %s' % (', '.join(tags), a.base,
+                                                 '平均 ' + ','.join(map(str, ck_list))
+                                                 if len(ck_list) > 1 else str(ck)), '',
              '## ① critic 几何（预测：正则 ⇒ 翻转率↓、负定性率↑）', '',
              '| 臂 | act | n | 翻转率 | mean cos | 6×6 负定性率 | 跨维同号率 | ‖∇_aQ‖² | TD |',
              '|---|---|---|---|---|---|---|---|---|']
@@ -197,13 +202,20 @@ def main():
         if not r:
             continue
         act = acts.get(t, 'relu')
-        g = geometry(r, ck, act=act)
-        if g:
-            g['td'] = td_of(r, ck)
-            geo[t] = g
-            lines.append('| %s | %s | %d | **%.1f%%** | %.3f | **%.1f%%** | %.1f%% | %.3g | %.2f |'
-                         % (t, act, g['n'], 100 * g['flip'], g['cos'], 100 * g['negdef'],
-                            100 * g['sign_agree'], g['gscale'], g['td']))
+        got = [g for g in (geometry(r, c, act=act) for c in ck_list) if g]
+        if not got:
+            continue
+        g = {k: float(np.mean([x[k] for x in got])) for k in got[0]}
+        if len(got) > 1:                      # 跨 ckpt 的离散度（噪声量级）
+            g['sd_flip'] = float(np.std([x['flip'] for x in got]))
+            g['sd_neg'] = float(np.std([x['negdef'] for x in got]))
+        g['td'] = float(np.mean([td_of(r, c) for c in ck_list]))
+        geo[t] = g
+        sd = (' ±%.0f' % (100 * g['sd_flip'])) if 'sd_flip' in g else ''
+        sd2 = (' ±%.0f' % (100 * g['sd_neg'])) if 'sd_neg' in g else ''
+        lines.append('| %s | %s | %d | **%.1f%s%%** | %.3f | **%.1f%s%%** | %.1f%% | %.3g | %.2f |'
+                     % (t, act, int(g['n']), 100 * g['flip'], sd, g['cos'],
+                        100 * g['negdef'], sd2, 100 * g['sign_agree'], g['gscale'], g['td']))
     lines += ['', '## ② 成绩（与 %s 逐日配对）' % a.base, '',
               '| 臂 | 覆盖步数 | 日 r1 均值 | vs 基线 | 配对 SE | t | r1/块 | 罚/块 | 收益/块 | 越界% |',
               '|---|---|---|---|---|---|---|---|---|---|']
