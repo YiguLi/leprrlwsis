@@ -5,12 +5,16 @@
 ----
 1) 先等第一批 4 条（ABPAVE2-BASE / -SILU / -PAVE / -VFC）跑到 30000 步。判据 = 纯文件读
    `output/<tag>-run*/update_stats_H.csv` 的最后一列 step（不依赖进程/权限）；带 8h 安全上限。
-2) 然后**逐条**跑队列（同一时刻只 1 个训练进程，OMP_NUM_THREADS=3）：
-     NOCURV  : silu + mpr .46 + vfc .22            （论文关键消融：只压 M 不保 μ）
-     CURV4X  : 同上 + curv .0224                    （Curv 权重 ×4，第一旋钮）
-     EVERY4  : 全 PAVE + --pave_every 4             （算力匹配：分离"正则"与"多走一步"）
-     MPR     : relu + mpr .46                       （单因子 MPR，不换激活）
-     RELVFC  : relu + mpr .46 + vfc .22             （单因子 MPR+VFC，"不动激活"路线上限）
+2) 然后**每批 `--jobs` 条**（默认 2，每进程 3 线程 ⇒ 峰值 6/16 线程）跑队列：
+     顺序按"诊断价值"排（首批 4 条在 ckpt 26000 的结果已定，见 PENDING_DECISIONS.md §5）：
+     CURV4X   : silu + mpr .46 + vfc .22 + curv .0224   （Curv ×4：Curv 贡献随训练衰减到 ~0，先试剂量）
+     CURVONLY : silu + curv .05（mpr/vfc 全 0）          （只做 μ 侧：能否避开成绩损失）
+     NOVFC    : silu + mpr .46 + curv .0056（无 vfc）    （VFC 是不是"梯度塌到 0"的元凶）
+     NOCURV   : silu + mpr .46 + vfc .22（无 curv）      （论文关键消融 ⇒ 预期复现塌陷，作反证锚点）
+     EVERY4   : 全 PAVE + --pave_every 4                （算力匹配：分离"正则"与"多走一步"）
+     MPR      : relu + mpr .46                          （单因子 MPR，不换激活）
+     已删除 RELVFC（relu + mpr + vfc）：首批 VFC 臂（relu + vfc）已实测"梯度塌到 3e-5 + TD 29.2 +
+     r1/块 −8096"的塌陷，RELVFC 只会复现同一现象，价值低于其它臂 ⇒ 先不跑（需要时再加回）。
    每个 30000 步、seed 101、16/100、nstep 10、rate 0.01、新 warmup 口径（bsize×4=1024）。
 3) 幂等：已存在 ≥29990 步的 run ⇒ 跳过（可安全重跑续做）。
 4) 锁：`output/_pave_queue.lock` 存在 ⇒ 直接退出（防重复启动；`--force` 可覆盖）。
@@ -44,12 +48,18 @@ if not os.path.isfile(PY):
 BATCH1 = ['ABPAVE2-BASE', 'ABPAVE2-SILU', 'ABPAVE2-PAVE', 'ABPAVE2-VFC']
 
 QUEUE = [
-    dict(tag='ABPAVE2-NOCURV',
-         args='--critic_act silu --pave_w_mpr 0.46 --pave_w_vfc 0.22',
-         why='论文关键消融：只压 M 不保 μ（无 Curv）是否反而更差'),
     dict(tag='ABPAVE2-CURV4X',
          args='--critic_act silu --pave_w_mpr 0.46 --pave_w_vfc 0.22 --pave_w_curv 0.0224',
-         why='Curv 权重 ×4：若 C 臂的 6×6 负定性率没升，这是第一旋钮'),
+         why='Curv 权重 ×4 —— 实测 Curv 贡献随训练衰减到 ~0（53→0.089，权重固定）'),
+    dict(tag='ABPAVE2-CURVONLY',
+         args='--critic_act silu --pave_w_curv 0.05',
+         why='只做 μ 侧（无 MPR/VFC）⇒ 能否在避开梯度塌陷的同时提高负定性率'),
+    dict(tag='ABPAVE2-NOVFC',
+         args='--critic_act silu --pave_w_mpr 0.46 --pave_w_curv 0.0056',
+         why='去掉 VFC（"梯度塌到 0"的头号嫌疑），保留 MPR+Curv'),
+    dict(tag='ABPAVE2-NOCURV',
+         args='--critic_act silu --pave_w_mpr 0.46 --pave_w_vfc 0.22',
+         why='论文关键消融：只压 M 不保 μ ⇒ 预期复现塌陷（反证锚点）'),
     dict(tag='ABPAVE2-EVERY4',
          args=('--critic_act silu --pave_w_mpr 0.46 --pave_w_vfc 0.22 '
                '--pave_w_curv 0.0056 --pave_every 4'),
@@ -57,9 +67,6 @@ QUEUE = [
     dict(tag='ABPAVE2-MPR',
          args='--critic_act relu --pave_w_mpr 0.46',
          why='单因子 MPR（不换激活）'),
-    dict(tag='ABPAVE2-RELVFC',
-         args='--critic_act relu --pave_w_mpr 0.46 --pave_w_vfc 0.22',
-         why='单因子 MPR+VFC（relu，无 Curv）——"不动激活"路线的上限'),
 ]
 
 
