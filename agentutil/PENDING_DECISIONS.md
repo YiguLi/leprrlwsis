@@ -68,7 +68,11 @@
 
 ## §4 本轮已自动执行（无需决策，仅供核对）
 
-1. **正式口径改动已提交 `5fea0dd`**：12 个正式 main 的 `--warmup` 默认 `200 → None`，由 `hsrl_warmup.resolve_warmup` 解析为 **`--bsize × --warmup_bsize_mult`（默认 4.0）**；显式 `--warmup N` 仍优先（`--warmup 200` 复现历史）。**warmup 期零更新**升级为运行期断言（`BiasInitTracker` 逐块检查 `update_count==0` 并在触发点打印证明；实测 1024 步/205 块/**0 次**）。测试 `test_warmup_bsize_uniform.py` 全 PASS；`port_warmup_bsize.py --check` 12/12 往返可逆；`rbb` 因无共享 warmup 基建而排除。
+1. **正式口径改动 `5fea0dd` → `afca26b` → 本次**：warmup 时长 = **固定 1440 步（= 一个完整 episode/一天），不再与 `--bsize` 挂钩**（旧口径 `--bsize×4` 由 `--warmup_bsize_mult 4` 复现；`--warmup 200` 复现更早的历史）。**warmup 期零更新**升级为运行期断言（`BiasInitTracker` 逐块检查 `update_count==0` 并在触发点打印证明）。测试 `test_warmup_bsize_uniform.py` 全 PASS；`port_warmup_bsize.py --check` 12/12 往返可逆；`rbb` 因无共享 warmup 基建而排除。
+6. **warmup 行为重设计 `afca26b`**（用户口径）：① 风机起点 1/3 → **0.2**（范围仍 `[0.05,0.45]`、步长 0.05 ⇒ 可达集变成 9 个**整格点**，旧起点的格点偏移被修掉）；② episode 起始 SOC 由 `U[0.5,5.5]` 随机 → **固定 3.0**（`--soc_reset_low/high` 默认 3/3，传 0.5/5.5 复现旧口径）；③ 下层 warmup 由"确定性追 SOC=3" → **价格条件随机充放**（`--warmup_bess price`；300 ⇒ `+U(0.3,0.5)` 充电 / 580 ⇒ 0 / 980 ⇒ `−U(0.3,0.5)` 放电，命令再夹 RBB 窗口，L 层其余逻辑不变）；④ 因此 `check_residual_baseline` 的"Δ≡0 与基线逐位相同"不变量被**有意打破**，改走方向/幅度/窗口的行为自检（`--warmup_bess rule` 可复现旧语义）。派生：`port_warmup_bess_price.py`（9 main）+ `port_soc_start.py`（10 处），均 `--check` 可逆；`aifflorpave` 由 aifflor 重新派生。
+   * ⚠ **实测副作用（需知情）**：warmup r̄ 与 critic 的价值基线先验随口径大幅变化 —— 旧 rule 臂（1024 步）r̄=73.4/b_p=1468 → price 臂（1024 步）r̄=57.3/b_p=1145 → **price 臂（1440 步，完整一天）r̄=194.7/b_p=3894**（跨完整电价日循环后套利真正兑现，尤其晚高峰放电）。**新旧 run 因此不可比**。
+   * ⚠ 另一现象：SOC 充满后 RBB 窗口把充电夹成 0（低谷步里约 52% 落在窗口边界）；若要让充电侧探索更充分，需要给规则加 SOC 反馈（**待决**）。
+   * ⚠ 仍开着：**第 6 维 a6（SOC 目标信号）在 warmup 期恒为 0**（零覆盖），而策略收敛后把它推到 ±0.14~0.29 且不同 run 反号（**待决**）。
 2. **PAVE 验证臂已提交 `b13c456`**：`aifflorpave/`（`CriticPAVE` 可切 relu/silu + MPR/VFC/Curv，按 ‖∇_aQ‖² 归一化并带分母地板）+ `SP_TD3` 子类（附加几何步，只动 profit 双 critic）+ 派生 main（7 处替换可逆）+ 契约测试 4 组全 PASS。
 3. **PAVE A/B 已起 4 条 30k**（新 warmup 口径）：`ABPAVE2-BASE`（relu 无正则）/`-SILU`/`-PAVE`（mpr .46 vfc .22 curv .0056）/`-VFC`（relu 只压 VFC）。
 4. **队列已排**：见 `agentutil/run_pave_queue.ps1`（等上面 4 条跑完再**逐条**起 NoCurv / Curv4x / Every4 / MPR-only / ReluVFC，5 条 30k）。

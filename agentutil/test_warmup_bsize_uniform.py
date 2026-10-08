@@ -44,7 +44,7 @@ def check(cond, msg):
 
 
 class _A(object):
-    def __init__(self, bsize, warmup=None, mult=4.0):
+    def __init__(self, bsize, warmup=None, mult=0.0):
         self.bsize, self.warmup, self.warmup_bsize_mult = bsize, warmup, mult
 
 
@@ -68,15 +68,18 @@ for f in MAINS:
     check(has_auto and has_call, '%-34s auto=%s resolve=%s' % (f, has_auto, has_call))
 
 print('=' * 84)
-print('② resolve_warmup 算术')
+print('② resolve_warmup 算术（**固定 1440 步，与 --bsize 解耦**）')
+check(hwarm.WARMUP_STEPS == 1440, 'WARMUP_STEPS = 1440（一个 episode/一天）')
 a = hwarm.resolve_warmup(_A(256), verbose=False)
-check(a.warmup == 1024, 'bsize=256, 未传 ⇒ 1024（实测 %d）' % a.warmup)
+check(a.warmup == 1440, 'bsize=256, 未传 ⇒ 1440（实测 %d）' % a.warmup)
 b = hwarm.resolve_warmup(_A(64), verbose=False)
-check(b.warmup == 256, 'bsize=64, 未传 ⇒ 256（实测 %d）' % b.warmup)
+check(b.warmup == 1440, 'bsize=64, 未传 ⇒ **同样 1440**（与 bsize 解耦，实测 %d）' % b.warmup)
 c = hwarm.resolve_warmup(_A(256, warmup=200), verbose=False)
-check(c.warmup == 200, '显式 --warmup 200 ⇒ 200（覆盖 auto，实测 %d）' % c.warmup)
-d = hwarm.resolve_warmup(_A(256, mult=2.0), verbose=False)
-check(d.warmup == 512, 'mult=2 ⇒ 512（实测 %d）' % d.warmup)
+check(c.warmup == 200, '显式 --warmup 200 ⇒ 200（最高优先，实测 %d）' % c.warmup)
+d = hwarm.resolve_warmup(_A(256, mult=4.0), verbose=False)
+check(d.warmup == 1024, '旧口径 --warmup_bsize_mult 4 ⇒ 1024（实测 %d）' % d.warmup)
+e = hwarm.resolve_warmup(_A(512), verbose=False)
+check(e.warmup == 1440, 'bsize=512 ⇒ 仍 1440（实测 %d；此时 H 缓冲 288<512 会告警）' % e.warmup)
 
 print('=' * 84)
 print('③ 零更新契约：update_policy() 必须在更浅缩进的 `if step > args.warmup:` 块内')

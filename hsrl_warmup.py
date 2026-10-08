@@ -71,12 +71,20 @@ DT = 1.0 / 60.0
 RATED_POWER = 10.0
 SOC_TOL = 0.0            # 下层无死区 (与各项目 SocTracker 默认一致)
 
-#: **warmup 时长口径**（正式方法统一）：未显式传 `--warmup` 时
-#: `warmup = WARMUP_BSIZE_MULT × --bsize` 步。绑定理由：首个 minibatch 按 bsize 抽，
-#: warmup 太短 ⇒ 缓冲条目 < 一个 batch ⇒ 同一条 transition 被复制多份
-#: （H 层每 5 步才产 1 条 transition：`--warmup 200` + bsize=256 时首 batch 每条被
-#:  复制 ~6 份）。warmup 期**不进行任何网络更新**（`BiasInitTracker` 运行期断言）。
-WARMUP_BSIZE_MULT = 4.0
+#: **warmup 时长口径**（正式方法统一，2026-10-08 起）：未显式传 `--warmup` 时
+#: `warmup = WARMUP_STEPS = 1440` 步 —— **一个完整 episode（一天）**，
+#: **不再与 `--bsize` 挂钩**。理由：
+#:   ① 1440 步覆盖完整电价三档（300/580/980）× 完整风况日循环 ⇒ warmup 的 (s,a) 分布
+#:      与策略期同分布，而不是"只看一天的某一小段"；
+#:   ② H 层每 5 步产 1 条 transition ⇒ 缓冲 1440/5 = 288 条 ≥ bsize(256)
+#:      ⇒ **首个 minibatch 不再复制同一条 transition**（旧 `--warmup 200` + bsize=256
+#:      时首 batch 每条被复制 ~6 份，这正是当初把它绑到 bsize 的原因；现在固定 1440 后
+#:      这个目的自动达成，且不必随 bsize 漂移）。
+#: warmup 期**不进行任何网络更新**（`BiasInitTracker` 运行期断言）。
+WARMUP_STEPS = 1440
+#: **旧口径**（与 `--bsize` 挂钩）的系数，仅供复现：`--warmup_bsize_mult 4` ⇒ `4 × bsize`。
+#: 默认 0.0 = 不挂钩（走 `WARMUP_STEPS`）。
+WARMUP_BSIZE_MULT = 0.0
 
 # ---------------------------------------------------------------- 偏航带（yawflor 专用）
 # `yawflor`（FLORIS 引擎）的动作是**无量纲偏航指令** `n ∈ [−1, 1]`，env 内 `γ = 25°·n`
@@ -395,10 +403,10 @@ def add_warmup_args(parser, yaw=False):
         h_lo = 'warmup 风机动作 clip 下界 (默认 0.05)'
         h_hi = 'warmup 风机动作 clip 上界 (默认 0.45)'
     parser.add_argument('--warmup_bsize_mult', default=WARMUP_BSIZE_MULT, type=float,
-                        help='warmup 时长 = 该系数 × --bsize（默认 %.1f；仅当未显式传 '
-                             '--warmup 时生效）。warmup 期**不进行任何网络更新**'
-                             '（由 BiasInitTracker 断言）。要复现历史口径请显式传 '
-                             '--warmup 200' % WARMUP_BSIZE_MULT)
+                        help='**旧口径**（与 --bsize 挂钩）：>0 时 warmup = 该系数 × --bsize '
+                             '（如 4 ⇒ bsize=256 时 1024 步）。默认 %.1f = **不挂钩**，'
+                             '走固定 %d 步（一个 episode/一天）。仅当未显式传 --warmup 时生效。'
+                             % (WARMUP_BSIZE_MULT, WARMUP_STEPS))
     parser.add_argument('--warmup_sched', default='fixed', choices=['fixed', 'random'],
                         help=sched_help)
     parser.add_argument('--warmup_wt_start', default=d_start, type=float, help=h_start)
@@ -575,33 +583,43 @@ def build_from_args(args, agent_H, agent_L=None):
 def resolve_warmup(args, verbose=True):
     """把 `args.warmup` 解析成**步数**并打印口径；返回 args（就地改写）。
 
-    口径（**正式方法统一**）：
-      * 未显式传 `--warmup`（默认 None）⇒ `warmup = warmup_bsize_mult × bsize`
-        （默认系数 4 ⇒ bsize=256 时 1024 步、bsize=64 时 256 步）。
-      * 显式传 `--warmup N` ⇒ **尊重 N**（复现历史 run 用 `--warmup 200`）。
-      * warmup 期**零网络更新**：由 `BiasInitTracker.on_block_end` 在运行期断言
+    口径（**正式方法统一**，2026-10-08 起 **不再与 `--bsize` 挂钩**）：
+      * 未显式传 `--warmup`（默认 None）⇒ `warmup = WARMUP_STEPS = 1440` 步
+        （= 一个完整 episode/一天）。
+      * `--warmup_bsize_mult > 0` ⇒ 走**旧口径** `mult × bsize`（默认 0.0 = 不挂钩）。
+      * 显式传 `--warmup N` ⇒ **尊重 N**（最高优先）。
+        复现历史 run：`--warmup 200`；复现"绑 bsize"的旧正式口径：`--warmup_bsize_mult 4`。
+      * warmup 期**零网络更新**：由 `BiasInitTracker.on_block_end` 运行期断言
         （`agent.update_count` 必须仍为 0），并在触发点打印证明。
 
-    为什么把 warmup 与 bsize 绑定：首个 minibatch 是按 `bsize` 抽的，warmup 太短
-    ⇒ 缓冲里条目少于一个 batch ⇒ **同一条 transition 被复制多份**（H 层每 5 步才产
-    1 条 transition：`--warmup 200` 时 H 缓冲仅 40 条，而 bsize=256 ⇒ 首 batch 里
-    每条被复制 ~6 份）。绑到 4×bsize 后 H 缓冲 ≈ 4·bsize/5 条、L 缓冲 = 4·bsize 条。
+    为什么固定 1440：① 覆盖完整电价三档 × 风况日循环 ⇒ warmup 的 (s,a) 分布与策略期同分布；
+    ② H 层每 5 步产 1 条 transition ⇒ 缓冲 288 条 ≥ bsize(256) ⇒ **首个 minibatch 不再复制
+    同一条 transition**（当初把 warmup 绑到 bsize 就是为了这个目的，现在固定长度后自动达成）。
     """
     bsize = int(getattr(args, 'bsize', 0) or 0)
     mult = float(getattr(args, 'warmup_bsize_mult', WARMUP_BSIZE_MULT) or 0.0)
     given = getattr(args, 'warmup', None)
-    auto = int(round(mult * max(bsize, 0)))
+    auto_bsize = int(round(mult * max(bsize, 0)))
     if given is None:
-        args.warmup = auto
-        src = 'bsize×%.1f（默认）' % mult
+        if mult > 0:
+            args.warmup = auto_bsize
+            src = 'bsize×%.1f（**旧口径**, --warmup_bsize_mult>0）' % mult
+        else:
+            args.warmup = int(WARMUP_STEPS)
+            src = ('固定 %d 步 = 一个 episode/一天（**不与 --bsize 挂钩**）'
+                   % int(WARMUP_STEPS))
     else:
         args.warmup = int(given)
-        src = '显式 --warmup %d（覆盖 bsize×%.1f=%d）' % (args.warmup, mult, auto)
+        src = '显式 --warmup %d' % args.warmup
     if args.warmup < 0:
         raise ValueError('warmup 不能为负: %r' % (args.warmup,))
     if verbose:
         n_h = args.warmup // 5      # H 层每 5 个环境步产 1 条 transition
+        warn = ''
+        if bsize > 0 and n_h < bsize:
+            warn = ('  ⚠ H 缓冲仅 %d 条 < bsize %d ⇒ 首个 minibatch 会复制同一条 transition'
+                    % (n_h, bsize))
         print('[warmup] 时长 = {} 步  ← {}  (--bsize={} ⇒ 首个 batch 前缓冲: '
-              'H≈{} 条 / L={} 条) | warmup 期**零网络更新**（运行期断言）'.format(
-                  args.warmup, src, bsize, n_h, args.warmup))
+              'H≈{} 条 / L={} 条){} | warmup 期**零网络更新**（运行期断言）'.format(
+                  args.warmup, src, bsize, n_h, args.warmup, warn))
     return args
