@@ -183,8 +183,8 @@ for k in ALL6:
     check("'--bsize', default=%d" % BSIZE_DEFAULT in src
           and 'default=%d,' % RMSIZE_DEFAULT in src,
           '%s: --bsize %d / --rmsize %d' % (k, BSIZE_DEFAULT, RMSIZE_DEFAULT))
-    check("'--nstep', default=10" in src and "'--target_agg', default='min'" in src,
-          '%s: --nstep 默认 10 / --target_agg 默认 min' % k)
+    check("'--nstep', default=5" in src and "'--target_agg', default='min'" in src,
+          '%s: --nstep 默认 5 / --target_agg 默认 min' % k)
     check('nstep=args.nstep, target_agg=args.target_agg' in src,
           '%s: H 层构造接线 nstep/target_agg' % k)
 for k in UNIFORM:
