@@ -177,8 +177,12 @@ def train_prrbb(num_iterations_H,
                 _w_obs = rbb_system.compute_pbrule(
                     pb_original=0.0, ptur=float(pw_tru),
                     pg_prev=float(observation[-1]), E=float(observation[2]))[1]
+                # price 臂: 下层价格条件随机充放 (300 充 / 580 不动 / 980 放)
+                _x_warm = (float(observation[0])
+                          if getattr(warmup_rule, 'is_price', False)
+                          else float(observation[2]))
                 applied_action_L = original_action_L = warmup_rule.action(
-                    float(observation[2]), _w_obs["pbrulemin"], _w_obs["pbrulemax"])
+                    _x_warm, _w_obs["pbrulemin"], _w_obs["pbrulemax"])
             else:                                   # 对照臂 (--warmup_bess random)
                 applied_action_L = original_action_L = agent_L.random_action()
             penalty_NN_L = 0

@@ -55,11 +55,17 @@ HSRL warmup 期调度助手（多项目共享）
 import numpy as np
 
 # ---------------------------------------------------------------- 默认参数
-WT_START = 1.0 / 3       # 单机 Cp 最优点 (= 1/3; 只讲单机物理, 不预设风场最优形状)
+WT_START = 0.2           # ⚠ 起点由 1/3（单机 Cp 峰）改为 0.2：**warmup 不需要往最优方向带**
+# 附带好处：0.2 正好落在 step=0.05 的整数格上 ⇒ 可达集就是 {0.05,0.10,...,0.45} 这 9 个整格点。
+# 旧起点 1/3 = 0.3333 不是 0.05 的整数倍 ⇒ 整个格点偏移（实测只能踩到 0.0833/0.1333/…），
+# 见 `agentutil/probe_warmup_coverage.py`。
 WT_STEP = 0.05           # 每块每维 ±0.05
 WT_LO, WT_HI = 0.05, 0.45   # 中性宽带: 只排除停机悬崖(a<0.05)与低效高区(a>0.45)
 SIG_VALUE = 0.0          # 第 6 维: SOC 目标语义→target=3; 影子电价语义→中性 0
 SOC_TARGET = 3.0         # warmup 期下层规则跟踪的目标 (MWh)
+#: **episode 起始 SOC**（正式口径 = 固定 3.0 MWh）。旧口径每 episode 从 U[0.5,5.5] 随机，
+#: 让前若干块的收益/退化都花在"把 SOC 拉到中性"上并引入与策略无关的方差；见 `--soc_reset_*`。
+SOC_START = 3.0
 ETA_C = ETA_D = 0.98
 DT = 1.0 / 60.0
 RATED_POWER = 10.0
@@ -201,6 +207,68 @@ class WarmupBessRule:
         return np.array([self.act(E, pbrulemin, pbrulemax, soc_target)])
 
 
+# ---------------------------------------------------------------- 价格条件随机规则
+#: warmup 期"价格条件随机充放"的幅度区间 (MW) 与三档电价 (元/MWh)
+WARMUP_BESS_LO, WARMUP_BESS_HI = 0.3, 0.5
+PRICE_LOW, PRICE_MID, PRICE_HIGH = 300.0, 580.0, 980.0
+
+
+class WarmupBessPriceRule:
+    """warmup 期下层 BESS 的**价格条件随机**行为（探索用；不再追踪 SOC 目标）。
+
+    规格（用户口径，2026-10-08）::
+
+        电价 300 (低谷) ⇒ 随机充电  +U(0.3, 0.5) MW
+        电价 580 (平峰) ⇒ 不动       0
+        电价 980 (高峰) ⇒ 随机放电  −U(0.3, 0.5) MW
+
+    方向约定与本仓库一致：**正 = 充电**（同 `WarmupBessRule.act`）。命令最后夹进 RBB 可行
+    窗口 `[pbrulemin, pbrulemax]` —— "L 层逻辑不变"：窗口/物理限幅/r2 通道/入池口径全部沿用；
+    窗口不可行 (min > max) 时返回未夹的原始值，交 RBB 兜底（与 `WarmupBessRule` 同处理）。
+
+    动机：旧口径 warmup 期下层是"确定性追 SOC=3"，r2/c2 恒 ≈0，**下层行为空间没有任何探索**；
+    价格条件随机充放让 L 的 buffer 里出现"低充高放/平峰不动"的真实代价与收益结构。
+
+    ⚠ 本规则**有意打破** "Δ≡0 稳定到规则" 那条旧不变量（warmup 下层会主动偏离规则基线），
+    因此 `check_residual_baseline` 对它改走**行为自检**而非"与基线逐位相同"的断言；
+    要复现旧行为请用 `--warmup_bess rule`。
+    """
+
+    is_price = True
+
+    def __init__(self, lo=WARMUP_BESS_LO, hi=WARMUP_BESS_HI, seed=None):
+        self.lo, self.hi = float(lo), float(hi)
+        if self.lo > self.hi:
+            self.lo, self.hi = self.hi, self.lo
+        self.rng = np.random.RandomState(seed if seed is not None and seed > 0 else None)
+        self.n_charge = self.n_discharge = self.n_idle = 0
+
+    def act(self, price, pbrulemin, pbrulemax):
+        """返回本步 BESS 功率指令 (MW, **正=充电**)。"""
+        p = float(price)
+        if p <= PRICE_LOW + 1e-6:
+            pb = self.rng.uniform(self.lo, self.hi)          # 低谷: 随机充电
+            self.n_charge += 1
+        elif p >= PRICE_HIGH - 1e-6:
+            pb = -self.rng.uniform(self.lo, self.hi)         # 高峰: 随机放电
+            self.n_discharge += 1
+        else:
+            pb = 0.0                                         # 平峰: 不动
+            self.n_idle += 1
+        if pbrulemin > pbrulemax:
+            return float(pb)
+        return float(np.clip(pb, pbrulemin, pbrulemax))
+
+    def action(self, price, pbrulemin, pbrulemax):
+        """同上，返回长度为 1 的数组。"""
+        return np.array([self.act(price, pbrulemin, pbrulemax)])
+
+    def summary(self):
+        return ('[warmup-bess] 价格条件随机充放: 充电 {} 步 / 放电 {} 步 / 不动 {} 步，'
+                '幅度 U({:.2f},{:.2f}) MW'.format(self.n_charge, self.n_discharge,
+                                                  self.n_idle, self.lo, self.hi))
+
+
 # =============================================================================
 # 3. BESS-RL 项目的 transition "事后填入"
 # =============================================================================
@@ -337,12 +405,60 @@ def add_warmup_args(parser, yaw=False):
     parser.add_argument('--warmup_wt_step', default=d_step, type=float, help=h_step)
     parser.add_argument('--warmup_wt_lo', default=d_lo, type=float, help=h_lo)
     parser.add_argument('--warmup_wt_hi', default=d_hi, type=float, help=h_hi)
-    parser.add_argument('--warmup_bess', default='rule', choices=['rule', 'random'],
-                        help='BESS-RL 项目 warmup 期下层行为: rule=RBB窗口+SOC目标跟踪'
-                             ' (规则行为体, 无随机); random=旧的 agent_L.random_action()')
+    parser.add_argument('--warmup_bess', default='price',
+                        choices=['price', 'rule', 'random'],
+                        help='BESS-RL 项目 warmup 期下层行为（**正式口径 = price**）: '
+                             'price=价格条件随机充放 (300 充 +U(0.3,0.5) / 580 不动 / '
+                             '980 放 −U(0.3,0.5)，再夹 RBB 窗口); '
+                             'rule=旧的确定性 SOC 目标跟踪 (Δ≡0, 下层零探索); '
+                             'random=更旧的 agent_L.random_action()')
+    parser.add_argument('--warmup_bess_lo', default=WARMUP_BESS_LO, type=float,
+                        help='价格条件随机充放的幅度下界 (MW, 默认 %.2f)' % WARMUP_BESS_LO)
+    parser.add_argument('--warmup_bess_hi', default=WARMUP_BESS_HI, type=float,
+                        help='价格条件随机充放的幅度上界 (MW, 默认 %.2f)' % WARMUP_BESS_HI)
+    # ---- episode 起始 SOC（正式口径：固定 3.0）----
+    # 放在本函数里是因为所有 main 都已调用 `add_warmup_args`（避免再插一行调用点）；
+    # 语义上它属于"warmup/episode 起点"口径：旧口径每 episode 从 U[0.5,5.5] 随机，
+    # 会把前若干块的收益/退化都花在"把 SOC 拉到中性"上，且引入了与策略无关的方差。
+    parser.add_argument('--soc_reset_low', default=SOC_START, type=float,
+                        help='episode 起始 SOC 采样下界 (MWh)。**正式口径 %.1f/%.1f = 固定 %.1f**；'
+                             '要复现旧的"每 episode 从 U[0.5,5.5] 随机"请传 '
+                             '--soc_reset_low 0.5 --soc_reset_high 5.5'
+                             % (SOC_START, SOC_START, SOC_START))
+    parser.add_argument('--soc_reset_high', default=SOC_START, type=float,
+                        help='episode 起始 SOC 采样上界 (MWh, 默认 %.1f)' % SOC_START)
     parser.add_argument('--warmup_soc_target', default=SOC_TARGET, type=float,
                         help='warmup 期规则下层的 SOC 目标 (默认 3.0 MWh)')
     return parser
+
+
+def _check_price_rule(rule, say, n_cases=240, seed=12345):
+    """价格条件随机规则的**行为自检**（替代"与策略期基线逐位相同"的断言）。
+
+    断言：① 300 恒充电、980 恒放电、580 恒为 0；② 幅度落在 [lo, hi] 且**不是常数**；
+          ③ 窗口可行时命令必在窗口内；④ 窗口不可行 (min>max) 时返回未夹的原始值。
+    """
+    ch = np.array([rule.act(PRICE_LOW, -10.0, 10.0) for _ in range(n_cases)])
+    di = np.array([rule.act(PRICE_HIGH, -10.0, 10.0) for _ in range(n_cases)])
+    idl = np.array([rule.act(PRICE_MID, -10.0, 10.0) for _ in range(n_cases)])
+    assert np.all(ch > 0) and np.all(di < 0) and np.all(idl == 0.0), \
+        '价格条件规则方向错: 300 应恒充电 / 980 应恒放电 / 580 应恒为 0'
+    assert ch.min() >= rule.lo - 1e-12 and ch.max() <= rule.hi + 1e-12, '充电幅度越界'
+    assert di.min() >= -rule.hi - 1e-12 and di.max() <= -rule.lo + 1e-12, '放电幅度越界'
+    assert ch.std() > 0.01 and di.std() > 0.01, '幅度是常数（没随机）'
+    for lo, hi in [(-3.0, 3.0), (-0.2, -0.1), (0.1, 0.2), (2.0, 1.0)]:
+        for p in (PRICE_LOW, PRICE_MID, PRICE_HIGH):
+            v = float(rule.act(p, lo, hi))
+            if lo > hi:
+                assert -rule.hi - 1e-12 <= v <= rule.hi + 1e-12, '不可行窗口应返回原始值'
+            else:
+                assert lo - 1e-12 <= v <= hi + 1e-12, \
+                    '命令未夹进窗口: v=%.6f W=[%.3f,%.3f]' % (v, lo, hi)
+    say('[warmup] 价格条件随机充放自检通过: 充电 %+.3f±%.3f / 放电 %+.3f±%.3f / 平峰 %.1f MW'
+        '（每档 n=%d）' % (ch.mean(), ch.std(), di.mean(), di.std(), idl[0], n_cases))
+    return dict(n_checked=3 * n_cases, rule_arm=True, price_rule=True,
+                charge_mean=float(ch.mean()), discharge_mean=float(di.mean()),
+                amp_lo=rule.lo, amp_hi=rule.hi)
 
 
 def check_residual_baseline(warmup_rule, sched, args, baseline_fn,
@@ -379,6 +495,10 @@ def check_residual_baseline(warmup_rule, sched, args, baseline_fn,
         from util import prYellow
     except Exception:                                       # pragma: no cover
         prYellow = print
+    if getattr(warmup_rule, 'is_price', False):
+        # 新口径：warmup 下层**主动偏离**规则基线去探索价格响应 ⇒ 旧的"Δ≡0 与基线逐位相同"
+        # 断言在语义上不再成立，改走行为自检（方向/幅度/窗口）。
+        return _check_price_rule(warmup_rule, prYellow, n_cases=n_cases, seed=seed)
     sched_signal_fixed = bool(getattr(sched, 'enabled', True))
     if warmup_rule is None:                # 对照臂: 绝对随机功率, 与基线无关
         return dict(n_checked=0, target_at_signal0=None,
@@ -417,7 +537,13 @@ def check_residual_baseline(warmup_rule, sched, args, baseline_fn,
 
 
 def build_from_args(args, agent_H, agent_L=None):
-    """按 args 构造 (WarmupSchedule, WarmupBessRule, BessFillStats)。"""
+    """按 args 构造 (WarmupSchedule, warmup 下层规则, BessFillStats)。
+
+    下层规则按 `--warmup_bess` 三选一:
+      * `price`（正式口径）⇒ `WarmupBessPriceRule`（价格条件随机充放，**有探索**）
+      * `rule`            ⇒ `WarmupBessRule`（确定性追 SOC 目标，Δ≡0）
+      * `random`          ⇒ None（更旧的 agent_L.random_action() 对照臂）
+    """
     nb_t = int(getattr(agent_H, 'nb_turbine', 5))
     nb_a = int(getattr(agent_H, 'nb_actions', nb_t + 1))
     sched = WarmupSchedule(
@@ -428,9 +554,17 @@ def build_from_args(args, agent_H, agent_L=None):
         hi=float(getattr(args, 'warmup_wt_hi', WT_HI)),
         seed=int(getattr(args, 'seed', 0) or 0),
         enabled=(getattr(args, 'warmup_sched', 'fixed') != 'random'))
-    rule = (WarmupBessRule(soc_target=float(getattr(args, 'warmup_soc_target', SOC_TARGET)),
-                           time=DT, rated_power=float(getattr(args, 'rbb_rated_power', RATED_POWER)))
-            if getattr(args, 'warmup_bess', 'rule') != 'random' else None)
+    _mode = str(getattr(args, 'warmup_bess', 'price'))
+    if _mode == 'random':
+        rule = None
+    elif _mode == 'price':
+        rule = WarmupBessPriceRule(lo=float(getattr(args, 'warmup_bess_lo', WARMUP_BESS_LO)),
+                                   hi=float(getattr(args, 'warmup_bess_hi', WARMUP_BESS_HI)),
+                                   seed=int(getattr(args, 'seed', 0) or 0))
+    else:
+        rule = WarmupBessRule(soc_target=float(getattr(args, 'warmup_soc_target', SOC_TARGET)),
+                              time=DT,
+                              rated_power=float(getattr(args, 'rbb_rated_power', RATED_POWER)))
     stats = BessFillStats() if agent_L is not None else None
     return sched, rule, stats
 

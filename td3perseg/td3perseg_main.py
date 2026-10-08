@@ -224,8 +224,10 @@ def train(num_iterations_H,
         prYellow('########### step:{} ###########'.format(step))
         if observation is None:
             observation = deepcopy(env.reset())  # [Pr,U,E,P_last]
-            # SOC 随机化: 每个 episode(1440步) 从 U[0.5,5.5] 重新采样
-            reset_E = float(np.random.uniform(0.5, 5.5))
+            # episode 起始 SOC: **正式口径 = 固定 3.0 MWh**
+            #   (旧口径 = 每 episode 从 U[0.5,5.5] 随机 ⇒ 传 --soc_reset_low 0.5 --soc_reset_high 5.5 复现)
+            reset_E = float(np.random.uniform(float(args.soc_reset_low),
+                                              float(args.soc_reset_high)))
             env.E = reset_E
             observation[2] = reset_E
             norm_observation = Normalize_H(observation, phase_minute_of_day(0),
@@ -300,7 +302,16 @@ def train(num_iterations_H,
             time=rbb_system.time, rated_power=rbb_system.rated_power)
         if step <= args.warmup:
             # warmup 期下层 = 规则行为体 (rule 臂: Δ=0, 命令 = 基线)
-            if warmup_rule is not None:
+            if getattr(warmup_rule, 'is_price', False):
+                # 新口径 (--warmup_bess price): 下层价格条件随机充放
+                #   300 低谷随机充电 +U(0.3,0.5) / 580 平峰不动 /
+                #   980 高峰随机放电 −U(0.3,0.5)，再夹进 RBB 可行窗口
+                #   (L 层其余逻辑不变: 残余动作 Δ = cmd − 规则基线)
+                pb_cmd_L = float(warmup_rule.act(float(observation[0]),
+                                                 rbb_info_obs['pbrulemin'],
+                                                 rbb_info_obs['pbrulemax']))
+                delta_L = np.array([pb_cmd_L - float(pb_rule)])
+            elif warmup_rule is not None:
                 delta_L = np.zeros(1, dtype=np.float64)
                 pb_cmd_L = float(pb_rule)
             else:               # 对照臂 (--warmup_bess random): 仍是"绝对随机功率"命令

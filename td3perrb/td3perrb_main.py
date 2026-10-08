@@ -186,8 +186,10 @@ def train(num_iterations_H,
         prYellow('########### step:{} ###########'.format(step))
         if observation is None:
             observation = deepcopy(env.reset())  # [Pr,U,E,P_last]
-            # SOC 随机化: 每个 episode(1440步) 从 U[0.5,5.5] 重新采样
-            reset_E = float(np.random.uniform(0.5, 5.5))
+            # episode 起始 SOC: **正式口径 = 固定 3.0 MWh**
+            #   (旧口径 = 每 episode 从 U[0.5,5.5] 随机 ⇒ 传 --soc_reset_low 0.5 --soc_reset_high 5.5 复现)
+            reset_E = float(np.random.uniform(float(args.soc_reset_low),
+                                              float(args.soc_reset_high)))
             env.E = reset_E
             observation[2] = reset_E
             norm_observation = Normalize_H(observation, phase_minute_of_day(0),
