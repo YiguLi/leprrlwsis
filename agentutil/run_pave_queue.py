@@ -78,24 +78,31 @@ def say(msg):
 
 
 def last_step(tag):
-    """该臂当前推进到第几步（读 update_stats_H.csv 最后一行的 step 列；无则 -1）。"""
-    pat = os.path.join(OUT, '%s-run*' % tag, 'update_stats_H.csv')
-    files = sorted(glob.glob(pat))
-    if not files:
-        return -1
-    step = -1
-    with open(files[0], 'r', encoding='utf-8', errors='replace') as f:
-        for line in f:
-            parts = line.strip().split(',')
-            if len(parts) >= 2 and parts[1].isdigit():
-                step = int(parts[1])
-    return step
+    """该臂当前推进到第几步（读 update_stats_H.csv 最后一行的 step 列；无则 -1）。
+
+    ⚠ 同一 tag 可能有**多个** run 目录（某条被静默终止后补跑就会这样）⇒ 取**步数最大**者，
+    否则幂等判断会被那条残废的 run 永远钉在"未完成"，导致无限重跑。
+    """
+    best = -1
+    for f in glob.glob(os.path.join(OUT, '%s-run*' % tag, 'update_stats_H.csv')):
+        step = -1
+        try:
+            with open(f, 'r', encoding='utf-8', errors='replace') as fh:
+                for line in fh:
+                    parts = line.strip().split(',')
+                    if len(parts) >= 2 and parts[1].isdigit():
+                        step = int(parts[1])
+        except OSError:
+            continue
+        best = max(best, step)
+    return best
 
 
 def run_arm(tag, args):
     """启动一条臂，返回 (Popen, log 路径, t0)。"""
     log = os.path.join(OUT, '_%s.log' % tag)
-    cmd = [PY, os.path.join(ROOT, 'aifflorpave', 'aifflorpave_main.py'),
+    # `-u`（无缓冲）：万一进程被静默终止，日志里也能留下 traceback（本次 NOCURV 就吃过这个亏）
+    cmd = [PY, '-u', os.path.join(ROOT, 'aifflorpave', 'aifflorpave_main.py'),
            '--env', tag, '--max_steps', '30000', '--seed', '101',
            '--hidden1', '16', '--hidden2', '100', '--nstep', '10', '--rate', '0.01'] + args.split()
     env = dict(os.environ)
@@ -152,9 +159,14 @@ def main():
             for p, arm, log, t0, fh in procs:
                 rc = p.wait()
                 fh.close()
-                say('[%d/%d] 结束 %s  exit=%s  wall=%.1fmin  step=%d  log=%s'
+                st = last_step(arm['tag'])
+                note = ''
+                if st < a.target:
+                    note = ('  ⚠ **未跑满**（step=%d < %d）—— 可能被静默终止；'
+                            '重跑本脚本会自动只补这一条（幂等）' % (st, a.target))
+                say('[%d/%d] 结束 %s  exit=%s  观测到时距启动=%.1fmin  step=%d  log=%s%s'
                     % (QUEUE.index(arm) + 1, n, arm['tag'], rc,
-                       (time.time() - t0) / 60.0, last_step(arm['tag']), os.path.basename(log)))
+                       (time.time() - t0) / 60.0, st, os.path.basename(log), note))
         say('队列全部结束')
     finally:
         try:

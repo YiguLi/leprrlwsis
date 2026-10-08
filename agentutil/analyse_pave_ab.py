@@ -45,6 +45,7 @@ LOW = np.array([0.0] * 5 + [-0.5])
 DEFAULT_ACTS = {
     'ABPAVE2-BASE': 'relu', 'ABPAVE2-SILU': 'silu', 'ABPAVE2-PAVE': 'silu',
     'ABPAVE2-VFC': 'relu', 'ABPAVE2-NOCURV': 'silu', 'ABPAVE2-CURV4X': 'silu',
+    'ABPAVE2-CURVONLY': 'silu', 'ABPAVE2-NOVFC': 'silu',
     'ABPAVE2-EVERY4': 'silu', 'ABPAVE2-MPR': 'relu', 'ABPAVE2-RELVFC': 'relu',
     'AB-H16N10': 'relu', 'AB-H64N10': 'relu', 'AB-H256N10': 'relu',
     'AB-H16N1': 'relu', 'AB-H64N1': 'relu',
@@ -61,8 +62,19 @@ def obs_h(o, mode=0, minute=0):
 
 
 def find_run(tag):
+    """该臂的 run 目录。⚠ 同一 tag 可能有**多个** run（例如某条被静默终止后补跑）
+    ⇒ 取**步数最多**的那个（否则会读到那条残废的 run，几何/成绩全错）。"""
     ds = sorted(glob.glob(os.path.join('output', '%s-run*' % tag)))
-    return ds[0] if ds else None
+    if not ds:
+        return None
+
+    def steps(d):
+        f = os.path.join(d, 'update_stats_H.csv')
+        try:
+            return int(pd.read_csv(f).step.iloc[-1])
+        except Exception:
+            return -1
+    return max(ds, key=steps)
 
 
 def load_ckpt(run, ckpt, act='relu'):
