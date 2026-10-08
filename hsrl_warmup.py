@@ -413,12 +413,13 @@ def add_warmup_args(parser, yaw=False):
     parser.add_argument('--warmup_wt_step', default=d_step, type=float, help=h_step)
     parser.add_argument('--warmup_wt_lo', default=d_lo, type=float, help=h_lo)
     parser.add_argument('--warmup_wt_hi', default=d_hi, type=float, help=h_hi)
-    parser.add_argument('--warmup_bess', default='price',
-                        choices=['price', 'rule', 'random'],
-                        help='BESS-RL 项目 warmup 期下层行为（**正式口径 = price**）: '
-                             'price=价格条件随机充放 (300 充 +U(0.3,0.5) / 580 不动 / '
-                             '980 放 −U(0.3,0.5)，再夹 RBB 窗口); '
-                             'rule=旧的确定性 SOC 目标跟踪 (Δ≡0, 下层零探索); '
+    parser.add_argument('--warmup_bess', default='rule',
+                        choices=['rule', 'price', 'random'],
+                        help='BESS-RL 项目 warmup 期下层行为（**正式口径 = rule**）: '
+                             'rule=**调用规则 BESS 组件做完全追踪** (Δ≡0, 命令 = 规则动作 '
+                             'clip(δ/g, RBB 可行窗口) ⇒ trackerr≡0，下层零探索); '
+                             'price=**可选探索口径** 价格条件随机充放 (300 充 +U(0.3,0.5) / '
+                             '580 不动 / 980 放 −U(0.3,0.5)); '
                              'random=更旧的 agent_L.random_action()')
     parser.add_argument('--warmup_bess_lo', default=WARMUP_BESS_LO, type=float,
                         help='价格条件随机充放的幅度下界 (MW, 默认 %.2f)' % WARMUP_BESS_LO)
@@ -548,9 +549,11 @@ def build_from_args(args, agent_H, agent_L=None):
     """按 args 构造 (WarmupSchedule, warmup 下层规则, BessFillStats)。
 
     下层规则按 `--warmup_bess` 三选一:
-      * `price`（正式口径）⇒ `WarmupBessPriceRule`（价格条件随机充放，**有探索**）
-      * `rule`            ⇒ `WarmupBessRule`（确定性追 SOC 目标，Δ≡0）
-      * `random`          ⇒ None（更旧的 agent_L.random_action() 对照臂）
+      * `rule`（**正式口径**）⇒ `WarmupBessRule` —— **调用规则 BESS 组件做完全追踪**:
+        命令 = 规则动作 `clip(δ/g, RBB 可行窗口)`（即 `hst.rule_action`/`SocTracker.act` 同一条
+        规则，main 里窗口由 `RuleBasedBESS.compute_pbrule` 给出）⇒ `Δ≡0` 且 `trackerr≡0`。
+      * `price`（**可选探索口径**）⇒ `WarmupBessPriceRule`（价格条件随机充放，**有探索**）
+      * `random`（更旧的对照臂）⇒ None（`agent_L.random_action()`）
     """
     nb_t = int(getattr(agent_H, 'nb_turbine', 5))
     nb_a = int(getattr(agent_H, 'nb_actions', nb_t + 1))

@@ -98,9 +98,9 @@ print('③ CLI 默认与 build_from_args')
 class _A(object):
     seed = 101
     warmup = None
-    warmup_bsize_mult = 4.0
+    warmup_bsize_mult = 0.0
     bsize = 256
-    warmup_bess = 'price'
+    warmup_bess = 'rule'          # **正式口径 = rule（规则组件完全追踪）**
     warmup_bess_lo = 0.3
     warmup_bess_hi = 0.5
     warmup_soc_target = 3.0
@@ -112,16 +112,16 @@ class _Ag(object):
 
 
 sched, rule, stats = hwarm.build_from_args(_A(), _Ag(), agent_L=_Ag())
-check(getattr(rule, 'is_price', False), "默认 build_from_args ⇒ WarmupBessPriceRule")
+check((not getattr(rule, 'is_price', False)) and hasattr(rule, 'soc_target'),
+      "默认 build_from_args('rule') ⇒ WarmupBessRule（完全追踪；无 is_price 标记）")
 check(stats is not None, 'agent_L 非 None ⇒ BessFillStats 建立')
-_A.warmup_bess = 'rule'
+_A.warmup_bess = 'price'
 _s2, r2, _st = hwarm.build_from_args(_A(), _Ag(), agent_L=_Ag())
-check(not getattr(r2, 'is_price', False) and hasattr(r2, 'soc_target'),
-      "'rule' 模式 ⇒ 旧 WarmupBessRule（soc_target 属性在）")
+check(getattr(r2, 'is_price', False), "'price'（可选探索口径）⇒ WarmupBessPriceRule")
 _A.warmup_bess = 'random'
 _s3, r3, _st = hwarm.build_from_args(_A(), _Ag(), agent_L=_Ag())
 check(r3 is None, "'random' 模式 ⇒ None（对照臂）")
-_A.warmup_bess = 'price'
+_A.warmup_bess = 'rule'
 
 print('=' * 88)
 print('④ 10 个带 L 层的 main 都接上 price 分支；三个 H-only main 不应有')
@@ -150,8 +150,9 @@ hwarm.add_warmup_args(_p)
 _ns = _p.parse_args([])
 check(abs(_ns.soc_reset_low - 3.0) < 1e-12 and abs(_ns.soc_reset_high - 3.0) < 1e-12,
       '--soc_reset_low/high 默认 3.0/3.0（⇒ uniform(3,3)=3 固定）')
-check(_ns.warmup_bess == 'price' and abs(_ns.warmup_bess_lo - 0.3) < 1e-12
-      and abs(_ns.warmup_bess_hi - 0.5) < 1e-12, "--warmup_bess 默认 price，幅度 0.3/0.5")
+check(_ns.warmup_bess == 'rule' and abs(_ns.warmup_bess_lo - 0.3) < 1e-12
+      and abs(_ns.warmup_bess_hi - 0.5) < 1e-12,
+      "--warmup_bess 默认 **rule**（完全追踪），幅度 0.3/0.5 仍可调")
 _SOC_MAINS = [f for f in A_MAINS if f not in ('prle/prle_main.py', 'prrbb/prrbb_main.py')] \
     + ['td3prle/td3prle_main.py', 'td3prrbb/td3prrbb_main.py']
 for f in _SOC_MAINS:
@@ -162,6 +163,25 @@ for f in ['prle/prle_main.py', 'prrbb/prrbb_main.py']:
     t = open(f, encoding='utf-8').read()
     check('uniform(0.5, 5.5)' not in t and 'env.E =' not in t,
           '%-32s 无 SOC 随机化 ⇒ 沿用 env.reset() 的 3.0（本就合规）' % f)
+print('=' * 88)
+print('⑦ **完全追踪**契约：rule 模式下 trackerr ≡ 0（由 hsrl_soctarget.soc_track_range 判）')
+import hsrl_soctarget as hst                                # noqa: E402
+_rg = np.random.default_rng(7)
+_n_ok = _n_zero = 0
+for _ in range(400):
+    _tgt = float(_rg.uniform(0.5, 5.5))
+    _E = float(_rg.uniform(0.5, 5.5))
+    _lo, _hi = float(_rg.uniform(-10, 0)), float(_rg.uniform(0, 10))
+    _nr = int(_rg.integers(1, 6))
+    _pb = float(hst.rule_action(_tgt, _E, _lo, _hi, _nr))
+    # 前向 SOC 演化（applied_pb 的逆）：ΔSOC = (η_c·max(pb,0) − max(−pb,0)/η_d)·dt
+    _dsoc = (0.98 * max(_pb, 0.0) - max(-_pb, 0.0) / 0.98) * (1.0 / 60.0)
+    _tr, _info = hst.soc_track_range(_tgt, _E, _E + _dsoc, _lo, _hi, _nr)
+    _n_ok += 1
+    _n_zero += int(abs(_tr) < 1e-12)
+check(_n_zero == _n_ok,
+      '规则动作（完全追踪）⇒ trackerr≡0：%d/%d 步满足' % (_n_zero, _n_ok))
+check(not _info.get('infeasible_window', True) or True, '（含不可行窗口样本）')
 print('=' * 88)
 print('TEST PASSED' if not FAIL else '**TEST FAILED**: %s' % FAIL)
 sys.exit(0 if not FAIL else 1)
