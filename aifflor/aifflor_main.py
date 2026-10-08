@@ -248,7 +248,10 @@ def train(num_iterations_H,
             sum_c2 = 0     # L 层 5 步块累计成本 (喂 EMA 对偶)
             sum_gap_pen = 0.0
             if step <= args.warmup:
-                _wa = warmup_sched.action()          # None ⇒ 对照臂 (--warmup_sched random)
+                # 传电价 ⇒ 第 6 维(SOC 目标信号)按价格游走(300 上调/580 不动/980 下调);
+                # 下层用规则组件**完全追踪**该目标(Δ≡0 ⇒ trackerr≡0)。
+                # --warmup_sig fixed 可退回"信号恒 0"的旧口径。
+                _wa = warmup_sched.action(float(observation[0]))   # None ⇒ 对照臂 (--warmup_sched random)
                 applied_action_H = original_action_H = (
                     agent_H.random_action() if _wa is None else _wa)
                 penalty_NN_H = 0

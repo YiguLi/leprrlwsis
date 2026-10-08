@@ -61,7 +61,13 @@ WT_START = 0.2           # ⚠ 起点由 1/3（单机 Cp 峰）改为 0.2：**wa
 # 见 `agentutil/probe_warmup_coverage.py`。
 WT_STEP = 0.05           # 每块每维 ±0.05
 WT_LO, WT_HI = 0.05, 0.45   # 中性宽带: 只排除停机悬崖(a<0.05)与低效高区(a>0.45)
-SIG_VALUE = 0.0          # 第 6 维: SOC 目标语义→target=3; 影子电价语义→中性 0
+SIG_VALUE = 0.0          # 第 6 维**起点**: SOC 目标语义→target=3; 影子电价语义→中性 0
+#: **第 6 维（SOC 目标信号）的价格条件游走**（用户口径 2026-10-08）：
+#: 低谷(300) 上调 / 平峰(580) 不动 / 高峰(980) 下调，步幅随机。
+#: 目标语义是 `target = 3 + 5·a6` ⇒ 目标步幅 = 5 × 信号步幅：用户要的 **0.3–0.5 MWh**
+#: 对应信号步幅 **0.06–0.10**；范围 `a6 ∈ [−0.5, 0.5]` ⇔ `target ∈ [0.5, 5.5]`。
+SIG_LO, SIG_HI = -0.5, 0.5
+SIG_STEP_LO, SIG_STEP_HI = 0.06, 0.10
 SOC_TARGET = 3.0         # warmup 期下层规则跟踪的目标 (MWh)
 #: **episode 起始 SOC**（正式口径 = 固定 3.0 MWh）。旧口径每 episode 从 U[0.5,5.5] 随机，
 #: 让前若干块的收益/退化都花在"把 SOC 拉到中性"上并引入与策略无关的方差；见 `--soc_reset_*`。
@@ -136,18 +142,25 @@ class WarmupSchedule:
 
     def __init__(self, nb_turbine, nb_actions=None, start=WT_START, step=WT_STEP,
                  lo=WT_LO, hi=WT_HI, sig_value=SIG_VALUE, seed=None,
-                 enabled=True):
+                 enabled=True, sig_mode='price_walk',
+                 sig_step_lo=SIG_STEP_LO, sig_step_hi=SIG_STEP_HI,
+                 sig_lo=SIG_LO, sig_hi=SIG_HI):
         self.nb_turbine = int(nb_turbine)
         self.nb_actions = int(nb_actions) if nb_actions else None
         self.start, self.step = float(start), float(step)
         self.lo, self.hi = float(lo), float(hi)
         self.sig_value = float(sig_value)
         self.enabled = bool(enabled)
+        #: 第 6 维生成方式: 'price_walk' = 价格条件游走（正式口径）; 'fixed' = 恒 sig_value（旧口径）
+        self.sig_mode = str(sig_mode)
+        self.sig_step_lo, self.sig_step_hi = float(sig_step_lo), float(sig_step_hi)
+        self.sig_lo, self.sig_hi = float(sig_lo), float(sig_hi)
         self.rng = np.random.RandomState(seed if seed is not None and seed > 0 else None)
         self.reset()
 
     def reset(self):
         self._wt = np.full(self.nb_turbine, self.start, dtype=float)
+        self._sig = self.sig_value
         self._first = True
         return self
 
@@ -156,22 +169,44 @@ class WarmupSchedule:
         """当前块的风机动作（只读副本）。"""
         return self._wt.copy()
 
-    def action(self):
-        """返回本块的上层动作；`enabled=False` 时返回 None（调用方走旧随机臂）。"""
+    @property
+    def sig(self):
+        """当前块的第 6 维（SOC 目标信号）取值。"""
+        return float(self._sig)
+
+    def sig_delta(self, price):
+        """本块第 6 维的增量：低谷上调 / 平峰不动 / 高峰下调，幅度随机 ∈ [lo, hi]。"""
+        if self.sig_mode != 'price_walk' or price is None:
+            return 0.0
+        p = float(price)
+        if p <= PRICE_LOW + 1e-6:            # 300 低谷 ⇒ 目标上调（充电方向）
+            return float(self.rng.uniform(self.sig_step_lo, self.sig_step_hi))
+        if p >= PRICE_HIGH - 1e-6:           # 980 高峰 ⇒ 目标下调（放电方向）
+            return -float(self.rng.uniform(self.sig_step_lo, self.sig_step_hi))
+        return 0.0                           # 580 平峰 ⇒ 不动
+
+    def action(self, price=None):
+        """返回本块的上层动作；`enabled=False` 时返回 None（调用方走旧随机臂）。
+
+        `price` 给出时，第 6 维（SOC 目标信号）按价格游走（见 `sig_delta`）；
+        不给（或 `sig_mode='fixed'`）则退化回"信号恒 `sig_value`"的旧口径 ⇒ 老调用点不受影响。
+        """
         if not self.enabled:
             return None
         if self._first:
-            self._first = False                      # 第 0 块 = 起始点 (1/3, 信号 0)
+            self._first = False                      # 第 0 块 = 起点 (start 各维, 信号 sig_value)
         else:
             self._wt = self._wt + self.rng.choice([-self.step, self.step],
                                                   size=self.nb_turbine)
             self._wt = np.clip(self._wt, self.lo, self.hi)
+            self._sig = float(np.clip(self._sig + self.sig_delta(price),
+                                      self.sig_lo, self.sig_hi))
         if self.nb_actions is None:
             return self._wt.copy()
         out = np.empty(self.nb_actions, dtype=float)
         out[:self.nb_turbine] = self._wt
         if self.nb_actions > self.nb_turbine:
-            out[self.nb_turbine:] = self.sig_value
+            out[self.nb_turbine:] = self._sig
         return out
 
 
@@ -413,6 +448,16 @@ def add_warmup_args(parser, yaw=False):
     parser.add_argument('--warmup_wt_step', default=d_step, type=float, help=h_step)
     parser.add_argument('--warmup_wt_lo', default=d_lo, type=float, help=h_lo)
     parser.add_argument('--warmup_wt_hi', default=d_hi, type=float, help=h_hi)
+    parser.add_argument('--warmup_sig', default='price_walk', choices=['price_walk', 'fixed'],
+                        help='warmup 期第 6 维（SOC 目标信号）生成方式（**正式口径 = price_walk**）: '
+                             'price_walk=价格条件游走 (300 上调 / 580 不动 / 980 下调，'
+                             '信号步幅 U(0.06,0.10) ⇒ **目标步幅 U(0.3,0.5) MWh**，'
+                             '范围 a6∈[−0.5,0.5] ⇔ target∈[0.5,5.5]); fixed=恒 0（旧口径）')
+    parser.add_argument('--warmup_sig_step_lo', default=SIG_STEP_LO, type=float,
+                        help='第 6 维随机步幅下界（信号量纲；×5 = MWh 目标步幅，默认 %.2f）'
+                             % SIG_STEP_LO)
+    parser.add_argument('--warmup_sig_step_hi', default=SIG_STEP_HI, type=float,
+                        help='第 6 维随机步幅上界（默认 %.2f ⇒ 目标步幅 0.50 MWh）' % SIG_STEP_HI)
     parser.add_argument('--warmup_bess', default='rule',
                         choices=['rule', 'price', 'random'],
                         help='BESS-RL 项目 warmup 期下层行为（**正式口径 = rule**）: '
@@ -564,7 +609,10 @@ def build_from_args(args, agent_H, agent_L=None):
         lo=float(getattr(args, 'warmup_wt_lo', WT_LO)),
         hi=float(getattr(args, 'warmup_wt_hi', WT_HI)),
         seed=int(getattr(args, 'seed', 0) or 0),
-        enabled=(getattr(args, 'warmup_sched', 'fixed') != 'random'))
+        enabled=(getattr(args, 'warmup_sched', 'fixed') != 'random'),
+        sig_mode=str(getattr(args, 'warmup_sig', 'price_walk')),
+        sig_step_lo=float(getattr(args, 'warmup_sig_step_lo', SIG_STEP_LO)),
+        sig_step_hi=float(getattr(args, 'warmup_sig_step_hi', SIG_STEP_HI)))
     _mode = str(getattr(args, 'warmup_bess', 'price'))
     if _mode == 'random':
         rule = None

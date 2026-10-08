@@ -69,7 +69,18 @@
 ## §4 本轮已自动执行（无需决策，仅供核对）
 
 1. **正式口径改动 `5fea0dd` → `afca26b` → 本次**：warmup 时长 = **固定 1440 步（= 一个完整 episode/一天），不再与 `--bsize` 挂钩**（旧口径 `--bsize×4` 由 `--warmup_bsize_mult 4` 复现；`--warmup 200` 复现更早的历史）。**warmup 期零更新**升级为运行期断言（`BiasInitTracker` 逐块检查 `update_count==0` 并在触发点打印证明）。测试 `test_warmup_bsize_uniform.py` 全 PASS；`port_warmup_bsize.py --check` 12/12 往返可逆；`rbb` 因无共享 warmup 基建而排除。
-6. **warmup 行为重设计 `afca26b` → `497f9d5` → 本次**（用户口径）：① 风机起点 1/3 → **0.2**（范围仍 `[0.05,0.45]`、步长 0.05 ⇒ 可达集变成 9 个**整格点**，旧起点的格点偏移被修掉）；② episode 起始 SOC 由 `U[0.5,5.5]` 随机 → **固定 3.0**（`--soc_reset_low/high` 默认 3/3，传 0.5/5.5 复现旧口径）；③ warmup 时长 = **固定 1440 步（一个 episode/一天）**，**与 `--bsize` 解耦**（旧 `bsize×4` 用 `--warmup_bsize_mult 4` 复现）；④ 下层 warmup **正式口径 = `--warmup_bess rule`**：**调用规则 BESS 组件做完全追踪**（`Δ≡0`、命令 = 规则动作 `clip(δ/g, RBB 可行窗口)` ⇒ **`trackerr ≡ 0`**，实测 warmup 段 1441 步 `|Δ|` 最大 0 / `cmd==rule` 100% / `clip_amount` 最大 0）；`--warmup_bess price`（价格条件随机充放：300 充 +U(0.3,0.5) / 580 不动 / 980 放 −U(0.3,0.5)）**降级为可选的探索型对照口径**；`random` 为更旧的对照臂。派生：`port_warmup_bess_price.py`（9 main）+ `port_soc_start.py`（10 处），均 `--check` 可逆；`aifflorpave` 由 aifflor 重新派生。
+6. **warmup 行为重设计 `afca26b` → `497f9d5` → 本次**（用户口径）：① 风机起点 1/3 → **0.2**（范围仍 `[0.05,0.45]`、步长 0.05 ⇒ 可达集变成 9 个**整格点**，旧起点的格点偏移被修掉）；② episode 起始 SOC 由 `U[0.5,5.5]` 随机 → **固定 3.0**（`--soc_reset_low/high` 默认 3/3，传 0.5/5.5 复现旧口径）；③ warmup 时长 = **固定 1440 步（一个 episode/一天）**，**与 `--bsize` 解耦**（旧 `bsize×4` 用 `--warmup_bsize_mult 4` 复现）；④ **SOC 目标（soctarget）生成逻辑 = 电价条件随机游走**（用户口径修正版）：`WarmupSchedule.action(price)`
+   的第 6 维 300 低谷 **上调** / 580 平峰 **不动** / 980 高峰 **下调**，步幅随机 ∈ `[0.06, 0.10]`
+   （信号量纲；因 `target = 3 + 5·a6` ⇒ **目标步幅 0.30–0.50 MWh**），范围 `a6∈[−0.5,0.5] ⇔ target∈[0.5,5.5] MWh`；
+   起点 `a6=0 ⇒ target=3.0`（与"起始 SOC=3"对齐）。实测：目标随电价单调上/下调、`target≡3+5a6`、SOC 轨迹 0.43–5.51。
+⑤ **下层 = 调用规则 BESS 组件做完全追踪**（`--warmup_bess rule`，正式口径）：`Δ≡0`、命令 = 规则动作
+   `clip(δ/g, RBB 可行窗口)`（窗口由 main 既有的 `RuleBasedBESS.compute_pbrule` 给出）⇒ **`trackerr ≡ 0`**
+   （实测 warmup 段 1441 步 `|Δ|` 最大 0 / `cmd==rule` 100% / `clip_amount` 最大 0）。
+   * 注：`|SOC − target|` 仍可 >0（实测最大 2.45 MWh）—— 那是 **RBB 平抑窗口/物理限幅**在起作用（r2 通道），
+     按 `hsrl_soctarget` 的口径 `trackerr` 用的是"窗口可行参考集 F = B ∩ W"，规则动作落在 F 的端点 ⇒ 仍为 0。
+   * `--warmup_bess price`（把随机充放直接压在**下层功率指令**上）保留为**可选对照口径**；
+     `--warmup_sig fixed` 可退回"信号恒 0"的旧目标口径。派生：`port_warmup_sig_walk.py`（12 main，传电价）
+     + `port_warmup_bess_price.py`（9 main）+ `port_soc_start.py`（10 处），均 `--check` 可逆；`aifflorpave` 由 aifflor 重新派生。
    * ⚠ **"完全追踪"的判据已写成契约**：`agentutil/test_warmup_redesign.py` §⑦ 用 `hsrl_soctarget.soc_track_range` 在 400 组随机 (目标/SOC/窗口/剩余步) 上验证 **`trackerr ≡ 0`（400/400）** —— 这就是"规则动作 = 完全追踪"的机器可读证明（`hsrl_soctarget.py:61` 的文档论断）。
    * ⚠ **实测副作用（需知情）**：warmup r̄ 与 critic 的价值基线先验随口径大幅变化 —— 旧 rule 臂（1024 步）r̄=73.4/b_p=1468 → price 臂（1024 步）r̄=57.3/b_p=1145 → price 臂（1440 步）r̄=194.7/b_p=3894 → **rule 臂（1440 步，本次正式口径）r̄=201.4/b_p=4027.6**（跨完整电价日循环后套利真正兑现）。**新旧 run 因此不可比**。
    * ⚠ 另一现象（仅在 `price` 探索口径下出现）：SOC 充满后 RBB 窗口把充电夹成 0（低谷步里约 52% 落在窗口边界）；`rule` 口径不存在该现象（完全追踪）。

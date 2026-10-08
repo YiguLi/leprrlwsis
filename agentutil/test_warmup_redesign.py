@@ -183,5 +183,55 @@ check(_n_zero == _n_ok,
       '规则动作（完全追踪）⇒ trackerr≡0：%d/%d 步满足' % (_n_zero, _n_ok))
 check(not _info.get('infeasible_window', True) or True, '（含不可行窗口样本）')
 print('=' * 88)
+print('⑧ SOC 目标生成 = 价格条件游走（300 上调 / 580 不动 / 980 下调；信号步幅 0.06–0.10'
+      ' ⇔ 目标步幅 0.3–0.5 MWh，a6∈[−0.5,0.5] ⇔ target∈[0.5,5.5]）')
+s8 = hwarm.WarmupSchedule(nb_turbine=5, nb_actions=6, seed=101, sig_mode='price_walk')
+a0 = s8.action(300.0)
+check(abs(a0[5]) < 1e-12, '首块信号 = 0（目标 = 3.0，完全追踪的锚点）')
+ups = [s8.action(300.0)[5] for _ in range(20)]
+check(all(b >= a - 1e-12 for a, b in zip(ups, ups[1:])) and ups[-1] > 0,
+      '300 连续 ⇒ 信号单调上调（末值 %+.3f）' % ups[-1])
+_d = np.diff(np.array([0.0] + ups))
+check(np.all(_d <= 0.10 + 1e-12), '单步 ≤ 0.10（= 目标 ≤ 0.5 MWh）')
+_mid = s8.action(580.0)[5]
+check(abs(_mid - ups[-1]) < 1e-12, '580 ⇒ 不动（信号不变）')
+_dns = [s8.action(980.0)[5] for _ in range(6)]
+check(all(b <= a + 1e-12 for a, b in zip([_mid] + _dns, _dns)) and _dns[-1] < _mid,
+      '980 ⇒ 信号下调（末值 %+.3f）' % _dns[-1])
+check(all(hwarm.SIG_LO - 1e-12 <= v <= hwarm.SIG_HI + 1e-12 for v in ups + _dns),
+      '信号恒在 [−0.5, 0.5]（⇔ 目标恒在 [0.5, 5.5] MWh）')
+s9 = hwarm.WarmupSchedule(nb_turbine=5, nb_actions=6, seed=202, sig_mode='price_walk')
+_raw = np.array([s9.sig_delta(300.0) for _ in range(400)])
+check(_raw.min() >= 0.06 - 1e-9 and _raw.max() <= 0.10 + 1e-9,
+      '**原始**信号步幅 ∈ [0.06, 0.10]（实测 %.4f–%.4f ⇒ 目标 %.2f–%.2f MWh）'
+      % (_raw.min(), _raw.max(), 5 * _raw.min(), 5 * _raw.max()))
+check(abs(s9.sig_delta(580.0)) < 1e-12, '580 ⇒ 原始步幅 = 0（不动）')
+check(s9.sig_delta(980.0) <= -0.06 + 1e-9, '980 ⇒ 原始步幅 ∈ [−0.10, −0.06]（实测 %.4f）'
+      % s9.sig_delta(980.0))
+_vals = np.array([s9.action(300.0)[5] for _ in range(300)])
+_obs = np.diff(_vals)
+check(np.all(_obs <= 0.10 + 1e-12) and np.all(_obs >= -1e-12),
+      '观测步幅恒 ≤ 0.10（撞 0.5 上界时被裁剪，只会更小）')
+check(np.any(_obs >= 0.06 - 1e-9), '存在未被裁剪的观测步幅（≥ 0.06）')
+s10 = hwarm.WarmupSchedule(nb_turbine=5, nb_actions=6, seed=1, sig_mode='fixed')
+check(all(abs(s10.action(300.0)[5]) < 1e-12 for _ in range(30)),
+      "sig_mode='fixed' ⇒ 信号恒 0（旧口径）")
+s11 = hwarm.WarmupSchedule(nb_turbine=5, nb_actions=6, seed=3, sig_mode='price_walk')
+check(all(abs(s11.action()[5]) < 1e-12 for _ in range(10)),
+      'action() 不传 price ⇒ 信号恒 0（老调用点向后兼容）')
+check(_ns.warmup_sig == 'price_walk', '--warmup_sig 默认 price_walk')
+check(abs(_ns.warmup_sig_step_lo - 0.06) < 1e-12 and abs(_ns.warmup_sig_step_hi - 0.10) < 1e-12,
+      '--warmup_sig_step_lo/hi 默认 0.06/0.10')
+_SIG_MAINS = ['aifflor/aifflor_main.py', 'aifflorpave/aifflorpave_main.py',
+              'singleaif/singleaif_main.py', 'td3per/td3per_main.py',
+              'td3perrb/td3perrb_main.py', 'td3perseg/td3perseg_main.py',
+              'td3prle/td3prle_main.py', 'td3prrbb/td3prrbb_main.py',
+              'td3prrlrb/td3prrlrb_main.py', 'td3leprrlrb/td3leprrlrb_main.py',
+              'yawflor/yawflor_main.py', 'prle/prle_main.py', 'prrbb/prrbb_main.py']
+for _f in _SIG_MAINS:
+    _t = open(_f, encoding='utf-8').read()
+    check('warmup_sched.action(float(observation[0]))' in _t,
+          '%-32s 把电价传给 sched.action' % _f)
+print('=' * 88)
 print('TEST PASSED' if not FAIL else '**TEST FAILED**: %s' % FAIL)
 sys.exit(0 if not FAIL else 1)
