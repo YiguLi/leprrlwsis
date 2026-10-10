@@ -202,7 +202,7 @@ class PDO_DDPG(object):
         # action += self.is_training * max(self.epsilon,0) * self.random_process.sample()
         action += self.is_training * max(self.epsilon,0) * ((np.random.random(10)-0.5)/10)[0] # noise [0.0, 1.0)
 
-        if decay_epsilon:
+        if decay_epsilon and self.is_training:   # 评测(is_training=False) 不消耗 ε 预算
             self.epsilon -= self.depsilon
 
         self.a_t = action

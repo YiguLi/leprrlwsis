@@ -586,7 +586,7 @@ class SP_TD3(object):
             amp = self.explore_amp * eps + self.explore_floor * (1.0 - eps)
             action = action + (np.random.random(self.nb_actions) - 0.5) * 2.0 * amp
 
-        if decay_epsilon:
+        if decay_epsilon and self.is_training:   # 评测(is_training=False) 不消耗 ε 预算
             self.epsilon -= self.depsilon
 
         self.a_t = action

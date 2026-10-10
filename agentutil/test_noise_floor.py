@@ -114,7 +114,27 @@ def main():
           % np.array2string(hw1, precision=4))
     ok_wt = bool(np.all(np.abs(hw0 - 0.05) < 0.004) and np.all(np.abs(hw1 - 0.05) < 0.004))
     print('  ⇒ WT 维恒为 0.05（ε=0 与 ε=1 一致）: %s' % ('OK' if ok_wt else '**FAIL**'))
-    return 0 if ok_wt else 1
+
+    # ---- 契约: 评测口径 (is_training=False) 不得消耗 ε 预算 ----
+    #   动机: nine_case_test 只置 is_training=False 而用默认 decay_epsilon=True,
+    #   历史实现把 `if decay_epsilon: epsilon -= depsilon` 放在 is_training 之外 ⇒
+    #   每次 in-training 评测(每 480 步, 每次 9 次 H 决策)都在偷训练预算
+    #   (run96 实测 170×9 = 1530 次 = 预算的 38%, ε 提前 8% 到地板)。
+    ag.is_training = False
+    ag.epsilon = 1.0
+    for _ in range(45):
+        ag.select_action(s)
+    ok_eval = bool(ag.epsilon == 1.0)
+    print('  is_training=False 调 45 次后 ε = %.6f (须仍为 1.0): %s'
+          % (ag.epsilon, 'OK' if ok_eval else '**FAIL**'))
+    ag.is_training = True
+    ag.epsilon = 1.0
+    for _ in range(45):
+        ag.select_action(s)
+    ok_train = bool(abs(ag.epsilon - (1.0 - 45.0 / 4000.0)) < 1e-12)
+    print('  对照: is_training=True 调 45 次后 ε = %.6f (须扣 45/4000): %s'
+          % (ag.epsilon, 'OK' if ok_train else '**FAIL**'))
+    return 0 if (ok_wt and ok_eval and ok_train) else 1
 
 
 if __name__ == '__main__':
