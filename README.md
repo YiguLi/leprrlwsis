@@ -298,6 +298,7 @@ python td3leprrlrb/td3leprrlrb_main.py    # 需配置 LLM
 | `--epsilon` | 4000 | 探索 ε 从 1 衰减到 0 的**决策次数**（× 5 = 环境步数） |
 | `--rbb_fluctuation_limit` | 3.0 | RBB 波动限值（MW） |
 | `--rbb_rated_power` | 10.0 | RBB 额定功率（MW） |
+| `--nolow` | **关闭** | **nolow 分支**（仅 td3per / td3perseg 有）：取消 H 层**第 6 维 SOC 目标信号** ⇒ H 动作 = **5 维**风机动作；BESS **只做波动平抑**，功率取平抑可行窗口内**"放电最小"= 最靠充电端**（`pbrulemax`，见 `rbb_rule_bess.compute_pbrule_min_discharge`）；**下层 RL 完全旁路**（BESS 全部由规则决定：不构造 L 命令、不更新 L、`r2≡c2≡0`、L 网络不落盘）；SOC 目标相关的 **gap 罚恒 0**。记录名同步带后缀：`RUN_TAG=td3pernolow` / `--env TD3PERNOLOW` ⇒ `output/TD3PERNOLOW-runNN` + `df_td3pernolow.csv`（td3perseg 同理 ⇒ `TD3PERSEGNOLOW`）。H 网络因此存成 `actor_5.pkl`（历史 run 是 `actor_6.pkl`）⇒ **`test_five_days.py` 尚不支持该分支**（见文末待办），run 内 test9（`nine_case_test(nolow=True)`）已支持 |
 
 ---
 

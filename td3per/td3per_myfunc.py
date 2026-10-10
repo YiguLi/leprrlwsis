@@ -345,7 +345,8 @@ L_CLIP_COEF = hst.L_CLIP_COEF      # 单一真源 hsrl_soctarget
 L_SOC_COEF = hst.L_TRACK_COEF      # 单一真源 (新口径: MW)
 
 
-def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info, n_rem=None):
+def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info, n_rem=None,
+                          soc_signal=None):
     """下层观测 (5 维) —— **规则的原配料** (单一真源 hsrl_soctarget.build_L_obs):
 
         [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
@@ -359,10 +360,13 @@ def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info, n_rem
 
     `n_rem` = 含当前步的块内剩余步数 (5 - step %% 5) —— **必填**。
     `rbb_info` 仅为与其它项目同名函数保持签名一致 (本函数不再使用)。
+    `soc_signal` = **nolow 分支专用**: 上层不再有第 6 维时, 此处显式给出信号值
+    (nolow 传 0.0)。为 None 时退回旧口径 `applied_action_H[-1]` ⇒ 历史行为逐位不变。
     """
     if n_rem is None:
         raise ValueError('build_L_obs_distilled: 需要 n_rem (块内剩余步数 = 5 - step mod 5)')
-    soc_target = soc_target_from_signal(applied_action_H[-1])
+    soc_target = soc_target_from_signal(
+        float(applied_action_H[-1]) if soc_signal is None else float(soc_signal))
     return hst.build_L_obs(float(observation[-1]), float(pw_tru),
                            float(observation[2]), soc_target, n_rem)
 
@@ -584,7 +588,8 @@ except ImportError:
 SOC_SETTLE_PR = float(hc.PR_REF)
 def nine_case_test(agent_H, agent_L, env_test, rbb_system,
                    scenario=None, test_csv=False, output=None, seed=None,
-                   phase_mode=0, phase_table=None, viol_derate_coef=None):
+                   phase_mode=0, phase_table=None, viol_derate_coef=None,
+                   nolow=False):
     """
     TD3PER 45-step 9-case in-training test (上层 = 非分段 SOC 目标信号, 下层 = RL).
 
@@ -612,7 +617,8 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
     norm_obs = Normalize_H(obs, _pminute[0], phase_mode, phase_table)
     time = 1.0 / 60
     agent_H.is_training = False
-    agent_L.is_training = False
+    if agent_L is not None:
+        agent_L.is_training = False
     step = 0
     num_iterations = len(wind_seq)
     n_per_case = num_iterations // len(blocks)
@@ -633,7 +639,10 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
             # 越界乘性系数 (与训练同口径; 系数<=0 时恒 1.0 ⇒ 旧口径逐位不变)
             _derate = violation_derate(action_H_raw, viol_derate_coef)
             pw_tru = env_test.PowerOutput(obs[1], action_H)
-            soc_target = soc_target_from_signal(action_H[-1])
+            # nolow: 上层没有第 6 维 ⇒ 信号恒 0 (soc_target = soc_target_from_signal(0) = 中心 3.0,
+            #        仅作里程碑日志; gap 罚 / L 层追踪在 nolow 下全部旁路)
+            soc_target = (soc_target_from_signal(0.0) if nolow
+                          else soc_target_from_signal(action_H[-1]))
 
         ptur = float(pw_tru)
         pg_prev = float(obs[-1])
@@ -642,51 +651,70 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         # ---- 下层 obs: 5 维规则原配料 (单一真源 hst.build_L_obs) ----
         _, rbb_info_obs = rbb_system.compute_pbrule(
             pb_original=0.0, ptur=ptur, pg_prev=pg_prev, E=E_current)
-        norm_obs_L = build_L_obs_distilled(obs, pw_tru, action_H, rbb_info_obs, 5 - (step % 5))
-        if step % 5 == 0:
-            agent_L.reset(norm_obs_L)
-        original_action_L = agent_L.select_action(norm_obs_L)
-        action_L, penalty_NN_L = CheckAction(original_action_L)
+        norm_obs_L = build_L_obs_distilled(
+            obs, pw_tru, action_H, rbb_info_obs, 5 - (step % 5),
+            soc_signal=(0.0 if nolow else None))
+        if nolow:
+            # nolow: 下层 RL 完全旁路 (BESS 由规则决定) ⇒ obs 只作日志列, 不再驱动任何网络
+            original_action_L = np.zeros(1)
+            action_L = np.zeros(1)
+            penalty_NN_L = 0
+        else:
+            if step % 5 == 0:
+                agent_L.reset(norm_obs_L)
+            original_action_L = agent_L.select_action(norm_obs_L)
+            action_L, penalty_NN_L = CheckAction(original_action_L)
 
         action = np.concatenate((action_H, action_L))
 
         pb_original = float(action[-1])
-        pbrule, rbb_info = rbb_system.compute_pbrule(
-            pb_original=pb_original, ptur=ptur,
-            pg_prev=pg_prev, E=E_current,
-        )
+        if nolow:
+            # nolow: 不做 SOC 目标追踪, 平抑窗口内直接取"放电最小"= 最靠充电端 (pbrulemax)
+            pbrule, rbb_info = rbb_system.compute_pbrule_min_discharge(
+                ptur=ptur, pg_prev=pg_prev, E=E_current)
+        else:
+            pbrule, rbb_info = rbb_system.compute_pbrule(
+                pb_original=pb_original, ptur=ptur,
+                pg_prev=pg_prev, E=E_current,
+            )
 
         action_rbb = action.copy()
         action_rbb[-1] = pbrule
 
+        # nolow 下上层动作是 5 维 (无 SOC 信号) ⇒ 切片必须按实际维数, 不能写死 6
+        _n_act_H = len(action_H)
         pw_tru2, obs2, action_L_env, penalty_L, done, done_L, info = \
-            env_test.ScenarioStep(action_rbb[:6], action_rbb[6:], pw_tru)
+            env_test.ScenarioStep(action_rbb[:_n_act_H], action_rbb[_n_act_H:], pw_tru)
 
-        action_rbb[6:] = action_L_env
+        action_rbb[_n_act_H:] = action_L_env
         norm_obs2 = Normalize_H(obs2, _pminute[min(step + 1, num_iterations - 1)],
                                 phase_mode, phase_table)
 
         r1, c1_step, details = Cal_Rew_RB(
-            obs, obs2, action_rbb, rbb_info,
+            obs, obs2, (np.append(action_H, 0.0) if nolow else action_rbb), rbb_info,
             penalty_NN_H=penalty_NN_H, time=time,
             ptur=ptur, pb_cmd=pb_original,
             turbine_derate=_derate,
         )
 
-        # 块末: SOC 目标可行性罚 (上层)
+        # 块末: SOC 目标可行性罚 (上层) —— nolow 无目标 ⇒ 恒 0
         gap_pen = 0.0
-        if step % 5 == 4:
+        if (not nolow) and step % 5 == 4:
             gap_pen = gap_penalty(soc_target, float(obs2[2]))
         c1 = c1_step + gap_pen
 
-        # 下层 r2 / c2 (SOC 目标追踪口径: 能力内 slack)
+        # 下层 r2 / c2 (SOC 目标追踪口径: 能力内 slack) —— nolow 下层旁路 ⇒ r2 = c2 = 0
         r2 = lower_reward(rbb_info['clip_amount'])
-        c2, c2_info = lower_cost_soc_track(
-            soc_target, E_current, float(obs2[2]),
-            rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
-            5 - (step % 5),
-            pbrule=float(rbb_info['pbrule']),   # 放电退化罚 (L_DEG_COEF)
-            return_info=True)
+        if nolow:
+            c2, c2_info = 0.0, {'slack': 0.0, 'pb_best': 0.0, 'd_best': 0.0,
+                                'd_next': 0.0, 'infeasible_window': False}
+        else:
+            c2, c2_info = lower_cost_soc_track(
+                soc_target, E_current, float(obs2[2]),
+                rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
+                5 - (step % 5),
+                pbrule=float(rbb_info['pbrule']),   # 放电退化罚 (L_DEG_COEF)
+                return_info=True)
 
         bi = step // 5
         if step % 5 == 0:
@@ -710,7 +738,7 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         if details['P_F'] > 3.0 + 1e-4:
             pc['pf_viol'] += 1
         if step % 5 == 4:
-            pc['soc_track_err'] = abs(soc_target - float(obs2[2]))
+            pc['soc_track_err'] = (0.0 if nolow else abs(soc_target - float(obs2[2])))
 
         # profit: P_G * pr * dt - 490*max(-pb,0)*dt (与训练 episode_profit 同口径)
         profit_step = obs2[-1] * obs[0] * time - DEG_COST_DISCHARGE * max(-float(pbrule), 0.0) * time
@@ -746,7 +774,8 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
         step += 1
 
     agent_H.is_training = True
-    agent_L.is_training = True
+    if agent_L is not None:
+        agent_L.is_training = True
     if test_csv and output:
         df.to_csv(f'{output}/test_s_9case.csv', index=False)
 

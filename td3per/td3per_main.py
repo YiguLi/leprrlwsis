@@ -262,7 +262,8 @@ def train(num_iterations_H,
             norm_observation_H = norm_observation
             pw_tru = env.PowerOutput(observation[1], applied_action_H)
             # SOC 目标 (块级固定) —— 上层信号语义
-            soc_signal = float(applied_action_H[5])
+            # nolow: 上层没有第 6 维 ⇒ 信号恒 0, 目标恒为中心 (仅记录; gap 罚/L 追踪全旁路)
+            soc_signal = 0.0 if args.nolow else float(applied_action_H[5])
             soc_target = soc_target_from_signal(soc_signal)
             pb_l = list()
 
@@ -281,10 +282,12 @@ def train(num_iterations_H,
         # ================================================================
         norm_observation_L = build_L_obs_distilled(
             observation, pw_tru, applied_action_H, rbb_info_obs,
-            5 - (episode_steps % 5))
+            5 - (episode_steps % 5),
+            soc_signal=(0.0 if args.nolow else None))
         prPurple('--L-- obs = {}.'.format(round_list(norm_observation_L, 3)))
         # 下层每一个 5-step 块都是一个 episode
-        if episode_steps % 5 == 0:
+        # nolow: 下层 RL 旁路 ⇒ 不 reset (=完全不触碰 L 智能体)
+        if (not args.nolow) and episode_steps % 5 == 0:
             agent_L.reset(norm_observation_L)
 
         # ================================================================
@@ -294,37 +297,52 @@ def train(num_iterations_H,
         # 基线 = 规则动作 (单一真源 hst.rule_action, 与 SocTracker.act 逐位一致):
         #   Δ≡0 ⇒ 命令逐位等于规则下层 ⇒ r2≡0、c2≡0 —— "先稳定到规则"是**结构保证**。
         #   基线负责 clip/物理限幅/被迫吞吐等非线性, 网络只学"相对规则偏多少 [MW]"。
-        _n_rem_L = 5 - (episode_steps % 5)
-        _soc_tgt_L = hst.soc_target_from_signal(float(applied_action_H[5]))
-        pb_rule = hst.rule_action(
-            _soc_tgt_L, E_current, rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
-            _n_rem_L, eta_c=rbb_system.eta_c, eta_d=rbb_system.eta_d,
-            time=rbb_system.time, rated_power=rbb_system.rated_power)
-        if step <= args.warmup:
-            # warmup 期下层 = 规则行为体 (rule 臂: Δ=0, 命令 = 基线)
-            if getattr(warmup_rule, 'is_price', False):
-                # 新口径 (--warmup_bess price): 下层价格条件随机充放
-                #   300 低谷随机充电 +U(0.3,0.5) / 580 平峰不动 /
-                #   980 高峰随机放电 −U(0.3,0.5)，再夹进 RBB 可行窗口
-                #   (L 层其余逻辑不变: 残余动作 Δ = cmd − 规则基线)
-                pb_cmd_L = float(warmup_rule.act(float(observation[0]),
-                                                 rbb_info_obs['pbrulemin'],
-                                                 rbb_info_obs['pbrulemax']))
-                delta_L = np.array([pb_cmd_L - float(pb_rule)])
-            elif warmup_rule is not None:
-                delta_L = np.zeros(1, dtype=np.float64)
-                pb_cmd_L = float(pb_rule)
-            else:               # 对照臂 (--warmup_bess random): 仍是"绝对随机功率"命令
-                delta_L = np.asarray(agent_L.random_action(), dtype=float).reshape(-1)
-                pb_cmd_L = float(delta_L[0])
-                delta_L = np.array([pb_cmd_L - float(pb_rule)])
+        # ---- nolow 分支: 下层 RL 整体旁路 (BESS 只有一个规则) ----
+        #   功率 = 平抑可行窗口内"放电最小"= 最靠充电端 (pbrulemax), 由 RBB 直接给出;
+        #   不构造命令/不查询网络; Δ≡0、r2≡c2≡0 (见下方 L 奖励段)。
+        if args.nolow:
+            pbrule, rbb_info = rbb_system.compute_pbrule_min_discharge(
+                ptur=ptur, pg_prev=pg_prev, E=E_current)
+            _n_rem_L = 5 - (episode_steps % 5)
+            _soc_tgt_L = soc_target              # 恒 = SOC_TARGET_CENTER (无目标; 仅记录)
+            pb_rule = float(pbrule)
+            pb_cmd_L = float(pbrule)
+            delta_L = np.zeros(1, dtype=np.float64)
+            original_action_L = delta_L
+            applied_action_L = np.array([pbrule])
             penalty_NN_L = 0
         else:
-            delta_L = np.asarray(agent_L.select_action(norm_observation_L),
-                                 dtype=float).reshape(-1)
-            pb_cmd_L = float(pb_rule) + float(delta_L[0])
-        original_action_L = delta_L          # 入 buffer 的动作 = Δ (actor 的动作空间)
-        applied_action_L, penalty_NN_L = CheckAction(np.array([pb_cmd_L]))
+            _n_rem_L = 5 - (episode_steps % 5)
+            _soc_tgt_L = hst.soc_target_from_signal(float(applied_action_H[5]))
+            pb_rule = hst.rule_action(
+                _soc_tgt_L, E_current, rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
+                _n_rem_L, eta_c=rbb_system.eta_c, eta_d=rbb_system.eta_d,
+                time=rbb_system.time, rated_power=rbb_system.rated_power)
+            if step <= args.warmup:
+                # warmup 期下层 = 规则行为体 (rule 臂: Δ=0, 命令 = 基线)
+                if getattr(warmup_rule, 'is_price', False):
+                    # 新口径 (--warmup_bess price): 下层价格条件随机充放
+                    #   300 低谷随机充电 +U(0.3,0.5) / 580 平峰不动 /
+                    #   980 高峰随机放电 −U(0.3,0.5)，再夹进 RBB 可行窗口
+                    #   (L 层其余逻辑不变: 残余动作 Δ = cmd − 规则基线)
+                    pb_cmd_L = float(warmup_rule.act(float(observation[0]),
+                                                     rbb_info_obs['pbrulemin'],
+                                                     rbb_info_obs['pbrulemax']))
+                    delta_L = np.array([pb_cmd_L - float(pb_rule)])
+                elif warmup_rule is not None:
+                    delta_L = np.zeros(1, dtype=np.float64)
+                    pb_cmd_L = float(pb_rule)
+                else:               # 对照臂 (--warmup_bess random): 仍是"绝对随机功率"命令
+                    delta_L = np.asarray(agent_L.random_action(), dtype=float).reshape(-1)
+                    pb_cmd_L = float(delta_L[0])
+                    delta_L = np.array([pb_cmd_L - float(pb_rule)])
+                penalty_NN_L = 0
+            else:
+                delta_L = np.asarray(agent_L.select_action(norm_observation_L),
+                                     dtype=float).reshape(-1)
+                pb_cmd_L = float(pb_rule) + float(delta_L[0])
+            original_action_L = delta_L          # 入 buffer 的动作 = Δ (actor 的动作空间)
+            applied_action_L, penalty_NN_L = CheckAction(np.array([pb_cmd_L]))
         prGreen('--L-- rule = {:.3f} | Δ = {:.3f} | cmd = {:.3f}'.format(
             float(pb_rule), float(delta_L[0]), float(pb_cmd_L)))
         prGreen('--L-- ori a_t = {}'.format(round_list(original_action_L, 3)))
@@ -339,21 +357,27 @@ def train(num_iterations_H,
         # 自动含两段 clip: ① CheckAction 的 ±10 夹裁 + ② 平抑窗口夹裁。
         # 因窗口 ⊆ ±10, 传命令值与传夹后值给出的 pbrule 逐位相同 (见 test_l_lower_unit);
         # 若改回传夹后值, |cmd|>10 时该方向梯度恒 0 (死区)。见 hsrl_soctarget.lower_reward。
-        pb_original = float(pb_cmd_L)   # 命令值 (CheckAction 前) = 规则基线 + Δ
+        if args.nolow:
+            # nolow: pbrule 已在上面由平抑窗口直接给出 (放电最小 = 最靠充电端)
+            #        命令值 = 规则自身的选择 ⇒ clip_amount ≡ 0
+            pb_original = float(pbrule)
+        else:
+            pb_original = float(pb_cmd_L)   # 命令值 (CheckAction 前) = 规则基线 + Δ
 
-        pbrule, rbb_info = rbb_system.compute_pbrule(
-            pb_original=pb_original,
-            ptur=ptur,
-            pg_prev=pg_prev,
-            E=E_current,
-        )
+            pbrule, rbb_info = rbb_system.compute_pbrule(
+                pb_original=pb_original,
+                ptur=ptur,
+                pg_prev=pg_prev,
+                E=E_current,
+            )
 
         action_rbb = action.copy()
         action_rbb[-1] = pbrule
 
         # env response with next_observation, reward, terminate_info
+        _n_act_H = len(applied_action_H)   # nolow: 5 (无 SOC 信号); 历史: 6
         pw_tru2, observation2, action_L_env, penalty_L, done, done_L, info = \
-            env.step(action_rbb[:6], action_rbb[6:], pw_tru)
+            env.step(action_rbb[:_n_act_H], action_rbb[_n_act_H:], pw_tru)
         action_rbb[6:] = action_L_env
         prGreen('Applied action = {}.'.format(round_list(action_rbb, 3)))
         norm_observation2 = Normalize_H(observation2,
@@ -364,7 +388,10 @@ def train(num_iterations_H,
         # 上层 H 奖励/成本 (非分段, 与 td3perrb 同口径)
         # ================================================================
         r1, c1_step, reward_details = Cal_Rew_RB(
-            observation, observation2, action_rbb, rbb_info,
+            # nolow: H 动作只有 5 维 ⇒ 补一个恒 0 的信号位, 保证 details 里的
+            #        soc_signal/soc_target 仍是"信号=0 / 目标=中心"的合法口径
+            observation, observation2,
+            (np.append(applied_action_H, 0.0) if args.nolow else action_rbb), rbb_info,
             penalty_NN_H=penalty_NN_H, time=time,
             ptur=ptur, pb_cmd=pb_original,
             turbine_derate=viol_derate,
@@ -375,9 +402,10 @@ def train(num_iterations_H,
         sum_c1 += c1_step
 
         # ---- 块末结算: SOC 目标可行性罚 (上层豁免 tol = --soc_tol, 默认 0.1) ----
-        gap_raw = abs(soc_target - float(observation2[2]))
+        # nolow: 没有 SOC 目标 ⇒ gap 罚恒 0, 也不动 sum_r1 与 sum_c1
+        gap_raw = abs(soc_target - float(observation2[2])) if not args.nolow else 0.0
         gap_pen = 0.0
-        if episode_steps % 5 == 4:
+        if (not args.nolow) and episode_steps % 5 == 4:
             gap_pen = gap_penalty(soc_target, float(observation2[2]), tol=soc_tol_upper)
             if hc.mode() == 'uniform':
                 sum_r1 -= gap_pen   # uniform: 追踪偏好进 r (固定价 W_GAP=10 元/MWh)
@@ -398,12 +426,17 @@ def train(num_iterations_H,
 
                 # 不可行窗口下 RBB 会忽略命令、改施加物理边界 ⇒ 该步 r2 可打到封顶 (口径保留; 见 hst.lower_reward)
         r2 = lower_reward(clip_amount)
-        c2, c2_info = lower_cost_soc_track(
-            soc_target, E_current, float(observation2[2]),
-            rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
-            5 - (episode_steps % 5),
-            pbrule=float(rbb_info['pbrule']),   # 放电退化罚 (L_DEG_COEF)
-            return_info=True)
+        if args.nolow:
+            # nolow: 下层 RL 旁路 ⇒ c2 恒 0 (不需要"追 SOC 目标"), 但字典键保持与历史一致
+            c2, c2_info = 0.0, {'slack': 0.0, 'pb_best': 0.0, 'd_best': 0.0,
+                                'd_next': 0.0, 'infeasible_window': False}
+        else:
+            c2, c2_info = lower_cost_soc_track(
+                soc_target, E_current, float(observation2[2]),
+                rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
+                5 - (episode_steps % 5),
+                pbrule=float(rbb_info['pbrule']),   # 放电退化罚 (L_DEG_COEF)
+                return_info=True)
         c2_slack = c2_info['slack']   # 新口径: trackerr 的 MWh 等价 (= trackerr·g, 因 ΔSOC = g·pb)
         sum_c2 += c2
 
@@ -413,7 +446,8 @@ def train(num_iterations_H,
             pg_prev=float(observation2[-1]), E=float(observation2[2]))
         norm_observation2_L = build_L_obs_distilled(
             observation2, pw_tru2, applied_action_H, rbb_info_obs2,
-            5 - ((episode_steps + 1) % 5))
+            5 - ((episode_steps + 1) % 5),
+            soc_signal=(0.0 if args.nolow else None))
 
         prGreen('r1 = {} (turb={}, bess={}, deg={})'.format(
             round(r1, 3), round(reward_details['turbine_profit'], 3),
@@ -458,27 +492,30 @@ def train(num_iterations_H,
                 agent_H.update_ema_cost(sum_c1)
                 hc.dual_update(agent_H, d_block_H)   # uniform=乘性 / legacy=加性
             # L 层 EMA 对偶上升 —— 用块实际成本 sum_c2 更新 lam2 (与 d_block_L 同口径)
-            if step > args.warmup:
+            # nolow: L 层不存在 ⇒ 对偶/curriculum 全部跳过
+            if (not args.nolow) and step > args.warmup:
                 agent_L.update_ema_cost(sum_c2)
                 hst.dual_update_L(agent_L, d_block_L)
             # ---- L 层 curriculum: EMA 成本连续 L_CURRICULUM_BLOCKS 块满足预算 ⇒ 预算减半 ----
             #   计数改为块末每块 1 次 (此前嵌在更新循环里 = 每块 10 次, "100" 的含义随 UTD 漂移)
-            if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
-                consecutive_satisfied_L += 1
-            else:
-                consecutive_satisfied_L = 0
-            if consecutive_satisfied_L >= hst.L_CURRICULUM_BLOCKS:
-                d_block_L = max(d_block_L / 2, d_block_L_min)
-                consecutive_satisfied_L = 0
-                prGreen('L: d_block_L halved to {}'.format(d_block_L))
+            if not args.nolow:
+                if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
+                    consecutive_satisfied_L += 1
+                else:
+                    consecutive_satisfied_L = 0
+                if consecutive_satisfied_L >= hst.L_CURRICULUM_BLOCKS:
+                    d_block_L = max(d_block_L / 2, d_block_L_min)
+                    consecutive_satisfied_L = 0
+                    prGreen('L: d_block_L halved to {}'.format(d_block_L))
             done_L = True
-        hwarm.fill_bess_transition(
-            agent_L, norm_observation_L, original_action_L, r2, c2,
-            norm_observation2_L, done_L,
-            applied_pb=float(pbrule), warmup=bool(step <= args.warmup),
-            cmd_pb=float(pb_cmd_L),
-            rule_pb=float(pb_rule),
-            stats=bess_fill_stats)
+        if not args.nolow:
+            hwarm.fill_bess_transition(
+                agent_L, norm_observation_L, original_action_L, r2, c2,
+                norm_observation2_L, done_L,
+                applied_pb=float(pbrule), warmup=bool(step <= args.warmup),
+                cmd_pb=float(pb_cmd_L),
+                rule_pb=float(pb_rule),
+                stats=bess_fill_stats)
 
         if step > args.warmup:
             #--------------------Update----------------------
@@ -497,8 +534,10 @@ def train(num_iterations_H,
                     consecutive_satisfied_H = 0
 
                 # L 层更新频率(UTD): 每块 args.utd_l 次 (默认 10 = td3per 口径, L 只有 1 维动作)
-                for _ in range(args.utd_l):
-                    agent_L.update_policy()
+                # nolow: 下层 RL 旁路 ⇒ 不做任何 L 更新
+                if not args.nolow:
+                    for _ in range(args.utd_l):
+                        agent_L.update_policy()
 
                 if consecutive_satisfied_H >= hc.H_CURRICULUM_BLOCKS:
                     d_block_H = max(d_block_H / 2, d_block_H_min)  # H: 收紧块预算
@@ -528,7 +567,8 @@ def train(num_iterations_H,
                 case_metrics, overall = nine_case_test(
                     agent_H, agent_L, env_test, rbb_system, seed=42,
                     phase_mode=phase_mode, phase_table=phase_table,
-                    viol_derate_coef=args.viol_derate)
+                    viol_derate_coef=args.viol_derate,
+                    nolow=args.nolow)
                 if use_csv:
                     for m in case_metrics:
                         df_test_rows.append({
@@ -633,7 +673,8 @@ def train(num_iterations_H,
                 'd_best': c2_info['d_best'], 'd_next': c2_info['d_next'],
                 'window_infeasible': float(c2_info['infeasible_window']),
                 'gap_raw': gap_raw, 'gap_pen': gap_pen,
-                'soc_track_err': abs(soc_target - float(observation2[2])),
+                'soc_track_err': (0.0 if args.nolow
+                                  else abs(soc_target - float(observation2[2]))),
                 'lam1': agent_H.lam,
                 'lam2': agent_L.lam,
                 'd_block_H': d_block_H,
@@ -683,7 +724,8 @@ def train(num_iterations_H,
         # ---- Periodic checkpoint (every 2000 steps) ----
         if step > 0 and step % 2000 == 0:
             agent_H.save_checkpoint(output, step)
-            agent_L.save_checkpoint(output, step)
+            if not args.nolow:      # nolow: L 网络从不训练 ⇒ 不落盘 (避免被误当成策略)
+                agent_L.save_checkpoint(output, step)
             prCyan('Checkpoint saved at step {}'.format(step))
 
         if upload:
@@ -767,7 +809,8 @@ def train(num_iterations_H,
                                       original_action_H[i], step)
                     writer.add_scalar('action/a_H_clipped_{}'.format(i),
                                       applied_action_H[i], step)
-                writer.add_scalar('action/soc_signal', applied_action_H[5], step)
+                writer.add_scalar('action/soc_signal',
+                                  (0.0 if args.nolow else applied_action_H[5]), step)
                 writer.add_scalar('action/soc_target', soc_target, step)
                 writer.add_scalar('action/pb_original', pb_original, step)
                 writer.add_scalar('action/pb_rule', float(pb_rule), step)
@@ -803,7 +846,8 @@ def train(num_iterations_H,
         #-------------------------------------episode-----------------------------
         if done:
             agent_H.save_model(output)
-            agent_L.save_model(output)
+            if not args.nolow:      # nolow: L 网络从不训练 ⇒ 不落盘 (避免被误当成策略)
+                agent_L.save_model(output)
             prGreen('##########{}: episode_profit:{} episode_reward:{} step:{}'.format(
                 episode, round(episode_profit, 2), round(episode_reward, 2), step))
 
@@ -879,6 +923,12 @@ if __name__ == "__main__":
                         default='TD3PER',
                         type=str,
                         help='open-ai gym environment')
+    parser.add_argument('--nolow', dest='nolow', action='store_true',
+                        help='nolow 分支: 取消 H 层第 6 维 (SOC 目标信号) ⇒ H 动作 = 5 维风机动作; '
+                             'BESS 只做波动平抑, 功率取平抑可行窗口内"放电最小"= 最靠充电端 '
+                             '(pbrulemax); 下层 RL 完全旁路 (BESS 全部由规则决定, r2=c2=0); '
+                             'gap 罚关闭。RUN_TAG 与 --env 自动加 nolow 后缀 ⇒ '
+                             'output/TD3PERNOLOW-runNN + df_td3pernolow.csv')
     parser.add_argument('--hidden1',
                         default=16,
                         type=int,
@@ -1112,6 +1162,14 @@ if __name__ == "__main__":
     hc.set_cost_scale(args.cost_scale)   # cost 通道缩放 (λ 自动跟随)
     _HCFG = hc.h_settings()
     prCyan(hc.summary())
+    if args.nolow:
+        # ---- nolow 分支: 记录名称也带 nolow (run 目录 + CSV/TB 同名) ----
+        # 注: 本段在模块级 (train() 通过全局 args/RUN_TAG 读取) ⇒ 直接赋值即可
+        RUN_TAG = RUN_TAG + 'nolow'
+        args.env = args.env + 'NOLOW'
+        prYellow('[nolow] 分支启用: H 动作 = 5 维 (无 SOC 目标信号); BESS = 规则平抑 '
+                 '(窗口内取放电最小); 下层 RL 旁路。RUN_TAG={}, --env={}'.format(
+                     RUN_TAG, args.env))
     args.output = get_output_folder(args.output, args.env)
     if args.resume == 'default':
         args.resume = 'output/{}-run0'.format(args.env)
@@ -1172,7 +1230,8 @@ if __name__ == "__main__":
     nb_states_H = 4 + PHASE_DIM[int(getattr(args, 'phase_feat', 0))]
     print('H nb_states = {} (4 base + {} phase dims, --phase_feat={})'.format(
         nb_states_H, PHASE_DIM[int(getattr(args, 'phase_feat', 0))], args.phase_feat))
-    agent_H = SP_TD3(nb_states=nb_states_H, nb_actions=6, args=args,
+    nb_actions_H = 5 if getattr(args, 'nolow', False) else 6
+    agent_H = SP_TD3(nb_states=nb_states_H, nb_actions=nb_actions_H, args=args,
                      lam_max=(_HCFG['lam_max'] if _HCFG else 100.0), lam_min=(_HCFG['lam_min'] if _HCFG else 3.0),
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                      record_update_stats=True,

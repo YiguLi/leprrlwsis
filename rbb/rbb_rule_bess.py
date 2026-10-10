@@ -164,3 +164,26 @@ class RuleBasedBESS:
         }
 
         return pbrule, info
+
+    def compute_pbrule_min_discharge(self, ptur, pg_prev, E):
+        """**nolow 分支专用**: BESS 只负责波动平抑, 功率取平抑可行窗口内的"放电最小"值。
+
+        窗口 = 平抑范围 ∩ 物理可行范围 = `[pbrulemin, pbrulemax]` (见 `compute_pbrule`)。
+        符号约定与 `compute_pbrule` 一致: **pb > 0 = 充电** ⇒ "放电最小" = 窗口最靠充电端
+        = `pbrulemax`:
+          * 窗口跨 0        ⇒ 取正端 (充电, 不放电);
+          * 窗口全在放电侧  ⇒ 取最靠 0 的负值 (放电**最少**);
+          * 窗口全在充电侧  ⇒ 取最大充电值 (物理/平抑都允许的上界)。
+        窗口不可行 (`pbrulemin > pbrulemax`) 时沿用 `compute_pbrule` 的既有处理
+        (取物理边界、最小化不可避免的越限), 不在这里另造口径。
+
+        与 `compute_pbrule` 的唯一差别: 不再由上层/L 层命令 `pb_original` 决定窗口内的落点,
+        而是固定落在"最不放电"的一端 ⇒ `clip_amount ≡ 0` (没有命令被裁掉这回事)。
+        """
+        _, info = self.compute_pbrule(pb_original=0.0, ptur=ptur, pg_prev=pg_prev, E=E)
+        if not info['is_infeasible']:
+            info['pbrule'] = float(info['pbrulemax'])
+        # nolow 没有"上层/下层的命令"这回事 ⇒ 这两个诊断量恒定为 0/自身
+        info['pb_original'] = float(info['pbrule'])
+        info['clip_amount'] = 0.0
+        return float(info['pbrule']), info
