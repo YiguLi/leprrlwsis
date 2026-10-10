@@ -144,12 +144,24 @@ class SP_TD3_LEPRRLRB(object):
         self.sig_noise_max = float(sig_noise_max)
         self.sig_noise_min = float(sig_noise_min)
         self.wt_noise_floor = float(wt_noise_floor)
+        # ---- 风机探索噪声: **恒定 `wt_noise`（默认 0.05），不随 ε 衰减** ----
+        #   用户口径（2026-10）: 全部风机、全部 TD3 族方法, 风机行为噪声恒为 0.05。
+        #   实现 = 让 WT 维的 amp 与 floor 相等 ⇒ 凸组合
+        #   `explore_amp*eps + explore_floor*(1-eps)` 恒等于 `wt_noise`
+        #   （公式本身不动 ⇒ `test_noise_format_uniform.py` 的一致性判据仍成立）。
+        #   第 6 维 SOC 信号仍按 `sig_noise_max -> sig_noise_min` 衰减;
+        #   L 层（nb_actions==1）保持旧口径（main 随后会覆写 explore_amp/explore_floor）。
         if self.nb_actions == self.nb_turbine + 1:
             amp_e = np.array([self.wt_noise] * self.nb_turbine + [self.sig_noise_max],
                              dtype=np.float32)
-            floor_e = np.array([self.wt_noise_floor] * self.nb_turbine + [self.sig_noise_min],
+            floor_e = np.array([self.wt_noise] * self.nb_turbine + [self.sig_noise_min],
                                dtype=np.float32)
+        elif self.nb_actions == self.nb_turbine:
+            # 纯风机维（aifflor / yawflor / nolow 的 td3per·td3perseg）: 全维恒定
+            amp_e = np.full(self.nb_actions, self.wt_noise, dtype=np.float32)
+            floor_e = np.full(self.nb_actions, self.wt_noise, dtype=np.float32)
         else:
+            # L 层（nb_actions==1）: 旧口径不变
             amp_e = np.full(self.nb_actions, self.wt_noise, dtype=np.float32)
             floor_e = np.full(self.nb_actions, self.wt_noise_floor, dtype=np.float32)
         self.explore_amp = amp_e

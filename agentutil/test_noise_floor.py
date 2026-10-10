@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
-"""验证探索噪声地板：ε=1 → ε=0 时幅度从 explore_amp 收敛到 explore_floor（不再为 0）。
+"""验证探索噪声幅度表：ε=1 → ε=0 时幅度从 explore_amp 收敛到 explore_floor（不再为 0）。
+
+**2026-10 口径修正**：风机（WT）维的幅度**恒定 = `wt_noise`（默认 0.05）**，不再随 ε 衰减
+（用户口径"全部风机、风机行为噪声恒为 0.05"）；只有第 6 维 SOC 信号仍按
+`sig_noise_max(0.2) → sig_noise_min(0.01)` 衰减。实现方式是让 WT 维的
+`explore_amp == explore_floor == wt_noise`，凸组合公式本身不变。
 
 自建最小 args（`SP_TD3.__init__` 需要 24 个字段），构造 H 层（6 维）与 L 层（1 维），
 打印并核对：
   ε=1.0 幅度 = explore_amp
   ε=0.5 幅度 = 中点
   ε=0.0 幅度 = explore_floor（**关键：必须 > 0**）
-并用 `select_action` 实测 ε=0 时的实际抖动范围。
+并用 `select_action` 实测 ε=0/ε=1 时的实际抖动范围，断言 WT 维**两者相等且 ≈ 0.05**。
 """
 import os
 import sys
@@ -99,10 +104,17 @@ def main():
                                                                   precision=4)))
     ag.epsilon = 0.0
     acts = np.array([ag.select_action(s, decay_epsilon=False) for _ in range(4000)])
-    print('  ε=0 时 5 个 WT 维的抖动半宽 = %s （期望 ≈ 0.01）'
-          % np.array2string((acts[:, :5].max(0) - acts[:, :5].min(0)) / 2.0, precision=4))
-    print('  ⇒ 若 WT 维半宽 ≈ 0.01（而非 0），说明地板生效、探索不再停止')
-    return 0
+    hw0 = (acts[:, :5].max(0) - acts[:, :5].min(0)) / 2.0
+    print('  ε=0 时 5 个 WT 维的抖动半宽 = %s （期望 ≈ 0.05 = WT 恒定幅度）'
+          % np.array2string(hw0, precision=4))
+    ag.epsilon = 1.0
+    acts1 = np.array([ag.select_action(s, decay_epsilon=False) for _ in range(4000)])
+    hw1 = (acts1[:, :5].max(0) - acts1[:, :5].min(0)) / 2.0
+    print('  ε=1 时 5 个 WT 维的抖动半宽 = %s （应与 ε=0 相同）'
+          % np.array2string(hw1, precision=4))
+    ok_wt = bool(np.all(np.abs(hw0 - 0.05) < 0.004) and np.all(np.abs(hw1 - 0.05) < 0.004))
+    print('  ⇒ WT 维恒为 0.05（ε=0 与 ε=1 一致）: %s' % ('OK' if ok_wt else '**FAIL**'))
+    return 0 if ok_wt else 1
 
 
 if __name__ == '__main__':

@@ -534,10 +534,9 @@ def train(num_iterations_H,
                     consecutive_satisfied_H = 0
 
                 # L 层更新频率(UTD): 每块 args.utd_l 次 (默认 10 = td3per 口径, L 只有 1 维动作)
-                # nolow: 下层 RL 旁路 ⇒ 不做任何 L 更新
-                if not args.nolow:
-                    for _ in range(args.utd_l):
-                        agent_L.update_policy()
+                # nolow: 下层 RL 旁路 ⇒ 启动时已把 args.utd_l 置 0 (循环体与守卫形式均不变)
+                for _ in range(args.utd_l):
+                    agent_L.update_policy()
 
                 if consecutive_satisfied_H >= hc.H_CURRICULUM_BLOCKS:
                     d_block_H = max(d_block_H / 2, d_block_H_min)  # H: 收紧块预算
@@ -1167,6 +1166,10 @@ if __name__ == "__main__":
         # 注: 本段在模块级 (train() 通过全局 args/RUN_TAG 读取) ⇒ 直接赋值即可
         RUN_TAG = RUN_TAG + 'nolow'
         args.env = args.env + 'NOLOW'
+        # 下层 RL 完全旁路 ⇒ L 层每块更新次数置 0 (保持 `for _ in range(args.utd_l)` 字面不变,
+        # 从而 test_l_lower_unit 的 "L 更新次数接 --utd_l" 与 test_warmup_bsize_uniform 的
+        # "call site 在 `if step > args.warmup:` 守卫内" 两条契约同时成立)
+        args.utd_l = 0
         prYellow('[nolow] 分支启用: H 动作 = 5 维 (无 SOC 目标信号); BESS = 规则平抑 '
                  '(窗口内取放电最小); 下层 RL 旁路。RUN_TAG={}, --env={}'.format(
                      RUN_TAG, args.env))

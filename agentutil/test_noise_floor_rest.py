@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 """验证剩余 3 个 TD3 系列的探索噪声（**已统一为 td3per 格式**）。
 
-统一格式的幅度表
-----------------
+统一格式的幅度表（2026-10 起：**风机维恒定 `wt_noise`，不再随 ε 衰减**）
+--------------------------------------------------------------------
   H 层 (nb_actions = nt+1 = 6):
-      ε=1 ⇒ [wt_noise]×5 + [sig_noise_max] = [0.05]*5 + [0.2]
-      ε=0 ⇒ [wt_noise_floor]×5 + [sig_noise_min] = [0.01]*6
+      ε=1 ⇒ [wt_noise]×5 + [sig_noise_max]        = [0.05]*5 + [0.2]
+      ε=0 ⇒ [wt_noise]×5 + [sig_noise_min]        = [0.05]*5 + [0.01]
+      （WT 维两式相同 ⇒ 风机噪声恒定 0.05；只有第 6 维 SOC 信号从 0.2 衰减到 0.01）
+  L 层 (nb_actions = 1，非风机维):
+      仍为 [wt_noise] → [wt_noise_floor] = [0.05] → [0.01]（main 随后会覆写）
   （注：真实调用里 H 的 nb_turbine 决定维度；本测试用 nb_turbine=5 ⇒ 走 nt+1 分支）
 """
 import os
@@ -90,14 +93,16 @@ def main():
         h1 = measure(K, 1.0, na)
         h0 = measure(K, 0.0, na)
         exp1 = np.array([0.05] * 5 + [0.2]) if na == 6 else np.full(na, 0.05)
-        exp0 = np.full(na, 0.01)
+        # 2026-10: 风机维恒定 wt_noise ⇒ ε=0 的 WT 维仍是 0.05（只有信号维落到 0.01）
+        exp0 = (np.array([0.05] * 5 + [0.01]) if na == 6
+                else np.full(na, 0.05 if na > 1 else 0.01))
         print('  ε=1 实测: %s' % np.array2string(h1, precision=4))
         print('       期望: %s' % np.array2string(exp1, precision=4))
         print('  ε=0 实测: %s' % np.array2string(h0, precision=4))
         print('       期望: %s' % np.array2string(exp0, precision=4))
         g1 = bool(np.all(np.abs(h1 - exp1) < 0.006))
         g0 = bool(np.all(np.abs(h0 - exp0) < 0.004))
-        print('  ε=1 匹配(td3per 格式): %s ; ε=0 = 地板: %s'
+        print('  ε=1 匹配(td3per 格式): %s ; ε=0 = WT 恒定/信号地板: %s'
               % ('OK' if g1 else '**偏差**', 'OK' if g0 else '**偏差**'))
         ok = ok and g1 and g0
         print()
