@@ -165,25 +165,35 @@ class RuleBasedBESS:
 
         return pbrule, info
 
-    def compute_pbrule_min_discharge(self, ptur, pg_prev, E):
-        """**nolow 分支专用**: BESS 只负责波动平抑, 功率取平抑可行窗口内的"放电最小"值。
+    def compute_pbrule_soc_seek(self, ptur, pg_prev, E, soc_target=3.0, deadband=0.0):
+        """**nolow 分支专用**: BESS **全力朝 `soc_target` 方向充/放**（不追经济目标）。
 
-        窗口 = 平抑范围 ∩ 物理可行范围 = `[pbrulemin, pbrulemax]` (见 `compute_pbrule`)。
-        符号约定与 `compute_pbrule` 一致: **pb > 0 = 充电** ⇒ "放电最小" = 窗口最靠充电端
-        = `pbrulemax`:
-          * 窗口跨 0        ⇒ 取正端 (充电, 不放电);
-          * 窗口全在放电侧  ⇒ 取最靠 0 的负值 (放电**最少**);
-          * 窗口全在充电侧  ⇒ 取最大充电值 (物理/平抑都允许的上界)。
-        窗口不可行 (`pbrulemin > pbrulemax`) 时沿用 `compute_pbrule` 的既有处理
-        (取物理边界、最小化不可避免的越限), 不在这里另造口径。
+        窗口 = 平抑范围 ∩ 物理可行范围 = `[pbrulemin, pbrulemax]`（见 `compute_pbrule`）；
+        符号约定与 `compute_pbrule` 一致：**pb > 0 = 充电**。"全力" = 取窗口在**该方向上
+        最远的端点**（两侧同时受平抑窗口与物理限幅约束）：
 
-        与 `compute_pbrule` 的唯一差别: 不再由上层/L 层命令 `pb_original` 决定窗口内的落点,
-        而是固定落在"最不放电"的一端 ⇒ `clip_amount ≡ 0` (没有命令被裁掉这回事)。
+          * `E < soc_target` ⇒ `pbrulemax`（能充多快充多快）;
+          * `E > soc_target` ⇒ `pbrulemin`（能放多快放多快）;
+          * `|E − soc_target| ≤ deadband`（默认 0） ⇒ 0（已在目标上, 不动）。
+
+        因为取值恒在窗口内 ⇒ **可行窗口非空时 `|pg(t) − pg(t−1)| ≤ fluctuation_limit`
+        仍然成立**（平抑约束不被打破; 窗口的端点正是"平抑允许的最大幅度"）。
+        窗口不可行（`pbrulemin > pbrulemax`）时沿用 `compute_pbrule` 的既有处理
+        （取物理边界、最小化不可避免的越限），不在这里另造口径。
+
+        与 `compute_pbrule` 的唯一差别：窗口内的落点不再由上层/L 层的 `pb_original` 决定,
+        而是固定取"朝 SOC 目标方向"的端点 ⇒ `clip_amount ≡ 0`（没有命令被裁掉这回事）。
         """
         _, info = self.compute_pbrule(pb_original=0.0, ptur=ptur, pg_prev=pg_prev, E=E)
         if not info['is_infeasible']:
-            info['pbrule'] = float(info['pbrulemax'])
-        # nolow 没有"上层/下层的命令"这回事 ⇒ 这两个诊断量恒定为 0/自身
+            err = float(soc_target) - float(E)
+            if abs(err) <= float(deadband):
+                info['pbrule'] = 0.0
+            elif err > 0.0:                       # 电量偏低 ⇒ 全力充
+                info['pbrule'] = float(info['pbrulemax'])
+            else:                                 # 电量偏高 ⇒ 全力放
+                info['pbrule'] = float(info['pbrulemin'])
+        # nolow 没有"上层/下层的命令"这回事 ⇒ 这两个诊断量恒定为自身/0
         info['pb_original'] = float(info['pbrule'])
         info['clip_amount'] = 0.0
         return float(info['pbrule']), info

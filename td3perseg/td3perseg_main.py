@@ -301,11 +301,11 @@ def train(num_iterations_H,
         #   Δ≡0 ⇒ 命令逐位等于规则下层 ⇒ r2≡0、c2≡0 —— "先稳定到规则"是**结构保证**。
         #   基线负责 clip/物理限幅/被迫吞吐等非线性, 网络只学"相对规则偏多少 [MW]"。
         # ---- nolow 分支: 下层 RL 整体旁路 (BESS 只有一个规则) ----
-        #   功率 = 平抑可行窗口内"放电最小"= 最靠充电端 (pbrulemax), 由 RBB 直接给出;
+        #   功率 = 全力朝 SOC=SOC_TARGET_CENTER(3.0) 方向充/放, 幅度取平抑可行窗口的对应端点;
         #   不构造命令/不查询网络; Δ≡0、r2≡c2≡0 (见下方 L 奖励段)。
         if args.nolow:
-            pbrule, rbb_info = rbb_system.compute_pbrule_min_discharge(
-                ptur=ptur, pg_prev=pg_prev, E=E_current)
+            pbrule, rbb_info = rbb_system.compute_pbrule_soc_seek(
+                ptur=ptur, pg_prev=pg_prev, E=E_current, soc_target=soc_target)
             _n_rem_L = 5 - (episode_steps % 5)
             _soc_tgt_L = soc_target              # 恒 = SOC_TARGET_CENTER (无目标; 仅记录)
             pb_rule = float(pbrule)
@@ -361,7 +361,7 @@ def train(num_iterations_H,
         # 因窗口 ⊆ ±10, 传命令值与传夹后值给出的 pbrule 逐位相同 (见 test_l_lower_unit);
         # 若改回传夹后值, |cmd|>10 时该方向梯度恒 0 (死区)。见 hsrl_soctarget.lower_reward。
         if args.nolow:
-            # nolow: pbrule 已在上面由平抑窗口直接给出 (放电最小 = 最靠充电端)
+            # nolow: pbrule 已在上面由"全力朝 SOC=3 充/放"直接给出 (取窗口对应端点)
             #        命令值 = 规则自身的选择 ⇒ clip_amount ≡ 0
             pb_original = float(pbrule)
         else:
@@ -929,7 +929,7 @@ if __name__ == "__main__":
                         help='open-ai gym environment')
     parser.add_argument('--nolow', dest='nolow', action='store_true',
                         help='nolow 分支: 取消 H 层第 6 维 (SOC 目标信号) ⇒ H 动作 = 5 维风机动作; '
-                             'BESS 只做波动平抑, 功率取平抑可行窗口内"放电最小"= 最靠充电端 '
+                             'BESS 全力朝 SOC=3.0 充/放 (幅度取平抑可行窗口的对应端点, 平抑约束不被打破); '
                              '(pbrulemax); 下层 RL 完全旁路 (BESS 全部由规则决定, r2=c2=0); '
                              'gap 罚关闭。RUN_TAG 与 --env 自动加 nolow 后缀 ⇒ '
                              'output/TD3PERSEGNOLOW-runNN + df_td3persegnolow.csv')
@@ -1184,7 +1184,7 @@ if __name__ == "__main__":
         # 从而 test_l_lower_unit 与 test_warmup_bsize_uniform 两条契约同时成立)
         args.utd_l = 0
         prYellow('[nolow] 分支启用: H 动作 = 5 维 (无 SOC 目标信号); BESS = 规则平抑 '
-                 '(窗口内取放电最小); 下层 RL 旁路。RUN_TAG={}, --env={}'.format(
+                 '(朝 SOC=3 全力充放); 下层 RL 旁路。RUN_TAG={}, --env={}'.format(
                      RUN_TAG, args.env))
     args.output = get_output_folder(args.output, args.env)
 

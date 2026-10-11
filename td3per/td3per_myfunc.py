@@ -669,9 +669,9 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
 
         pb_original = float(action[-1])
         if nolow:
-            # nolow: 不做 SOC 目标追踪, 平抑窗口内直接取"放电最小"= 最靠充电端 (pbrulemax)
-            pbrule, rbb_info = rbb_system.compute_pbrule_min_discharge(
-                ptur=ptur, pg_prev=pg_prev, E=E_current)
+            # nolow: 不做 SOC 目标追踪 —— 全力朝 SOC=SOC_TARGET_CENTER(3.0) 方向充/放 (取窗口对应端点)
+            pbrule, rbb_info = rbb_system.compute_pbrule_soc_seek(
+                ptur=ptur, pg_prev=pg_prev, E=E_current, soc_target=soc_target)
         else:
             pbrule, rbb_info = rbb_system.compute_pbrule(
                 pb_original=pb_original, ptur=ptur,
