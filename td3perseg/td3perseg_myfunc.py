@@ -741,14 +741,17 @@ def nine_case_test(agent_H, agent_L, env_test, rbb_system,
 
         pb_original = float(action[-1])
         if nolow:
-            # nolow: 不做 SOC 目标追踪 —— 全力朝 SOC=SOC_TARGET_CENTER(3.0) 方向充/放 (取窗口对应端点)
-            pbrule, rbb_info = rbb_system.compute_pbrule_soc_seek(
-                ptur=ptur, pg_prev=pg_prev, E=E_current, soc_target=soc_target)
-        else:
-            pbrule, rbb_info = rbb_system.compute_pbrule(
-                pb_original=pb_original, ptur=ptur,
-                pg_prev=pg_prev, E=E_current,
-            )
+            # nolow: 命令 = 单一真源 hst.rule_action, 目标钉在 SOC_TARGET_CENTER(3.0)
+            #   |delta| <= soc_tol => clip(0, W)（窗口不含 0 时做最小被迫吞吐 = 只平抑）;
+            #   否则                => clip(delta/g, W)，g 取一步填平 => 全力朝 3.0 方向充/放
+            pb_original = float(hst.rule_action(
+                soc_target, E_current, rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
+                5 - (step % 5), eta_c=rbb_system.eta_c, eta_d=rbb_system.eta_d,
+                time=rbb_system.time, rated_power=rbb_system.rated_power))
+        pbrule, rbb_info = rbb_system.compute_pbrule(
+            pb_original=pb_original, ptur=ptur,
+            pg_prev=pg_prev, E=E_current,
+        )
 
         action_rbb = action.copy()
         action_rbb[-1] = pbrule

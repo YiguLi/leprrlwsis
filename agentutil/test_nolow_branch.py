@@ -1,23 +1,32 @@
 # -*- coding: utf-8 -*-
 """`--nolow` 分支（td3per / td3perseg）契约测试 —— **不需要 MATLAB**。
 
-分支语义（2026-10 口径）
------------------------
+分支语义（2026-10 口径，run101 修正版）
+------------------------------------
 取消 H 层第 6 维（SOC 目标信号）⇒ H 动作 5 维；BESS **只做一件事**：
-**全力朝 `SOC = SOC_TARGET_CENTER`(3.0) 方向充/放**，幅度取**平抑可行窗口的对应端点**
-（`E < 3` ⇒ `pbrulemax` 全力充；`E > 3` ⇒ `pbrulemin` 全力放；`E = 3` ⇒ 0）。
-下层 RL 完全旁路（`r2 ≡ c2 ≡ 0`），SOC 目标相关的 gap 罚恒 0。
+**全力朝 `SOC = SOC_TARGET_CENTER`(3.0) 方向充/放**，由**单一真源** `hst.rule_action`
+（与 `SocTracker.act` 逐位一致）给出、目标钉在 3.0：
+
+    |δ| ≤ soc_tol  ⇒  clip(0, W)          ← 窗口不含 0 时做**最小幅度被迫吞吐**（= 只平抑）
+    否则           ⇒  clip(δ/g, W)        ← g 取"一步填平" ⇒ **全力朝 3.0 方向**充/放
+
+⚠ **run101 的教训**（旧实现 `compute_pbrule_soc_seek` 恒取窗口端点、δ=0 时硬返回 0）：
+SOC 恰在 3.0（= episode 起始值）时输出 0 ⇒ SOC 不变 ⇒ **死不动点**，平抑整体失效
+（run101 实测 SOC 恒定 3.0、pbrule 恒 0、`P_F>3` 占比 11.31% = 电池不动作的基线）。
+本测试的 A2 段就是该场景的回归。
 
 判据
 ----
-  A. `RuleBasedBESS.compute_pbrule_soc_seek`: 取值 = 窗口在目标方向上的端点、恒在窗口内、
-     可行窗口非空时 `|pg(t)−pg(t−1)| ≤ 3` 不被打破、`clip_amount ≡ 0`；
-     原 `compute_pbrule` 未被改动（同输入 = `clip(0, 窗口)`）。
-  B. 5 维 H 动作链路：`CheckAction(len==5)` / `violation_amount` / `violation_derate` 正常。
-  C. `nine_case_test(nolow=True, agent_L=None)` 端到端（桩 env）：跑通、`r2 = c2 = 0`、
-     SOC 朝 3.0 收敛（起点 5.0 ⇒ 放电 ⇒ `dsoc < 0`；起点 1.0 ⇒ 充电 ⇒ `dsoc > 0`）。
-  D. 静态接线：两个 main 的 `--nolow` / `nb_actions_H 5|6` / RUN_TAG 后缀 / `utd_l = 0`；
-     两个 myfunc 的 `nine_case_test(..., nolow=False)` 与 `compute_pbrule_soc_seek` 调用。
+  A1. `hst.rule_action` 死区/全力语义：δ≈0 且窗口不含 0 ⇒ 窗口最近端（**不是 0**）；
+      δ≈0 且 0 ∈ 窗口 ⇒ 0；|δ| 大 ⇒ 窗口对应端点（全力）。
+  A2. **run101 回归**：SOC 恰在 3.0 + >3 MW/min 风功率爬坡 ⇒ 动作非 0 且 `|pg(t)−pg(t−1)| ≤ 3`。
+  A3. RBB `compute_pbrule` 未被改动（同输入 = `clip(0, 窗口)`）；RBB 里已无 nolow 专用方法。
+  B.  5 维 H 动作链路：`CheckAction(len==5)` / `violation_amount` / `violation_derate`。
+  C.  `nine_case_test(nolow=True, agent_L=None)` 端到端（桩 env）：`r2 = c2 = 0`、
+      SOC 朝 3.0 收敛（5.0 ⇒ 净放；1.0 ⇒ 净充；**3.0 ⇒ 稳住且不平抑失效**）、
+      test9 场景 `pf_viol = 0`（窗口保证 `P_F ≤ 3`）。
+  D.  静态接线：main 的 `--nolow` / `nb_actions_H 5|6` / RUN_TAG 后缀 / `utd_l = 0` /
+      `hst.rule_action(目标 3.0)`；myfunc 的 `nine_case_test(..., nolow=False)` 同口径。
 """
 import os
 import sys
@@ -31,6 +40,7 @@ sys.path.insert(0, _HERE)
 import numpy as np  # noqa: E402
 
 from rbb.rbb_rule_bess import RuleBasedBESS                       # noqa: E402
+import hsrl_soctarget as hst                                      # noqa: E402
 from td3per.td3per_myfunc import (CheckAction, violation_amount,  # noqa: E402
                                   violation_derate, nine_case_test)
 from td3perseg.td3perseg_myfunc import nine_case_test as nct_seg  # noqa: E402
@@ -44,50 +54,70 @@ def check(cond, msg):
         FAIL.append(msg)
 
 
-# =============================================================================
-print('=' * 96)
-print('A. RBB compute_pbrule_soc_seek: 朝 SOC=3.0 全力充/放（取窗口端点）')
-print('=' * 96)
+def rule(tgt, E, lo, hi, n_rem=5):
+    return float(hst.rule_action(tgt, E, lo, hi, n_rem,
+                                 eta_c=0.98, eta_d=0.98, time=1.0 / 60, rated_power=10.0))
+
+
 rbb = RuleBasedBESS(max_E=6.0, min_E_factor=0.2, rated_power=10.0,
                     eta_c=0.98, eta_d=0.98, time=1.0 / 60, fluctuation_limit=3.0)
+
+# =============================================================================
+print('=' * 96)
+print('A1. hst.rule_action 语义（目标钉在 3.0）: 死区 = 窗口强制的**最小**吞吐, 否则全力')
+print('=' * 96)
+v1 = rule(3.0, 3.0, 2.0, 5.0)
+check(abs(v1 - 2.0) < 1e-12, 'δ=0 且窗口 [2,5] 不含 0 ⇒ 取最近端 2.0（**不是 0**!）实测 %.4f' % v1)
+v2 = rule(3.0, 3.0, -5.0, 5.0)
+check(v2 == 0.0, 'δ=0 且 0 ∈ 窗口 ⇒ 0（不主动吞吐）')
+v3 = rule(3.0, 3.0, -5.0, -2.0)
+check(abs(v3 + 2.0) < 1e-12, 'δ=0 且窗口 [-5,-2] 不含 0 ⇒ 取最近端 −2.0, 实测 %.4f' % v3)
+v4 = rule(3.0, 2.0, -5.0, 5.0)
+check(abs(v4 - 5.0) < 1e-12, 'δ=+1 ⇒ 一步填平需求 61 MW 被窗口夹到 +5.0（全力充）, 实测 %.4f' % v4)
+v5 = rule(3.0, 4.0, -5.0, 5.0)
+check(abs(v5 + 5.0) < 1e-12, 'δ=−1 ⇒ 全力放至 −5.0, 实测 %.4f' % v5)
+v6 = rule(3.0, 3.05, -5.0, 5.0)
+check(abs(v6 + 0.05 / (1.0 / 60 / 0.98)) < 1e-9 and abs(v6) < 5.0,
+      'δ=−0.05 ⇒ 比例动作 %.3f MW（不是端点 ⇒ 无自致过冲/抖动）' % v6)
+
+# =============================================================================
+print()
+print('=' * 96)
+print('A2. run101 回归: SOC 恰在 3.0 + 风功率爬坡 ⇒ 必须仍有动作且 P_F ≤ 3')
+print('=' * 96)
+E, pg_prev = 3.0, 6.0
+rows = []
+for ramp in (4.0, 6.0, 8.0, -5.0, -8.0):
+    ptur = pg_prev + ramp
+    lo, hi = ptur - pg_prev - 3.0, ptur - pg_prev + 3.0
+    pb_rule = hst.rule_action(3.0, E, lo, hi, 5, eta_c=0.98, eta_d=0.98,
+                              time=1.0 / 60, rated_power=10.0)
+    pb, info = rbb.compute_pbrule(pb_original=pb_rule, ptur=ptur, pg_prev=pg_prev, E=E)
+    PF = abs(ptur - pb - pg_prev)
+    ok = (abs(pb) > 1e-9) and (PF <= 3.0 + 1e-9)
+    rows.append(ok)
+    print('    爬坡 %+5.1f MW/min: 规则 %.3f → 施加 %.3f MW, P_F = %.3f  %s'
+          % (ramp, pb_rule, pb, PF, 'OK' if ok else '**FAIL**'))
+check(all(rows), '所有爬坡情形都有非 0 动作且 P_F ≤ 3（旧实现此处恒为 0 ⇒ P_F = |爬坡|）')
+
+# =============================================================================
+print()
+print('=' * 96)
+print('A3. RBB compute_pbrule 未被改动 + 已无 nolow 专用方法')
+print('=' * 96)
 rng = np.random.RandomState(0)
-bad_dir = bad_win = bad_clip = bad_pf = bad_old = n_in = n_out = n_zero = 0
-for _ in range(4000):
-    ptur = rng.uniform(0, 12)
-    pg_prev = rng.uniform(0, 12)
-    E = rng.uniform(0.6, 5.6)
-    pb, info = rbb.compute_pbrule_soc_seek(ptur=ptur, pg_prev=pg_prev, E=E)
-    _, ref = rbb.compute_pbrule(pb_original=0.0, ptur=ptur, pg_prev=pg_prev, E=E)
-    if info['is_infeasible']:
-        continue
-    n_in += 1
-    err = 3.0 - E
-    exp = float(info['pbrulemax']) if err > 0 else (float(info['pbrulemin']) if err < 0 else 0.0)
-    if abs(pb - exp) > 1e-12:
-        bad_dir += 1
-    if pb < info['pbrulemin'] - 1e-12 or pb > info['pbrulemax'] + 1e-12:
-        bad_win += 1
-    if info['clip_amount'] != 0.0 or info['pb_original'] != info['pbrule']:
-        bad_clip += 1
-    if abs(ptur - pb - pg_prev) > 3.0 + 1e-9:
-        bad_pf += 1
-    if abs(ref['pbrule'] - float(np.clip(0.0, ref['pbrulemin'], ref['pbrulemax']))) > 1e-12:
+bad_old = 0
+for _ in range(2000):
+    ptur, pg_prev, E = rng.uniform(0, 12), rng.uniform(0, 12), rng.uniform(0.6, 5.6)
+    _, ref = rbb.compute_pbrule(pb_original=rng.uniform(-12, 12), ptur=ptur, pg_prev=pg_prev, E=E)
+    exp = (float(np.clip(ref['pb_original'], ref['pbrulemin'], ref['pbrulemax']))
+           if not ref['is_infeasible'] else ref['pbrule'])
+    if abs(ref['pbrule'] - exp) > 1e-12:
         bad_old += 1
-    n_out += int(E > 3.0)
-    n_zero += int(abs(err) < 1e-12)
-check(bad_dir == 0, '取值方向正确（%d 个可行状态, 放电侧 %d 个）' % (n_in, n_out))
-check(bad_win == 0, '取值恒在 [pbrulemin, pbrulemax] 内（平抑+物理窗口）')
-check(bad_clip == 0, 'clip_amount ≡ 0 且 pb_original = pbrule')
-check(bad_pf == 0, '可行窗口非空时 |pg(t)−pg(t−1)| ≤ 3（平抑约束不被打破）')
-check(bad_old == 0, '原 compute_pbrule 逐位未变（= clip(0, 窗口)）')
-pb0, i0 = rbb.compute_pbrule_soc_seek(ptur=6.0, pg_prev=6.0, E=3.0)
-check(pb0 == 0.0, 'E = 3.0 ⇒ 功率 0（在目标上不动）, 实测 %.6f' % pb0)
-pb_lo, i_lo = rbb.compute_pbrule_soc_seek(ptur=6.0, pg_prev=6.0, E=2.0)
-check(pb_lo == i_lo['pbrulemax'] and pb_lo > 0, 'E = 2.0 < 3 ⇒ 全力充（%.3f = 窗口上限）' % pb_lo)
-pb_hi, i_hi = rbb.compute_pbrule_soc_seek(ptur=6.0, pg_prev=6.0, E=4.0)
-check(pb_hi == i_hi['pbrulemin'] and pb_hi < 0, 'E = 4.0 > 3 ⇒ 全力放（%.3f = 窗口下限）' % pb_hi)
-pb_db, _ = rbb.compute_pbrule_soc_seek(ptur=6.0, pg_prev=6.0, E=3.02, deadband=0.05)
-check(pb_db == 0.0, 'deadband=0.05 且 |E−3|=0.02 ⇒ 0（不动）')
+check(bad_old == 0, 'compute_pbrule 仍是 clip(命令, 窗口)（2000 随机状态 0 违例）')
+s_rbb = open('rbb/rbb_rule_bess.py', encoding='utf-8').read()
+check(('compute_pbrule_soc_seek' not in s_rbb) and ('min_discharge' not in s_rbb),
+      'RBB 内已无 nolow 专用方法（回归到原版 ⇒ "rulebasebess 没被改坏"）')
 
 # =============================================================================
 print()
@@ -163,18 +193,31 @@ class StubEnv:
 
 
 A5 = [0.30, 0.25, 0.35, 0.30, 0.33]
+#  注: RuleBasedBESS 的 SOC 下界 = max_E × min_E_factor = 1.2 MWh。E0 < 该下界时
+#  平抑窗口与物理窗口必然冲突（infeasible）⇒ 被迫吞吐 + 不可避免的 P_F 越限 —— 这是
+#  RBB 的既有口径（"最小化不可避免的越限"），不是 nolow 的 bug，故单独作为一档断言。
+CASES_C = [
+    (5.0, 'E0=5.0 > 3（可行）⇒ 净放电',
+     lambda m: m['dsoc'] < -0.5 and m['r2'] == 0.0 and m['pf_viol'] == 0),
+    (1.5, 'E0=1.5 < 3（可行）⇒ 净充电',
+     lambda m: m['dsoc'] > +0.5 and m['r2'] == 0.0 and m['pf_viol'] == 0),
+    (3.0, 'E0=3.0 = 目标（可行）⇒ 稳住不漂',
+     lambda m: abs(m['dsoc']) < 0.2 and m['r2'] == 0.0 and m['pf_viol'] == 0),
+    (1.0, 'E0=1.0 < 下界 1.2（窗口不可行）⇒ 被迫吞吐 + 不可避免越限',
+     lambda m: m['dsoc'] > 0 and m['r2'] < 0 and m['pf_viol'] >= 1),
+]
 for tag, fn in (('td3per', nine_case_test), ('td3perseg', nct_seg)):
-    for E0, want_sign, lab in ((5.0, -1, 'E0=5.0 > 3 ⇒ 净放电'), (1.0, +1, 'E0=1.0 < 3 ⇒ 净充电')):
+    for E0, lab, cond in CASES_C:
         cm, ov = fn(StubAgent(A5), None, StubEnv(E0=E0), RuleBasedBESS(), seed=42, nolow=True)
         c2 = float(np.mean([m['c2'] for m in cm]))
         r2 = float(np.mean([m['r2'] for m in cm]))
+        pfv = int(sum(m['pf_viol'] for m in cm))
         te = float(np.mean([m['soc_track_err'] for m in cm]))
-        ok = (abs(c2) < 1e-12 and abs(r2) < 1e-12 and te == 0.0
-              and np.sign(ov['dsoc']) == want_sign)
-        check(ok, '%s %s: dsoc = %+.4f MWh, c2 = %.4f, r2 = %.4f, track_err = %.3f, profit = %.1f'
-                 % (tag, lab, ov['dsoc'], c2, r2, te, ov['profit']))
-        if tag == 'td3per' and E0 == 5.0:
-            print('       （对照: 旧口径"恒取最靠充电端"实测 dsoc = +1.0 ⇒ 新口径方向相反 ✓）')
+        m = {'dsoc': ov['dsoc'], 'r2': r2, 'pf_viol': pfv}
+        ok = (abs(c2) < 1e-12 and te == 0.0 and cond(m))
+        check(ok, '%s %s: dsoc = %+.4f MWh, c2 = %.4f, r2 = %+.4f, pf_viol = %d, '
+                 'track_err = %.3f, profit = %.1f'
+                 % (tag, lab, ov['dsoc'], c2, r2, pfv, te, ov['profit']))
 
 # =============================================================================
 print()
@@ -188,14 +231,19 @@ for mp, tag in (('td3per/td3per_main.py', 'td3per'), ('td3perseg/td3perseg_main.
     check("RUN_TAG = RUN_TAG + 'nolow'" in s and "args.env = args.env + 'NOLOW'" in s,
           '%s: RUN_TAG/--env 带 nolow 后缀' % tag)
     check('args.utd_l = 0' in s, '%s: 下层 RL 旁路（utd_l = 0）' % tag)
-    check('compute_pbrule_soc_seek' in s and 'soc_target=soc_target' in s,
-          '%s: 调用 compute_pbrule_soc_seek(..., soc_target=soc_target)' % tag)
-    check('compute_pbrule_min_discharge' not in s, '%s: 旧"放电最小"调用已全部替换' % tag)
+    check('hst.rule_action(' in s and '_soc_tgt_L = soc_target' in s,
+          '%s: nolow 规则 = hst.rule_action(目标钉在 3.0)' % tag)
+    check('compute_pbrule_soc_seek' not in s and 'compute_pbrule_min_discharge' not in s,
+          '%s: 旧"取窗口端点"实现已全部移除' % tag)
+    ls = s.splitlines()
+    i_rbb = [i for i, l in enumerate(ls) if 'pbrule, rbb_info = rbb_system.compute_pbrule(' in l]
+    check(len(i_rbb) >= 1 and 'pb_original = float(pb_cmd_L)' in ls[i_rbb[0] - 1],
+          '%s: RBB 收口为两条分支共用（紧邻上一行 = 统一命令值，无 nolow 专用分支）' % tag)
 for mp, tag in (('td3per/td3per_myfunc.py', 'td3per_myfunc'),
                 ('td3perseg/td3perseg_myfunc.py', 'td3perseg_myfunc')):
     s = open(mp, encoding='utf-8').read()
-    check('nolow=False' in s and 'compute_pbrule_soc_seek' in s,
-          '%s: nine_case_test 支持 nolow + 新规则调用' % tag)
+    check('nolow=False' in s and 'hst.rule_action(' in s,
+          '%s: nine_case_test 支持 nolow + 走 hst.rule_action' % tag)
 
 print()
 print('=' * 96)

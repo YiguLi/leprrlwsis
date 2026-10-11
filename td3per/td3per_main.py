@@ -297,19 +297,24 @@ def train(num_iterations_H,
         # 基线 = 规则动作 (单一真源 hst.rule_action, 与 SocTracker.act 逐位一致):
         #   Δ≡0 ⇒ 命令逐位等于规则下层 ⇒ r2≡0、c2≡0 —— "先稳定到规则"是**结构保证**。
         #   基线负责 clip/物理限幅/被迫吞吐等非线性, 网络只学"相对规则偏多少 [MW]"。
-        # ---- nolow 分支: 下层 RL 整体旁路 (BESS 只有一个规则) ----
-        #   功率 = 全力朝 SOC=SOC_TARGET_CENTER(3.0) 方向充/放, 幅度取平抑可行窗口的对应端点;
-        #   不构造命令/不查询网络; Δ≡0、r2≡c2≡0 (见下方 L 奖励段)。
+        # ---- nolow 分支: 下层 RL 整体旁路 (BESS 只有一个规则, 目标钉在 3.0) ----
+        #   规则 = hst.rule_action(3.0): delta≈0 时只做平抑窗口强制的**最小**吞吐;
+        #   有偏差时全力朝 3.0 充/放(一步填平)。n_rem/Δ/r2/c2 见下方 L 奖励段。
         if args.nolow:
-            pbrule, rbb_info = rbb_system.compute_pbrule_soc_seek(
-                ptur=ptur, pg_prev=pg_prev, E=E_current, soc_target=soc_target)
             _n_rem_L = 5 - (episode_steps % 5)
-            _soc_tgt_L = soc_target              # 恒 = SOC_TARGET_CENTER (无目标; 仅记录)
-            pb_rule = float(pbrule)
-            pb_cmd_L = float(pbrule)
+            _soc_tgt_L = soc_target              # 恒 = SOC_TARGET_CENTER (3.0); 无上层目标
+            # 单一真源 hst.rule_action (与 SocTracker.act 逐位一致), 目标钉在 3.0:
+            #   |delta| <= soc_tol  => clip(0, W) —— 窗口不含 0 时做最小幅度**被迫**吞吐 (= 只平抑);
+            #   否则                => clip(delta/g, W), g 取"一步填平" => **全力朝 3.0 方向**充/放。
+            # 注: 不能用"恒取窗口端点"替代 —— delta=0 时会冻死 SOC(平抑随之失效), 且顶格自致过冲。
+            pb_rule = hst.rule_action(
+                _soc_tgt_L, E_current, rbb_info_obs['pbrulemin'], rbb_info_obs['pbrulemax'],
+                _n_rem_L, eta_c=rbb_system.eta_c, eta_d=rbb_system.eta_d,
+                time=rbb_system.time, rated_power=rbb_system.rated_power)
+            pb_cmd_L = float(pb_rule)
             delta_L = np.zeros(1, dtype=np.float64)
             original_action_L = delta_L
-            applied_action_L = np.array([pbrule])
+            applied_action_L = np.array([pb_cmd_L])
             penalty_NN_L = 0
         else:
             _n_rem_L = 5 - (episode_steps % 5)
@@ -357,19 +362,14 @@ def train(num_iterations_H,
         # 自动含两段 clip: ① CheckAction 的 ±10 夹裁 + ② 平抑窗口夹裁。
         # 因窗口 ⊆ ±10, 传命令值与传夹后值给出的 pbrule 逐位相同 (见 test_l_lower_unit);
         # 若改回传夹后值, |cmd|>10 时该方向梯度恒 0 (死区)。见 hsrl_soctarget.lower_reward。
-        if args.nolow:
-            # nolow: pbrule 已在上面由"全力朝 SOC=3 充/放"直接给出 (取窗口对应端点)
-            #        命令值 = 规则自身的选择 ⇒ clip_amount ≡ 0
-            pb_original = float(pbrule)
-        else:
-            pb_original = float(pb_cmd_L)   # 命令值 (CheckAction 前) = 规则基线 + Δ
-
-            pbrule, rbb_info = rbb_system.compute_pbrule(
-                pb_original=pb_original,
-                ptur=ptur,
-                pg_prev=pg_prev,
-                E=E_current,
-            )
+        # 两条分支共用同一条 RBB 收口: 规则动作(目标 3.0) / 规则基线+Δ 都夹进可行窗口
+        pb_original = float(pb_cmd_L)   # 命令值 (CheckAction 前) = 规则基线 + Δ
+        pbrule, rbb_info = rbb_system.compute_pbrule(
+            pb_original=pb_original,
+            ptur=ptur,
+            pg_prev=pg_prev,
+            E=E_current,
+        )
 
         action_rbb = action.copy()
         action_rbb[-1] = pbrule
@@ -924,7 +924,8 @@ if __name__ == "__main__":
                         help='open-ai gym environment')
     parser.add_argument('--nolow', dest='nolow', action='store_true',
                         help='nolow 分支: 取消 H 层第 6 维 (SOC 目标信号) ⇒ H 动作 = 5 维风机动作; '
-                             'BESS 全力朝 SOC=3.0 充/放 (幅度取平抑可行窗口的对应端点, 平抑约束不被打破); '
+                             'BESS 全力朝 SOC=3.0 充/放 (单一真源 hst.rule_action: |delta|<=soc_tol '
+                             '=> clip(0,W) 只做平抑; 否则 clip(delta/g,W) 全力朝 3.0); '
                              '(pbrulemax); 下层 RL 完全旁路 (BESS 全部由规则决定, r2=c2=0); '
                              'gap 罚关闭。RUN_TAG 与 --env 自动加 nolow 后缀 ⇒ '
                              'output/TD3PERNOLOW-runNN + df_td3pernolow.csv')
