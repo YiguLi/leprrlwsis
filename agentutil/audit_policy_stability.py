@@ -19,10 +19,12 @@
   与 `td3per/td3per_myfunc.py` 的 `Normalize` + `phase_features` 逐位一致；
   面板会用日志里的 `phase_sin/phase_cos` 列自校验 (`--check-phase`)。
 * 动作边界 (CheckAction): 前 5 维 [0, 0.5]，第 6 维 signal [-0.5, 0.5]。
-* 值层锚点 (Q 的"自洽水平"): `anchor = mean(块奖励) / (1-gamma) / s_p`，
+* 值层锚点 (Q 的"自洽水平"): `anchor = mean(块奖励) / (1-gamma)`，
   块奖励 = 每 5 步 (H 层一个决策块) 的 r1 之和；滚动窗口 `--anchor-win`。
-  注意 `update_stats_H.csv` 里的 `reward_mean` **已按 s_p 归一**，所以直接用
-  `Qbar / (rbar/(1-gamma)/s_p)` 就是无量纲自洽比。
+  注意 `update_stats_H.csv` 里的 `q_*`/`reward_mean` 自 2026-10 起**都在回归空间**
+  (不再按通道折算) ⇒ `Qbar / (rbar/(1-gamma))` 直接就是无量纲自洽比。
+  若读**老 run** 的表 (那时 q 被 ×s、reward_mean 被 ×s)，把 `--s-p` 传成当时的
+  s_p 即可把锚点换到同一空间 (`--s-p` 现已默认 1.0 = 不做换算)。
 * `gamma_eff` 校验: 对 `target_p_mean = a*reward_mean + g_eff*min_p_next_mean`
   做最小二乘 —— n=1 的 run 应得 `g_eff ~ gamma`，n=5 的 run 应得 `g_eff ~ gamma^5`。
   这是"某 run 到底跑的哪个 n"的数据证据 (见 `--check-gamma`)。
@@ -311,15 +313,18 @@ def main():
     ap.add_argument('--steps', nargs='*', type=int, default=None,
                     help='要评估的 checkpoint 步（默认: 所有 run 的公共步）')
     ap.add_argument('--gamma', type=float, default=0.98, help='块级折扣（默认 0.98）')
-    ap.add_argument('--s-p', type=float, default=1000.0, help='H 层 reward 归一尺度（默认 1000）')
+    ap.add_argument('--s-p', type=float, default=1.0,
+                    help='把逐步日志的块奖励换算到 q 所在空间的除数（默认 1.0 = 新表口径，'
+                         'q/reward 都已在回归空间）; 读 2026-10 之前的老表时传当时的 s_p')
     ap.add_argument('--anchor-win', type=int, default=20000, help='锚点滚动窗口（默认 20000 步）')
     ap.add_argument('--stat-win', type=int, default=4, help='[C] 摘要统计的窗口长度（末 N 个评估步，默认 4）')
     ap.add_argument('--lag-n', type=int, default=7, help='[F] 标度律用每个 run 自己最后 N 个连续 checkpoint（默认 7）')
     ap.add_argument('--layers', nargs='+', choices=['H', 'L'], default=['H'],
                     help='[F] 审计哪些层臂（默认 H，与历史输出逐字相同）; '
                          'L 需 checkpoint 内有 actor_1.pkl 且日志有 norm_observation_L 列')
-    ap.add_argument('--anchor-min', type=float, default=1.0,
-                    help='锚点稳健阈值: |锚点| < 该值时自洽比记为 nan（小分母相除会虚高，默认 1.0）')
+    ap.add_argument('--anchor-min', type=float, default=0.1,
+                    help='自洽比的分母下限（|锚点| 低于它就标 * 并从 [C] 剔除）; 新表口径下'
+                         '锚点 ≈ r̄/(1-γ)/s_p ≈ O(1)，故默认 0.1（历史 1.0 是老口径定标）')
     ap.add_argument('--check-gamma', action='store_true', help='反解各 run 的 gamma_eff')
     ap.add_argument('--check-phase', action='store_true', help='用日志的 phase_sin/cos 列校验状态口径')
     ap.add_argument('--baseline', nargs='*', default=None,
@@ -448,7 +453,7 @@ def main():
         print(line)
 
     # ---- 输出 B: 值层 ----
-    print('\n[B] 值层自洽（Qbar / 锚点(rbar/(1-g)/(s_p)) / 自洽比 / |dQp/da| / lam1）')
+    print('\n[B] 值层自洽（Qbar / 锚点(rbar/(1-g)) / 自洽比 / |dQp/da| / lam1）')
     print('    自洽比后带 * = |锚点| < %.2f, 小分母相除不可信, 已在 [C] 中剔除' % args.anchor_min)
     for nm in runs:
         print('  --- %s ---' % nm)

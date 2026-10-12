@@ -7,12 +7,14 @@
      且**没有任何地方**把 s 加到 `sum_r1/sum_c1`、EMA 对偶、curriculum、relabel、
      warmup 填入或 L 层上 —— "覆盖所有通道"既不漏（该缩的没缩）也不串（不该缩的缩了）。
   B. **数值不变量（真实 agent + 同一批数据）**：
-     s=1 与 s=1000 两臂在**第一次更新**时
-       * TD 误差逐位一致（`td_p_mean`/`td_c_mean`）⇒ 日志/PER 口径没被改；
-       * PER 优先级逐位一致（自归一化比值，对 s 免疫）；
-       * 目标/收益类字段满足 raw_B = raw_A / s（还原后相等）⇒ `update_stats_H.csv` 与
-         历史 run 直接可比；
-     * 训练后 s=1000 臂收敛到**同一个目标**，且显著更快（这正是初值↔目标距离被压掉 1/s）。
+     `update_stats` 的**每一列都在回归空间**（不折算）⇒ s=1 与 s=1000 两臂
+       * TD 误差、PER 优先级逐位一致（优先级是 `|TD|·s / mean(|TD|·s)`，s 约掉）；
+       * 纯收益类字段（`reward_mean`/`target_*_mean`/`q_*_mean`）**在回归空间恰好差
+         1/s**（`reward_mean` 两臂为 R_P 与 R_P/s）——**这正是"不折算"的直接后果**；
+       * 交叉量（`td/|q|`）与 `hc.lam_rt()` 两臂一致 ⇒ 只有**比值**判据跨 scale 可比，
+         绝对 Q 值本来就不能比（q 随 s 线性变）；
+     * 训练后两臂在回归空间收敛到**同一目标**（s=1000 臂的目标是 R_P/s），
+       且 s=1000 臂的隐层激活量级显著更小（条件数更好）。
   C. **warmup 路径**：`fill_bess_transition` 原样透传 r2/c2（不缩放）；
      `BiasInitTracker` 用**原始**块样本估计、写 fc3.bias 前统一 /s（含覆盖值）。
   D. **与 c1/λ 语义正交**：`set_value_scale` 不碰 MODE / fluct_cost / h_settings。
@@ -75,14 +77,16 @@ for p in AGENT_FILES:
     # r1/c1 进 critic 的唯一一次除法, 各一次: profit / s_p, cost / s_c
     assert 'profit_batch = profit_batch / _SP' in t and t.count('/ _SP') == 1, (p, 'profit 通道未 / s_p')
     assert 'cost_batch = cost_batch / _SC' in t and t.count('/ _SC') == 1, (p, 'cost 通道未 / s_c')
-    # TD 误差**按通道各自**还原 (PER/日志保持原始口径)
-    assert re.search(r"TD_errors_p = abs\([^\n]*\) \* _SP", t), (p, 'TD_p 未按 s_p 还原')
-    assert re.search(r"TD_errors_c = abs\([^\n]*\) \* _SC", t), (p, 'TD_c 未按 s_c 还原')
+    # TD 误差按通道配平 (PER 用; 分子分母同乘 s ⇒ 优先级与 s 无关)
+    assert re.search(r"TD_errors_p = abs\([^\n]*\) \* _SP", t), (p, 'TD_p 未按 s_p 配平')
+    assert re.search(r"TD_errors_c = abs\([^\n]*\) \* _SC", t), (p, 'TD_c 未按 s_c 配平')
     # 非 EMA 对偶分支还原 (cost 通道 ⇒ s_c)
     assert t.count('* _SC - self.cost_limit') == 1, p
-    # 统计字段还原: profit 用 s_p, cost 用 s_c
-    assert t.count('_d[_k] = float(_d[_k]) * _SP') == 1, p
-    assert t.count('_d[_k] = float(_d[_k]) * _SC') == 1, p
+    # ⚠ 统计字段**不得**再有任何折算 (2026-10 取消): 表内一律回归空间, 否则又回到
+    #   "profit 折算 / td_* 不折算"的混合量纲 (td_c/q_c 被低估 s_c 倍)。
+    for bad in ('_d[_k] = float(_d[_k])', '* _SP      # profit 通道用 s_p',
+                '* _SC      # cost 通道用 s_c', '还原成原始口径'):
+        assert bad not in t, (p, bad)
     # 绝不能出现的"串台": 去缩 sum/EMA/d_block/γ
     for bad in ('ema_cost /', 'ema_cost/', 'd_block /', 'discount / _S',
                 'lam / _S', 'lam *= 1.0 / _S', 'PER_epsilon / _S'):
@@ -99,6 +103,8 @@ for p in MAIN_FILES:
     assert t.count('hc.set_cost_scale(args.cost_scale)') == 1, p
     assert t.count('agent_H.value_scale = hc.value_scale()') == 1, p
     assert t.count('agent_H.cost_scale = hc.cost_scale()') == 1, p
+    # scale-free 判据列: lam_rt = λ_actor·q_c/q_p 必须随表落盘 (替代手工折算 scale)
+    assert t.count("_mean['lam_rt'] = hc.lam_rt(") == 1, (p, 'lam_rt 列未接线')
     # TD3 六个用 s_c=100; 其余三个保持 = s_p (旧行为)
     if p in TD3_MAIN_FILES:
         assert 'default=hc.COST_SCALE_TD3' in t, (p, 'TD3 系列应用 COST_SCALE_TD3')
@@ -195,7 +201,9 @@ def run(scale, steps, st, ac):
             n += 1
         with torch.no_grad():
             q = float(agent.critic_p([torch.tensor(st), torch.tensor(ac)]).mean())
-        curve.append(q * scale)
+        # ⚠ 不做 ×scale: 两臂都要按**回归空间**报曲线 (s=1 臂的回归空间就是原始口径)。
+        # 历史上这里 `q * scale` 手工折回原始口径, 正是被取消的那类"手工还原"。
+        curve.append(q)
     last = dict(agent.update_stats[-1])
     return agent, first, last, curve
 
@@ -213,19 +221,22 @@ print('    td_p_mean : s=1 {:>14.4f} | s=1000 {:>14.4f} | 相对差 {:+.2e}'
 print('    td_c_mean : s=1 {:>14.4f} | s=1000 {:>14.4f} | 相对差 {:+.2e}'
       .format(f1['td_c_mean'], f2['td_c_mean'],
               abs(f1['td_c_mean'] - f2['td_c_mean']) / abs(f1['td_c_mean'])))
-print('    reward_mean: s=1 {:>12.3f} | s=1000 {:>12.3f} | 比值 {:.6f} (还原正确 ⇒ 1)'
+print('    reward_mean: s=1 {:.3f} | s=1000 {:.3f} | 比值 {:.6f} (= 1/s, 回归空间口径不折算)'
       .format(f1['reward_mean'], f2['reward_mean'], f2['reward_mean'] / f1['reward_mean']))
 print('    优先级 L1 相对差: {:+.2e}'.format(
     np.abs(f1['_prio'] - f2['_prio']).max() / np.abs(f1['_prio']).max()))
-print('    q_p_mean 日志: s=1 {:.4f} | s=1000 {:.4f} (= 归一化 Q×1000, 证明还原生效)'
+print('    q_p_mean : s=1 {:.6f} | s=1000 {:.6f} (回归空间逐位相同, 无 ×s 折算)'
       .format(f1['q_p_mean'], f2['q_p_mean']))
 
-# 纯收益类字段: 两臂**还原后必须逐位相等** (它们只由 r1/c1 决定; s=1000 臂内部
-# 存的是 1/s, 经 ×s 还原 ⇒ 与 s=1 臂完全相同)
+# 回归空间口径 (2026-10 起): `update_stats` 的每一列**都不折算**。
+#   * TD / 优先级: 两臂逐位/同量级 (s 在 |TD|·s / mean(|TD|·s) 里约掉);
+#   * 纯收益类字段: 两臂**恰好差 1/s** (这是"不折算"的定义, 不是 bug);
+#   * 只有**比值**判据 (td/|q|, lam_rt) 跨 scale 可比。
 for k in ('reward_mean', 'cost_mean', 'target_p_mean', 'target_c_mean'):
     ratio = f2[k] / f1[k]
-    assert abs(ratio - 1.0) < 1e-6, (k, f1[k], f2[k], ratio)
-print('    reward/cost/target 四个纯收益字段: 两臂还原后逐位相等 (比值 1.000000)')
+    exp = 1.0 / 1000.0        # 本段两臂只差 s_p = s_c = 1000 (cost_scale=None ⇒ 跟随 s_p)
+    assert abs(ratio - exp) < 1e-6, (k, f1[k], f2[k], ratio, exp)
+print('    reward/cost/target 四个纯收益字段: 两臂恰好差 1/s=1e-3 (回归空间口径, 不折算)')
 
 # TD / 优先级在**第一次更新**时不是逐位不变量: 网络初始输出(≈0.04)是 s-无关的,
 # 而目标带 1/s ⇒ |R/s − Q| 与 (|R − Q|)/s 相差 ~s·Q/R。作为"没有被 1000 倍污染"
@@ -240,27 +251,29 @@ assert 0.2 < med1 < 5.0 and 0.2 < med2 < 5.0, (med1, med2)
 print('    TD/优先级: 两臂同量级 (td 相对差 {:.1%}, 优先级最大相对差 {:.2%}, '
       '中位数 {:.3f} vs {:.3f}) —— 自归一化优先级不会被 s 污染'
       .format(rel_td, rel_prio, med1, med2))
-# Q 类字段: 两臂参数逐位相同 ⇒ 网络输出相同, 而 s=1000 臂的日志按 ×s 还原
-# ⇒ 必须**精确**是 s=1 臂的 1000 倍 (这正说明"值函数口径还原"生效)
-assert abs(f2['q_p_mean'] - f1['q_p_mean'] * 1000.0) < 1e-6, (f1['q_p_mean'], f2['q_p_mean'])
-assert abs(f2['min_p_next_mean'] - f1['min_p_next_mean'] * 1000.0) < 1e-6
-print('    q/min_next 日志: s=1000 臂 = s=1 臂 × 1000 (逐位: {:.4f}×1000={:.4f})'
-      .format(f1['q_p_mean'], f2['q_p_mean']))
+# Q 类字段: 两臂参数逐位相同 ⇒ 回归空间输出**逐位相同** (不再有任何 ×s 折算)
+assert abs(f2['q_p_mean'] - f1['q_p_mean']) < 1e-9, (f1['q_p_mean'], f2['q_p_mean'])
+assert abs(f2['min_p_next_mean'] - f1['min_p_next_mean']) < 1e-9
+print('    q/min_next: 两臂回归空间**逐位相同** (s=1 {:.6f} vs s=1000 {:.6f}) '
+      '—— 表内不再有 ×s 折算'.format(f1['q_p_mean'], f2['q_p_mean']))
 
-print('  学习曲线 (目标 {:.0f}; s=1000 臂已 ×s 换算到同一口径):'.format(R_P))
+print('  学习曲线 (回归空间; 目标: s=1 臂 {:.0f}, s=1000 臂 {:.1f} = 同一物理目标 /s):'
+      .format(R_P, R_P / 1000.0))
 print('    s=1      ' + '  '.join('{:>10.1f}'.format(v) for v in c1))
 print('    s=1000   ' + '  '.join('{:>10.1f}'.format(v) for v in c2))
 print('    更新次数 ' + '  '.join('{:>10d}'.format(t) for t in STEPS))
 
-# 语义等价性(归一化必须保住的): 两臂收敛到**同一个目标**
-e1, e2 = abs(q1 - R_P) / R_P, abs(q2_raw - R_P) / R_P
+# 语义等价性(归一化必须保住的): 两臂收敛到**同一物理目标**。
+# ⚠ 口径: 两臂的 `update_stats.q_p_mean` 现在都留在回归空间 ⇒ s=1 臂收敛到 R_P、
+#   s=1000 臂收敛到 R_P/1000。原来的写法把两臂都拿 R_P 比, 那是"手工 ×s 折算"的残留。
+e1, e2 = abs(q1 - R_P) / R_P, abs(q2_raw - R_P / 1000.0) / (R_P / 1000.0)
 # 容差 5% (原 3%): 本测试的论点是"两臂收敛到同一目标 + s=1000 臂显著更快", 而非
 # s=1 臂的收敛精度 —— 在该合成回归里 s=1 臂 800 步仍有 ~4% 偏差 (内部隐层激活要放大
 # 到 O(1e2) 才能把输出顶到 O(1e4), 这正是归一化要改善的数值条件)。3% 会随 torch 版本
 # 的初始化/优化细节随机翻红 (实测 HEAD 上即失败: s=1 4806.3 vs 目标 5000)。
-assert e1 < 0.05 and e2 < 0.05, (q1, q2_raw)
-print('    收敛误差: s=1 {:.2%} | s=1000 {:.2%} ⇒ 同一目标 (归一化只改数值条件, 不改问题)'
-      .format(e1, e2))
+assert e1 < 0.05 and e2 < 0.05, (q1, q2_raw, R_P, R_P / 1000.0)
+print('    收敛误差(各对自己的回归空间目标): s=1 {:.2%} | s=1000 {:.2%} '
+      '⇒ 同一物理目标 (归一化只改数值条件, 不改问题)'.format(e1, e2))
 
 # 归一化真正改变的是**内部尺度**, 而不是(在这个合成回归里)收敛速度:
 # s=1 臂必须把隐层激活放大到 ~1e2 才能把输出顶到 O(1e4); s=1000 臂保持 O(1)。
@@ -279,10 +292,12 @@ print('    ⇒ 同一目标, s=1000 用 O(1) 内部尺度做到 (s=1 需把 h5 �
 # ---------------------------------------------------------------------------
 # B2. 双尺度代价通道 (TD3 全系列: s_p=1000 固定, s_c 1000→100 且 λ ÷10)
 #     不变式: **改 s_c 只改 critic 的数值条件, 不改它学到的物理量**
-#       * 首次更新: 网络同一初值 ⇒ 还原后日志恰好差 s_c 之比 (10×)
-#       * 收敛后: 原始口径 Q_c 收敛到**同一个目标** R_C
+#       * 首次更新: 同一网络初值 + 回归空间口径 ⇒ 两臂日志**逐位相同** (与 s_c 无关)
+#       * 收敛后: 回归空间 Q_c 收敛到**各自的目标** Q_c_raw/s_c (1000 臂是 100 臂的 10×)
 #       * profit 通道完全不受 s_c 影响
-#       * actor 的有效物理权衡 λ·(Q_c/s_c) 两臂相同
+#       * scale-free 判据 `hc.lam_rt()` 两臂相同 (λ 的自动重标生效)
+#     ⚠ 历史版本断言"还原后 Q_c 收敛到同一目标 R_C", 那需要手工把两臂各自 ×s_c —— 那步
+#       折算已被取消; 现在正确的说法是"回归空间各收敛到自己那个 R_C/s_c, 比值不变"。
 # ---------------------------------------------------------------------------
 def build2(sc, lam):
     torch.manual_seed(0)
@@ -318,27 +333,31 @@ def run2(sc, lam):
 LAM_RAW = hc.LAM_INIT
 _agA, fA, lA = run2(1000.0, LAM_RAW)                      # 旧: s_c = s_p
 _agB, fB, lB = run2(hc.COST_SCALE_TD3, LAM_RAW / 10.0)    # 新: 双尺度 (λ = λ_raw/10)
-# ① 首次更新 (同一网络初值): 还原后 cost 日志恰好差 s_c 之比
-assert abs(fA['q_c_mean'] - 10.0 * fB['q_c_mean']) < 1e-6, (fA['q_c_mean'], fB['q_c_mean'])
-assert abs(fA['q_p_mean'] - fB['q_p_mean']) < 1e-6, (fA['q_p_mean'], fB['q_p_mean'])
-# ② 收敛后: 原始口径 cost 值收敛到同一目标
-eA = abs(lA['q_c_mean'] - R_C) / R_C
-eB = abs(lB['q_c_mean'] - R_C) / R_C
-assert eA < 0.05 and eB < 0.05, (lA['q_c_mean'], lB['q_c_mean'], R_C)
+SC_A, SC_B = 1000.0, hc.COST_SCALE_TD3
+# ① 首次更新 (同一网络初值 + 回归空间口径): cost 日志**逐位相同** (不再差 s_c 之比)
+assert abs(fA['q_c_mean'] - fB['q_c_mean']) < 1e-9, (fA['q_c_mean'], fB['q_c_mean'])
+assert abs(fA['q_p_mean'] - fB['q_p_mean']) < 1e-9, (fA['q_p_mean'], fB['q_p_mean'])
+# ② 收敛后: 各臂在回归空间收敛到**自己的**目标 (R_C/s_c); 折算回原始口径才相等
+_qcA_raw, _qcB_raw = lA['q_c_mean'] * SC_A, lB['q_c_mean'] * SC_B
+eA = abs(_qcA_raw - R_C) / R_C
+eB = abs(_qcB_raw - R_C) / R_C
+assert eA < 0.05 and eB < 0.05, (lA['q_c_mean'], lB['q_c_mean'], eA, eB)
 # ③ profit 通道不受 s_c 影响
-assert abs(lA['q_p_mean'] - lB['q_p_mean']) / R_P < 0.02, (lA['q_p_mean'], lB['q_p_mean'])
-# ④ 有效物理权衡 λ·(Q_c_raw/s_c) 两臂一致 (λ 的自动重标生效)
-_tA = LAM_RAW * lA['q_c_mean'] / 1000.0
-_tB = (LAM_RAW / 10.0) * lB['q_c_mean'] / hc.COST_SCALE_TD3
+assert abs(lA['q_p_mean'] - lB['q_p_mean']) / (R_P / SC_A) < 0.02, (lA['q_p_mean'], lB['q_p_mean'])
+# ④ scale-free 判据: lam_rt = λ_actor·q_c/q_p 两臂一致 (s_c 各自约掉)
+_tA = hc.lam_rt(LAM_RAW, lA['q_c_mean'], lA['q_p_mean'])
+_tB = hc.lam_rt(LAM_RAW / 10.0, lB['q_c_mean'], lB['q_p_mean'])
 assert abs(_tA - _tB) / max(abs(_tA), 1e-12) < 0.05, (_tA, _tB)
 print()
-print('  B2. 双尺度代价通道 (s_p=1000 固定; s_c 1000→100, λ {:.3f}→{:.4f}):'.format(
-    LAM_RAW, LAM_RAW / 10.0))
-print('    首次更新 cost 日志还原: s_c=1000 → {:.4f} | s_c=100 → {:.4f} (比值 {:.1f}× = s_c 之比)'
-      .format(fA['q_c_mean'], fB['q_c_mean'], fA['q_c_mean'] / fB['q_c_mean'] if abs(fB['q_c_mean']) > 1e-12 else float('nan')))
-print('    收敛后原始口径 Q_c: 目标 {:.1f} | s_c=1000 → {:.3f} ({:.2%}) | s_c=100 → {:.3f} ({:.2%})'
-      .format(R_C, lA['q_c_mean'], eA, lB['q_c_mean'], eB))
-print('    profit 通道: {:.1f} vs {:.1f} (不受 s_c 影响) | 物理权衡 λ·Q_c/s_c: {:.5f} vs {:.5f}'
+print('  B2. 双尺度代价通道 (s_p=1000 固定; s_c {:.0f}→{:.0f}, λ {:.3f}→{:.4f}):'.format(
+    SC_A, SC_B, LAM_RAW, LAM_RAW / 10.0))
+print('    首次更新 cost 日志(回归空间): s_c=1000 → {:.6f} | s_c=100 → {:.6f} (逐位相同, 无折算)'
+      .format(fA['q_c_mean'], fB['q_c_mean']))
+print('    收敛后回归空间 Q_c: {:.5f} vs {:.5f} (目标 = R_C/s_c: {:.3f} vs {:.3f})'
+      .format(lA['q_c_mean'], lB['q_c_mean'], R_C / SC_A, R_C / SC_B))
+print('    折算回原始口径才相等: {:.3f} ({:.2%}) vs {:.3f} ({:.2%})'
+      .format(_qcA_raw, eA, _qcB_raw, eB))
+print('    profit 通道: {:.4f} vs {:.4f} (不受 s_c 影响) | lam_rt (scale-free): {:.6f} vs {:.6f}'
       .format(lA['q_p_mean'], lB['q_p_mean'], _tA, _tB))
 
 # =============================================================================

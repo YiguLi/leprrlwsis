@@ -154,7 +154,9 @@ def td_of(run, ckpt):
     if u is None:
         return float('nan')
     u = u[(u.step > ckpt - 2000) & (u.step <= ckpt)]
-    return float(u.td_p_mean.mean()) / 1000. if len(u) else float('nan')
+    # ⚠ 口径: `td_p_mean` 自 2026-10 起就是**回归空间**值（此前被折算成原始口径，
+    #   故这里曾有一个 `/1000.`）。该 A/B 的两臂 s_p 相同 ⇒ 去掉折算不改变比值结论。
+    return float(u.td_p_mean.mean()) if len(u) else float('nan')
 
 
 def perf(run):

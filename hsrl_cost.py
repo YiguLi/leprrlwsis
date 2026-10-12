@@ -208,6 +208,26 @@ def dual_update(agent, d_block):
 
 
 # ---------------------------------------------------------------- 诊断 / 打印
+def lam_rt(lam_actor, q_c_reg, q_p_reg):
+    """actor 拉格朗日项相对利润项的占比（**scale-free**），供日志列 `lam_rt`。
+
+    `update_stats` 现在一律落**回归空间**，所以两个 `q_*` 应传回归空间值
+    （`update_stats_H.csv` 里的 `q_c_mean` / `q_p_mean`）。推导：
+
+        λ_rt = λ_actor·q_c / q_p
+             = (λ_raw·s_c/s_p)·(Q_c/s_c) / (Q_p/s_p)
+             = λ_raw·Q_c / Q_p
+
+    两边的 s 各自约掉 ⇒ 这个比值**不随 `--value_scale`/`--cost_scale` 变**，
+    也是唯一能与"λ_raw ∈ [0.967, 4.833]、d_block=15 MW·step"直接对话的口径。
+    实测 run96 末段 ≈ 6.8%（即约束项确实只在边际上起作用）。
+    """
+    qp = float(q_p_reg)
+    if abs(qp) < 1e-12:
+        return float('nan')
+    return float(lam_actor) * float(q_c_reg) / qp
+
+
 def summary(pr=None):
     """一行口径说明（startup 打印用）。"""
     pr = float(PR_REF if pr is None else pr)
@@ -282,8 +302,10 @@ def summary(pr=None):
 # ----------------------------------------
 #   * λ 区间、EMA 对偶（`agent.ema_cost` vs `d_block_H=15`）、curriculum
 #     —— 都是主循环里的原始口径量，乘性对偶对 r1/c1 的换算一无所知；
-#   * `update_stats_H.csv` 与 TensorBoard 的 q_p / td_p / target_p：agent 内部
-#     乘回 s，仍是原始口径 ⇒ 与历史 run、`analyse_q_scale.py` 直接可比；
+#   * `update_stats_H.csv` 与 TensorBoard 的 q_* / td_* / target_*：**全部留在回归
+#     空间、不做任何 ×s**（2026-10 起；历史做法按通道 ×s_p/×s_c 换成原始口径，但
+#     `td_*` 不换 ⇒ 表内混合量纲，`td_c/q_c` 被低估 s_c 倍）。跨 scale 可比的是
+#     **比值**判据：`td/|q|`（同空间）与 `lam_rt() = λ_actor·q_c/q_p`（s 自动约掉）；
 #   * PER 优先级 `|TD_p|/mean_p + |TD_c|/mean_c + PER_epsilon`：本身就是自归一化
 #     比值 ⇒ 对 s 完全免疫（PER_epsilon 加在 O(1) 量上，占比不变）；
 #   * 环境侧、`P_F`、`d_block`、`sum_c1`、`sum_r1` 日志、CSV 落盘列。

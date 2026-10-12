@@ -378,7 +378,7 @@ class SP_TD3(object):
 
             # TODO update dual variable
             if not self.ema_lam:
-                lam_loss = (min_c_cur * _SC - self.cost_limit)   # 还原原始口径 (仅 non-EMA 分支)
+                lam_loss = (min_c_cur * _SC - self.cost_limit)   # 非线性对偶分支 (仅覆盖层/单步模式)
                 lam_loss = lam_loss.mean().item()
                 self.lam_loss = lam_loss  # for curriculum convergence check
                 self.lam += lam_loss * self.lr_lam
@@ -398,8 +398,8 @@ class SP_TD3(object):
         # B2: 优先级 = |TD_p|/mean_p + |TD_c|/mean_c (去 lam，量纲归一化)
         min_p_cur_b = self._pair_min(q_batch_p, q_batch_p2)
         min_c_cur_b = self._aggregate_pair(q_batch_c, q_batch_c2)
-        TD_errors_p = abs(target_q_batch_p - min_p_cur_b) * _SP   # ×s_p   # ×s: PER/日志保持原始口径
-        TD_errors_c = abs(target_q_batch_c - min_c_cur_b) * _SC   # ×s_c
+        TD_errors_p = abs(target_q_batch_p - min_p_cur_b) * _SP   # 仅用于 PER 配平 (分子分母同乘 s ⇒ 优先级与 s 无关); 日志一律留回归空间
+        TD_errors_c = abs(target_q_batch_c - min_c_cur_b) * _SC   # 仅用于 PER 配平 (同上); 日志一律留回归空间
 
         td_errors_p_np = TD_errors_p.detach().cpu().numpy()
         td_errors_c_np = TD_errors_c.detach().cpu().numpy()
@@ -432,18 +432,13 @@ class SP_TD3(object):
                 'cost_mean': float(cost_batch.mean().item()),
                 'weight_mean': float(weights.mean().item()),
             })
-            # 值函数口径字段还原成原始口径 (s=1 时恒等) —— update_stats_H.csv /
-            # analyse_q_scale.py / 历史 run 因此可直接对比。
-            if _SP != 1.0 or _SC != 1.0:
-                _d = self.update_stats[-1]
-                for _k in ('reward_mean', 'q_p_mean', 'q_p2_mean',
-                           'min_p_next_mean', 'target_p_mean'):
-                    if _k in _d:
-                        _d[_k] = float(_d[_k]) * _SP      # profit 通道用 s_p
-                for _k in ('cost_mean', 'q_c_mean', 'q_c2_mean',
-                           'min_c_next_mean', 'target_c_mean'):
-                    if _k in _d:
-                        _d[_k] = float(_d[_k]) * _SC      # cost 通道用 s_c
+            # ⚠ 本表的**每一列都在值函数回归空间**（= critic 实际回归、PER 实际
+            # 使用的空间），不做任何 ×s 换算。历史做法把 profit 字段 ×s_p、cost
+            # 字段 ×s_c 换成原始口径，而 `td_*` 留在回归空间 ⇒ 同一张表里混了两种
+            # 量纲，`td_c/q_c` 因此被低估 s_c 倍（run96: 0.125 vs 真值 12.48），
+            # 且方向是「看起来 cost critic 收敛得极好」——与事实相反。
+            # 跨 scale 需要的是**比值**判据（`td/|q|`、`λ_actor·q_c/q_p`）：
+            # 它们在任一空间都成立，而 q 的绝对值本就随 s 线性变，比不得。
 
     # ========================================================================
     # EMA dual-ascent (actual-cost based lam update)

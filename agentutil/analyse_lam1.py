@@ -73,6 +73,18 @@ def find_run_inputs(run_dir):
     return step_csv, stats_csv
 
 
+def _scale_of(u, col, default):
+    """从 `update_stats_H.csv` 读自描述尺度列（老 run 无该列 ⇒ default）。"""
+    try:
+        if col in u:
+            v = float(u[col].iloc[0])
+            if v == v and v > 0:      # 非 NaN 且为正
+                return v
+    except Exception:
+        pass
+    return default
+
+
 def detect_lam_scale(lam_min_obs, lam_max_obs):
     """从观测到的 λ 区间反推 `lam_scale() = s_c/s_p`（决定 λ 的显示区间）。
 
@@ -201,6 +213,14 @@ def analyse(run_dir, gamma=0.98, anchor_win=20000, ev_win=20, verbose=True):
 
     br = d.groupby(d['step'] // 5)['r1'].sum()                  # 每块 Σ₅ r1（原始元）
     bc = d.groupby(d['step'] // 5)['c1_step'].sum()
+    # ⚠ 口径: `update_stats_H.csv` 的 q_*/td_*/target_* 自 2026-10 起**都在回归空间**
+    #（取消按通道折算）。锚点由逐步日志的**原始**块和算得 ⇒ 必须除以当时的 s 才能
+    # 与 q_* 相比；s 从表内自描述列读取（老 run 无该列 ⇒ 1.0，那时 q_* 本就是原始口径，
+    # 与老写法逐位一致）。
+    _sp = _scale_of(u, 'value_scale', 1.0)
+    _sc = _scale_of(u, 'cost_scale', _sp)
+    br = br / _sp
+    bc = bc / _sc
     win_b = max(10, int(anchor_win // 5))
     anchor_p = br.rolling(win_b, min_periods=5).mean() / (1.0 - gamma)
     anchor_c = bc.rolling(win_b, min_periods=5).mean() / (1.0 - gamma)
@@ -224,7 +244,7 @@ def analyse(run_dir, gamma=0.98, anchor_win=20000, ev_win=20, verbose=True):
     regime = np.where(lam_m >= hi * 0.98, 'top',
                       np.where(lam_m <= lo * 1.02, 'floor', 'mid'))
     if verbose:
-        print('\n[E] Q 污染检查（样本 %d 块，step %d..%d；锚点 = mean(块Σr1)/(1−γ) 滚动 %d 步）'
+        print('\n[E] Q 污染检查（样本 %d 块，step %d..%d；锚点 = mean(块Σr1)/s/(1−γ) 滚动 %d 步）'
               % (len(m), m['step'].min(), m['step'].max(), anchor_win))
         print('    %-6s %6s %10s %10s %12s %12s %12s' %
               ('λ 分区', '块数', '自洽比p', '自洽比c', 'relTD_p', 'relTD_c', 'cost_mean'))

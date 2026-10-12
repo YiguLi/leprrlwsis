@@ -345,13 +345,16 @@ def part_d(run, g):
         print('  (缺 %s，跳过)' % p)
         return
     u = pd.read_csv(p)
-    print('  块奖励（日志重算）        mean %8.2f' % g['H'].mean())
+    # ⚠ 口径: `update_stats_H.csv` 自 2026-10 起**所有列都在回归空间**（不再按通道折算）。
+    #   本节的 `g['H']` 来自逐步日志 ⇒ 是**原始元**，比较前必须 /s_p（s 由表内自描述列给）。
+    _sp = float(u['value_scale'].iloc[0]) if 'value_scale' in u else hc.VALUE_SCALE
+    print('  块奖励（日志重算, 原始元）  mean %8.2f' % g['H'].mean())
     print('  nstep=5 折叠后（进 buffer）mean %8.2f（γ 折叠和 %.2f）' % (g['H'].mean() * fold, fold))
-    print('  update_stats.reward_mean  mean %8.2f  ⇒ critic 拟合的就是这个量级'
-          % u.reward_mean.mean())
-    print('  q_p_mean %8.1f（/VALUE_SCALE(%.0f) = %.2f 回归空间）'
-          % (u.q_p_mean.mean(), hc.VALUE_SCALE, u.q_p_mean.mean() / hc.VALUE_SCALE))
-    print('  td_p_mean %7.1f  ⇒ TD/奖励 = %.2f, TD/Q = %.3f'
+    print('  update_stats.reward_mean  mean %8.4f  [= 上一行 / s_p=%.0f ⇒ 同一量级]'
+          % (u.reward_mean.mean(), _sp))
+    print('  q_p_mean %8.4f（回归空间; ×s_p = %.1f 原始口径）'
+          % (u.q_p_mean.mean(), u.q_p_mean.mean() * _sp))
+    print('  td_p_mean %7.4f  ⇒ TD/奖励 = %.2f, TD/Q = %.3f'
           % (u.td_p_mean.mean(), u.td_p_mean.mean() / u.reward_mean.mean(),
              u.td_p_mean.mean() / u.q_p_mean.mean()))
     u2 = u.copy()

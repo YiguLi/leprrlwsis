@@ -105,7 +105,7 @@ H 每块更新 2 次; H 层越界罚 penalty_NN_H 系数 100/单位, 不封顶 (
 | `df_td3perrb.csv` | 每步全量：`r1/c1_step/gap_raw/gap_pen/soc_signal/soc_target/soc_delta`、RBB 窗口量、`clip_amount`、`d_cap_c/d_cap_d`、收益分解、`lam1`、`d_block_H`、相位列 |
 | `df_episode_td3perrb.csv` | 每 episode：`episode_reward/cost/gap_pen/profit`、`deg_charge/deg_discharge` |
 | `df_test9.csv` | 每 480 步的 9-case 测试：`r1/c1/gap_pen/cvm/pf_viol/profit/soc_track_err` |
-| `update_stats_H.csv` | H 层每块 2 批更新的 TD/Q/target/batch 统计均值 |
+| `update_stats_H.csv` | H 层每块 2 批更新的 TD/Q/target/batch 统计均值（**全部在回归空间**，不折算；附 `value_scale`/`cost_scale`/`lam_rt` 自描述列） |
 
 CSV 采用**增量追加**落盘（`util.flush_csv_append_batch`：本表按"攒一批 → flush → 清空"写）。
 

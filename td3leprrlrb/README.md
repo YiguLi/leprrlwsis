@@ -216,7 +216,7 @@ python td3leprrlrb/td3leprrlrb_main.py --llm_provider deepseek   # 覆盖配置�
 | `df_td3leprrlrb.csv` | 每步全量（与 td3prrlrb 相同），**新增** `wind_low_max` / `wind_high_min` 两列（回溯分档依据）+ **P0.3 的 6 列相位**：`phase_minute`、`phase_sin`、`phase_cos`、`seg_remain_frac`、`seg_remain_hours`、`next_price` |
 | `df_episode_td3leprrlrb.csv` | 每 episode：`episode_reward/cost/gap_pen/profit`、`deg_charge/discharge`、**当前阈值** |
 | `df_test9.csv` | 每 480 步的 9-case 测试，**新增** `project_wind_levels`（该 case 在**当前**阈值下实际落入的档）、两列阈值、`phase_minute`（该 case 用的代表相位，OVERALL 行为 -1） |
-| `update_stats_H.csv` | H 层每块 2 批更新的 TD/Q/target/batch 统计均值 |
+| `update_stats_H.csv` | H 层每块 2 批更新的 TD/Q/target/batch 统计均值（**全部在回归空间**，不折算；附 `value_scale`/`cost_scale`/`lam_rt` 自描述列） |
 | **`df_llm_adjust.csv`** | **每次阈值调整一行**：`old/new_low_max`、`old/new_high_min`、`adjust_low_max`、`adjust_high_min`、`n_relabeled`、以及触发出该决策的窗口统计 |
 
 TensorBoard 新增标量：`seg/wind_low_max`、`seg/wind_high_min`（逐步阈值轨迹）、

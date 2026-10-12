@@ -165,6 +165,11 @@ def sec_A(d):
           % (GAMMA, GAMMA_EFF, HORIZON))
 
     # Qbar = 双 critic 平均；anchor = EMA(块奖励)×1/(1−γ^5)
+    # ⚠ 口径: `update_stats_H.csv` 自 2026-10 起所有列都在**回归空间**（同一空间里
+    #   `td/q`、`Qbar/anchor` 才是干净比值）⇒ `reward_mean` 已经是 r̄/s_p，
+    #   `anchor = reward_mean·HORIZON` 天生与 Qbar 同空间，**不要再除 s_p**。
+    #   ⚠ 老表（那时 q 被 ×s、reward_mean 被 ×s）算出的自洽比只在"q 与 reward 比值"
+    #   意义上仍然有效（两者同乘 s），数字量级与现在一致。
     qbar = df[['q_p_mean', 'q_p2_mean']].mean(axis=1)
     df['Qbar'] = qbar
     r = df['reward_mean'].to_numpy(float)
@@ -178,7 +183,6 @@ def sec_A(d):
     df['自洽比'] = qbar / df['anchor']
     df['relTD_p'] = df['td_p_mean'] / np.maximum(np.abs(df['q_p_mean']), 1e-9)
     df['relTD_c'] = df['td_c_mean'] / np.maximum(np.abs(df['q_c_mean']), 1e-9)
-    df['块奖励EMA'] = np.array(ema)
 
     show = ['step', 'Qbar', 'anchor', '自洽比', 'td_p_mean', 'q_p_mean',
             'td_c_mean', 'q_c_mean', '块奖励EMA', 'cost_mean', 'weight_mean']

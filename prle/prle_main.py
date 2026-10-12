@@ -423,6 +423,17 @@ def train_prle(num_iterations_H,
                     _stats = agent_H.update_stats
                     _mean = {k: float(np.mean([s[k] for s in _stats]))
                              for k in _stats[0]}
+                    # scale-free 判据: 约束项占利润的比 (λ_actor·q_c/q_p; 两通道
+                    # 的 s 各自约掉) —— 手工折算 scale 才能算的量, 现在直接落盘。
+                    _mean['lam_rt'] = hc.lam_rt(
+                        agent_H.lam, _mean.get('q_c_mean', 0.0),
+                        _mean.get('q_p_mean', 0.0))
+                    # 让这张表**自描述空间**: 所有 q_*/td_*/target_* 都在回归空间
+                    # (不折算), 分析脚本要用原始口径时按这两列自行换算。
+                    _mean['value_scale'] = float(getattr(agent_H, 'value_scale', 1.0) or 1.0)
+                    _mean['cost_scale'] = float(
+                        getattr(agent_H, 'cost_scale', None)
+                        or getattr(agent_H, 'value_scale', 1.0) or 1.0)
                     agent_H.update_stats = []  # 清空，下一块重收
                     if upload:
                         for _k, _v in _mean.items():

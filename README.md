@@ -426,7 +426,7 @@ $env:DEEPSEEK_API_KEY = "sk-..."
 | `df_td3prrlrb.csv` | 每步全量：`r1/c1_step/gap_raw/gap_pen/soc_signal/soc_target/soc_delta`、RBB 窗口量、`clip_amount`、`d_cap_c/d_cap_d`、收益分解、`lam1` |
 | `df_episode_td3prrlrb.csv` | 每 episode：`episode_reward/cost/gap_pen/profit`、充放电退化量 |
 | `df_test9.csv` | 每 480 步的 9-case 测试 |
-| `update_stats_H.csv` | H 层每块 2 批更新的 TD/Q/target/batch 统计 |
+| `update_stats_H.csv` | H 层每块 2 批更新的 TD/Q/target/batch 统计。**所有列都在回归空间**（不折算），并附 `value_scale`/`cost_scale`/`lam_rt` 自描述列（见本文末「值函数回归空间归一化」） |
 
 ---
 
@@ -614,7 +614,12 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 | 项目组 | `s_p`（r1） | `s_c`（c1） | 块奖励 r1/s_p vs c1/s_c | 值 Q_p/s_p vs Q_c/s_c | λ_actor |
 |---|---|---|---|---|---|
 | **TD3 全系列（6 个）** | 1000 | **100**（`hc.COST_SCALE_TD3`） | 0.19 vs 0.11（同量级） | 5.0 vs 3.6（平衡） | **λ_raw×(s_c/s_p) = λ_raw/10** |
-| 其余 3 个（per/prrbb/prle） | 1000 | 1000（= s_p，旧行为） | 0.19 vs 0.011 | 5.0 vs **0.36（14× 失衡）** | λ_raw（不变） |
+| 其余 3 个（`PER_main0` / `prrbb` / `prle`） | 1000 | 1000（`hc.COST_SCALE` = `s_p`，旧行为） | 0.19 vs 0.011 | 5.0 vs **0.36（14× 失衡）** | λ_raw（不变） |
+
+> ⚠ **可比性**：上表最后两行的 `λ_actor` 相差 **10 倍**（`λ_raw/10` vs `λ_raw`），
+> 即"每 MW·step 成本折算成多少元利润"这个**有效物理价**在两组方法间不同。
+> 这不是折算 bug（`lam_scale()` 的换算是对的），而是 `COST_SCALE` 与
+> `COST_SCALE_TD3` 两个常量并存的结果；跨这两组比较约束松紧时**必须**先对齐它。
 
 **λ 随 scale 自动重标（不手改，杜绝"改了 scale 忘改 λ"的方向错误）**：actor 目标
 `−(q_p − λ·q_c)` 里 `q_p = Q_p/s_p`、`q_c = Q_c/s_c`，乘回 `s_p` 得
@@ -630,15 +635,16 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 | actor loss `−(Q_p − λ·Q_c)` | 自动 | 两通道各除自己的 s ⇒ 正因子（Adam 下等价）；**λ 必须按 `lam_scale()=s_c/s_p` 重标**才保持物理价（`h_settings()` 自动做） |
 | `hsrl_agent_init.BiasInitTracker` | **缩** | 读的是 main 里的**原始**块收益累加器 ⇒ 写 `fc3.bias` 前 `b_p /s_p`、`b_c /s_c`（含 `--critic_bias_p/_c` 覆盖值，按原始口径给出）。估计量对样本线性，故 SE/块数/触发点/γ 都不用重调 |
 | λ 区间、EMA 对偶（`ema_cost` vs `d_block_H`）、curriculum | **不缩** | 乘性对偶对 r1/c1 的换算一无所知 |
-| `update_stats_H.csv` / TensorBoard（`q_*` / `td_*` / `target_*`） | 还原 | agent 内部**按通道**还原（profit `×s_p`、cost `×s_c`）⇒ 与历史 run、`agentutil/analyse_q_scale.py` 直接可比 |
-| PER 优先级 `|TD_p|/mean_p + |TD_c|/mean_c + ε` | 不缩 | 自归一化比值，对 s 免疫（`ε` 加在 O(1) 量上，占比不变） |
+| `update_stats_H.csv` / TensorBoard（`q_*` / `td_*` / `target_*` / `reward_mean` / `cost_mean`） | **不折算** | 表内**每一列都在回归空间**（= critic 实际回归、PER 实际使用的空间），并附 `value_scale`/`cost_scale`/`lam_rt` 三列自描述口径。⚠ 2026-10 **取消**了"按通道折算成原始口径"：老做法把 profit 字段 `×s_p`、cost 字段 `×s_c`，但 `td_*` 不折算 ⇒ 表内混了两种量纲，`td_c/q_c` 被低估 `s_c` 倍（run96 实测 0.125 vs 真值 12.48，方向恰好是"看起来 cost critic 收敛得极好"）。跨 scale 可比的只有**比值**：`td/|q|` 与 `lam_rt = λ_actor·q_c/q_p`（两边的 s 各自约掉） |
+| PER 优先级 `|TD_p|/mean_p + |TD_c|/mean_c + ε` | 不缩 | 分子分母同乘 `s` ⇒ 比值与 `s` 无关（`TD_errors_*` 上的 `×_S[PC]` 只起"两通道用同一配平口径"的作用；`ε` 加在 O(1) 量上，占比不变） |
 | L 层 `r2`/`c2` | **不缩** | `agent_L.value_scale = 1.0`（`cost_scale=None` ⇒ 跟随 `s_p=1.0`）；L 值函数尺度本就 O(1)（`d_block_L` = 20 / 2.5） |
 
 **实测（`agentutil/test_value_scale.py` B 段，真实 `SP_TD3` + 同一批数据，合成常数回归 R=5000）**
 
-* **语义等价（守住）**：`reward/cost/target` 四个纯收益字段两臂**还原后逐位相等**；
-  `q_*`/`min_p_next` 类字段两臂**精确差 s 倍**（证明还原生效）；两臂最终收敛到同一目标
-  （误差 2.1% vs 0.00%）。
+* **语义等价（守住）**：`reward/cost/target` 四个纯收益字段两臂在回归空间**恰好差 `1/s`**
+  （这是"不折算"的定义，不是 bug）；`q_*`/`min_p_next` 类字段两臂**逐位相同**
+  （网络同一初值 ⇒ 表内不再有 `×s`）；两臂各自收敛到**自己的**回归空间目标
+  （`R` 与 `R/s`，误差 3.9% vs 0.03% ⇒ 同一物理目标）。
 * **速度并未变快（预测被否证）**：原以为"初值↔目标距离 ∝ 1/s ⇒ 瞬态 ∝ 1/s"，
   但 Adam 下 s=1 臂会把**隐层末级激活从 0.8 放大到 ~200**（实测 `|h5|` mean 202.6）
   来把输出顶到 O(10⁴)，因此在 ~50 次更新内两臂都已贴近目标。
@@ -649,10 +655,12 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 
 **用法与测试**
 
-**实测（B2/D2 段）**：`s_c` 1000→100（λ ÷10）时 —— 首次更新两臂日志**恰好差 s_c 之比（10×）**
-（网络同一初值 ⇒ 证明按通道还原生效）；**收敛后原始口径 `Q_c` 收敛到同一目标**
-（19.998 vs 19.995，目标 20）⇒ **改 `s_c` 只改数值条件、不改物理量**；
-且有效物理权衡 `λ·Q_c/s_c` 两臂一致（0.01933 vs 0.01933）。
+**实测（B2/D2 段）**：`s_c` 1000→100（λ ÷10）时 —— 首次更新两臂日志**逐位相同**
+（网络同一初值 + 表内不折算：实测 `q_c_mean` 两臂均为 −0.086141）；回归空间 `Q_c`
+各收敛到**自己的**目标 `R_C/s_c`（0.0200 vs 0.19995，目标 20/1000 与 20/100），
+折算回原始口径才相等（19.998 = 0.01% 与 19.995 = 0.03% 误差）
+⇒ **改 `s_c` 只改数值条件、不改物理量**；且 scale-free 判据
+`hc.lam_rt() = λ_actor·q_c/q_p` 两臂一致（0.003867 vs 0.003918）。
 ⚠ 归一化把 loss/梯度同时缩小 ⇒ 固定的 `clip_grad_norm_(max_norm=2.0)` 语义随 scale 变
 （实测 s=1000 时范数只有门槛的 0.10×⇒**从不触发**；s=100 时约 1.0×⇒开始介入）——
 这是已知副作用，**动 scale 前先决定裁剪阈值策略**。
@@ -661,7 +669,8 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 * `--cost_scale 100`（TD3 六个 main 的默认）/ `1000`（= 关闭对 cost 的单独缩放）。
   语义：`<=0` ⇒ 与 `s_p` 相同（旧行为）。λ 由 `hsrl_cost.lam_scale()` 自动跟随。
 * `python agentutil/test_value_scale.py` —— 覆盖性（8 个 agent + 9 个 main 的换算点齐全，且
-  `sum_r1`/`sum_c1`/对偶/curriculum/relabel/warmup 填入**均未被缩放**）+ 上述数值不变量
+  `sum_r1`/`sum_c1`/对偶/curriculum/relabel/warmup 填入**均未被缩放**；记录块内
+  **禁止**任何 `×s` 折算，且 `lam_rt` 列必须接线）+ 上述数值不变量
   + `Σ₅ fluct_cost(3) = 15` 与 λ 语义正交。
 * `python agentutil/probe_value_scale.py` —— 学习曲线/隐层激活量级的诊断（复现上面"速度未变快"
   的观测）。

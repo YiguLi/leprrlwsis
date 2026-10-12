@@ -67,8 +67,8 @@ for proj, spec in sorted(T.PROJECTS.items()):
     t = src(spec['ref'])
     need(re.search(r'update_ema_cost\(sum_c1\)', t) is not None,
          '[η1/{}/原始EMA]'.format(proj), 'agent_H.update_ema_cost 应吃原始 sum_c1')
-    need('hc.dual_update(agent_H, d_block_H)' in t,
-         '[η1/{}/对偶]'.format(proj), 'H 对偶应走 hc.dual_update')
+    need('hc.dual_update(agent_H, d_block_H)' in t or 'ydual.update(agent_H, d_block_H)' in t,
+         '[η1/{}/对偶]'.format(proj), 'H 对偶应走 hc.dual_update (或 arm 自有 ydual 包装)')
     need(not re.search(r'update_ema_cost\(\s*(hc\.)?v_scale', t),
          '[η1/{}/未缩放]'.format(proj), 'EMA 入口不得被 /s 缩放')
 
@@ -146,8 +146,11 @@ for proj, spec in sorted(T.PROJECTS.items()):
                 and agent_t.count('* _SC - self.cost_limit') == 1)
     c['TD'] = (re.search(r'TD_errors_p = abs\([^\n]*\) \* _SP', agent_t) is not None
                and re.search(r'TD_errors_c = abs\([^\n]*\) \* _SC', agent_t) is not None)
-    c['log'] = (agent_t.count('_d[_k] = float(_d[_k]) * _SP') == 1
-                and agent_t.count('_d[_k] = float(_d[_k]) * _SC') == 1)
+    # ⚠ 口径 (2026-10): `update_stats` 的所有列**都在回归空间**，记录块里不得有任何
+    #   按通道折算 —— 取消它的原因见 `agentutil/remove_log_restore.py` 的 docstring
+    #   （profit 折算了而 `td_*` 没折算 ⇒ td_c/q_c 被低估 s_c 倍）。
+    c['log'] = (agent_t.count('_d[_k] = float(_d[_k])') == 0
+                and agent_t.count('还原成原始口径') == 0)
     # bias 策略: 开关 + 估计器 + 应用点"在首次策略更新之前"
     c['bias'] = (main_t.count("parser.add_argument('--critic_bias_init'") == 1
                  and main_t.count('hinit.BiasInitTracker.from_args(args)') == 1
@@ -174,7 +177,7 @@ for proj, spec in sorted(T.PROJECTS.items()):
         need(ok, '[{}/{}]'.format(proj, k))
 
 print('\n  列含义: arg=--value_scale 存在; set=set_value_scale/set_cost_scale 生效; wire=agent_H 双尺度接线;')
-print('          cls=该项目的 H agent 类含 /s 换算; TD/日志=原始口径还原; bias=开关+估计器+应用;')
+print('          cls=该项目的 H agent 类含 /s 换算; TD=PER 两通道配平; log=记录块不折算(回归空间);')
 print('          bfst=bias 应用在首次策略更新之前; L1.0=RL 下层显式不缩放/规则下层无 agent_L;')
 print('          γ/s=估计器的 γ 与 s 绑定到 H agent 本身(结构上不可能不一致)')
 
