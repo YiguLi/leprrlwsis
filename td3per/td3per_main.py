@@ -225,8 +225,17 @@ def train(num_iterations_H,
     phase_checked = 0
 
     # ---- warmup 期调度 + critic bias 触发状态 ----
-    #   warmup_sched: 上层确定性动作调度 (wt 0.33 起每块 ±0.05 clip[0.20,0.45]; 信号维恒 0
-    #                 ⇒ SOC 目标语义的项目 soc_target ≡ 3, 影子电价语义的项目影子价 ≡ 0)
+    #   warmup_sched: 上层动作调度（**默认混合采样**；旧口径可用 --warmup_wt_sched walk 复现）。
+    #                 ⚠ 具体口径以 `hsrl_warmup.WarmupSchedule` 的 docstring / `--help` 为准，
+    #                 不要在调用点复述数值（历史上这句注释写成 "wt 0.33 起 / clip[0.20,0.45]"
+    #                 已过期两轮）。两种口径的要点：
+    #                   mix（默认）= 约 70% 的块走先验中心 WT_PRIOR=(0.2,0.2,0.2,0.2,1/3)
+    #                                 + 逐维 U(±WT_PRIOR_STEP)，其余 30% 在 [WT_LO,WT_HI] 上
+    #                                 逐维独立均匀（全局覆盖）；
+    #                   walk        = 从 WT_START=0.2 起逐维随机 ±WT_STEP，clip 到 [WT_LO,WT_HI]。
+    #                 两口径下 §6 信号维都由 --warmup_sig 决定：SOC 目标语义 ⇒ soc_target≡3,
+    #                 影子电价语义 ⇒ 影子价≡0。**nolow 与标准 td3per 走的是这同一个入口**
+    #                 （`--nolow` 只改 nb_actions 6→5 与下层旁路，不另建 warmup）。
     #   bias_init   : warmup 块样本收集 + bias 一次性应用
     #                 (修 step == args.warmup 与块末 episode_steps%5==4 不同余导致永不触发的 bug;
     #                  触发点 = warmup 之后第一个块末, 仍在首次策略更新之前)
