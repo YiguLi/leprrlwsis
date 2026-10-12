@@ -96,7 +96,9 @@ engine = matlab.engine.start_matlab()
 RUN_TAG = 'td3per'
 
 
-def init_wt_action_bias(agent, lo=0.05, hi=0.45, sig_value=0.0, verbose=True):
+def init_wt_action_bias(agent, lo=0.05, hi=0.45, sig_value=0.0, verbose=True,
+                        prior=None, prior_frac=None, prior_step=None,
+                        wide_gain=None, use_prior=None):
     """把 actor 输出层前 5 维 (WT 轴向诱导因子 a) 的 bias 初始化到“中性宽带”。
 
     为什么必须做 (run160/初始策略诊断):
@@ -107,8 +109,24 @@ def init_wt_action_bias(agent, lo=0.05, hi=0.45, sig_value=0.0, verbose=True):
       于是初始策略 ≈ bias: 实测 5 个种子 → 死机 2~4 台、全场 ΣCp 仅 0.47~0.72
       (效率 16%~24%)。策略从"半停机"出发, 而 a<0 区被 CheckAction 裁掉后梯度为 0
       → 若没有恢复力就会长期停在停机态。
-    bias∈[lo,hi]=[0.05,0.45] 覆盖"上游降载 → 末台单机最优"的整个区间, **故意不预设**风场最优的形状
-    (它随尾流状态(风速/湍流/来流)变化, 是**策略要学的函数**, 不是可预先测定的常数)。
+
+    采样分布 = **混合采样**（自 2026-10；与 `hsrl_warmup.WarmupSchedule` 共用
+    `hwarm.sample_wt_prior` 这条单一真源 ⇒ "warmup 与策略起步同分布"的口径不被破坏）：
+      * 约 `prior_frac`（默认 0.7）的维走"**先验结构 + 邻域扰动**"——`prior` 为中心、
+        逐维 `U(±prior_step)`；`WT_PRIOR = (0.2,0.2,0.2,0.2,1/3)` 是"前四台降载 +
+        末台推到单机 Cp 最优"的形状（依据 `probe_a_farm_structure.py`：均匀族峰在
+        0.20、±5% 平台 [0.15,0.30]，末台背风侧无机组）。
+      * 其余维在 `[lo,hi]=[0.05,0.45]` 上**逐维独立均匀**采样 ⇒ 保留全局覆盖。
+
+    动机（run57 实测）：旧口径 5 维**独立** `U(0.05,0.45)` 时起点可离已知最优很远，
+    而 RL 的有效样本几乎全部来自策略自己的时间平均分布（warmup 288 块 vs 自采
+    ~13,500 块）⇒ **起点运气 ≈ 早训期探索预算**；且 run57 收敛到
+    `[0.328,0.060,0.321,0.187,0.143]`，与已知最优 `[0.2,0.2,0.2,0.2,1/3]` 在
+    4/5 维上方向相反（ΣCp 低 14.3%）。混合采样把起点搬到先验邻域，同时留 30%
+    覆盖以免"先验错了就全错"。
+
+    `use_prior=False` 或 `prior_frac` 取 0/1 以外 ⇒ 退化为**纯均匀** `[lo,hi]`
+    （= 历史 `init_wt_action_bias` 行为，供 A/B 复现）。
     SOC 目标信号维 (第 6 维) 置 sig_value=0 → 初始 soc_target = 3.0 (SOC 带中点)。
 
     `model.py` 为多项目共享文件, 不修改; 这里构造后覆写 actor 与 actor_target 的 bias。
@@ -117,10 +135,17 @@ def init_wt_action_bias(agent, lo=0.05, hi=0.45, sig_value=0.0, verbose=True):
     if not hasattr(a, 'fc4'):
         return False
     nb = a.fc4.bias.data.shape[0]
+    n_wt = min(5, nb)
+    b0 = hwarm.sample_wt_prior(
+        nb=n_wt, lo=lo, hi=hi,
+        prior=hwarm.WT_PRIOR if prior is None else prior,
+        prior_frac=hwarm.WT_PRIOR_FRAC if prior_frac is None else prior_frac,
+        prior_step=hwarm.WT_PRIOR_STEP if prior_step is None else prior_step,
+        wide_gain=hwarm.WT_WIDE_GAIN if wide_gain is None else wide_gain,
+        use_prior=use_prior, tag='init_wt_action_bias')
     with torch.no_grad():
         b = a.fc4.bias.data
-        n_wt = min(5, nb)
-        b[:n_wt] = torch.tensor(np.random.uniform(lo, hi, n_wt), dtype=b.dtype)
+        b[:n_wt] = torch.tensor(b0, dtype=b.dtype)
         if nb > n_wt:
             b[n_wt:] = float(sig_value)
         tgt = agent.actor_target.fc4.bias.data
@@ -128,9 +153,12 @@ def init_wt_action_bias(agent, lo=0.05, hi=0.45, sig_value=0.0, verbose=True):
     if verbose:
         cp = 4 * np.array([b[:n_wt].mean()]) * (1 - np.array([b[:n_wt].mean()])) ** 2
         prGreen('init_wt_action_bias: WT bias = {} (mean a = {:.3f} -> Cp = {:.3f}); '
-                'signal bias = {}'.format(
-                    np.round(b[:n_wt].numpy(), 3), float(b[:n_wt].mean()),
-                    float(cp[0]), float(b[n_wt]) if nb > n_wt else None))
+                'signal bias = {} | 混合采样 prior_frac={:.2f} prior={}'
+                .format(np.round(b[:n_wt].numpy(), 3), float(b[:n_wt].mean()),
+                        float(cp[0]), float(b[n_wt]) if nb > n_wt else None,
+                        hwarm.WT_PRIOR_FRAC if prior_frac is None else prior_frac,
+                        np.round(np.asarray(hwarm.WT_PRIOR if prior is None else prior,
+                                            dtype=float), 3)))
     return True
 
 
@@ -1266,7 +1294,15 @@ if __name__ == "__main__":
     if _HCFG:
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     if args.wt_bias_init:
-        init_wt_action_bias(agent_H, lo=0.05, hi=0.45, sig_value=0.0)
+        # 与 warmup 共用同一条混合采样真源（`--warmup_wt_prior*` 同时控制两处）
+        init_wt_action_bias(
+            agent_H, lo=0.05, hi=0.45, sig_value=0.0,
+            prior=hwarm.parse_prior(getattr(args, 'warmup_wt_prior', None),
+                                    default=hwarm.WT_PRIOR),
+            prior_frac=float(getattr(args, 'warmup_wt_prior_frac', hwarm.WT_PRIOR_FRAC)),
+            prior_step=float(getattr(args, 'warmup_wt_prior_step', hwarm.WT_PRIOR_STEP)),
+            wide_gain=float(getattr(args, 'warmup_wt_wide_gain', hwarm.WT_WIDE_GAIN)),
+            use_prior=(str(getattr(args, 'warmup_wt_sched', 'mix')) == 'mix'))
 
     # 下层 L: 保留 td3per 自己的 RL BESS 操作
     #   * 观测 5 维蒸馏 = [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]

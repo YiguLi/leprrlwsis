@@ -3,25 +3,48 @@ HSRL warmup 期调度助手（多项目共享）
 ====================================
 本模块把 warmup 期的三件事收敛到**一处单一真源**：
 
-1. `WarmupSchedule` —— warmup 期上层 H 的**确定性动作调度**（不再 `random_action()`）：
-      * 5 个风机轴向因子各维从 **1/3** 起步（单机 `C_p = 4a(1−a)²` 的最优点 —— 只讲
-        **单机物理**，**不对"风场最优在哪"表态**；`env.reset()` 的标称动作与 actor 的
-        `init_wt_action_bias` 共用下面同一条带状区间）；
-      * 每**块**（= 5 环境步，H 的决策周期）各维独立随机 **±0.05**，并直接 clip 到
-        **[0.05, 0.45]**（**中性宽带**：只排除 a<0.05 的停机悬崖〔`C_p`<18%〕与
-        a>0.45 的低效高诱导区，**不预设**风场最优的形状）；
-      * 第 6 维（信号维）**恒为 0.0**：对 SOC 目标语义的项目 = `soc_target ≡ 3`，
-        对影子电价语义的项目 = 中性影子价 0。两者都恰好等于 actor 的
-        `init_wt_action_bias(..., sig_value=0.0)`，即 warmup 与策略起步**同分布**。
-    ⚠ 2026-09-28 两轮修正（记录以免重犯）：旧值 `0.33 / [0.20,0.45] / U(0.25,0.40)` 的
-    判据是"**单机** C_p 保持 86%~100% 最优"，用错了对象。第一轮改成"对准均匀动作的
-    功率峰 `0.20 / [0.15,0.25] / U(0.17,0.23)`"——**同样是错的**：那个峰只是**均匀族**
-    上坐标轮询的结果，而联合最优是**随尾流状态变化的单调上升斜坡**（最下游机组背风侧
-    无机组，其功率 ∝ `CT(a₅)·Ue³` 且上游动作固定时 `Ue` 与 `a₅` 无关 ⇒ 应推向单机最优
-    ≈1/3；需要降载留风的是上游）。这个**形状**取决于尾流效应，**是策略要学的函数**，
-    不是可预先测定的常数；而第一轮的窄带还会从**上方掐住末台**。故本轮改为**中性宽带**。
+1. `WarmupSchedule` —— warmup 期上层 H 的动作调度（不再 `random_action()`）。两种口径：
 
-    RNG 用**独立 RandomState**（不吃全局 np.random 流，避免扰动 episode SOC 随机化与探索噪声）。
+   **(a) 正式口径 `wt_sched='mix'`（2026-10 起默认）= 混合采样** —— 约
+   `prior_frac`（默认 0.7）的块走"**最优结构 + 邻域扰动**"，其余走"**全局覆盖**"：
+      * 先验臂：以 `WT_PRIOR = (0.2, 0.2, 0.2, 0.2, 1/3)` 为中心、逐维
+        `U(±WT_PRIOR_STEP=0.03)`（= 上游四台降载 0.20 + 末台推到单机 Cp 最优）；
+      * 覆盖臂：在 `[WT_LO, WT_HI] = [0.05, 0.45]` 上**逐维独立均匀**采样
+        （不是随机游走 ⇒ 五维互相独立，能采到先验邻域之外的组合）。
+      两臂按**块序号 `% 10`** 分配（0..6 走先验、7..9 走覆盖）⇒ 288 块的 warmup 里
+      比例精确为 7:3、边界可复现可审计，且**不消耗随机流做掷币**。
+
+   **(b) 旧口径 `wt_sched='walk'`**（`--warmup_wt_sched walk` 复现历史 run）= 逐维随机游走：
+      5 个风机轴向因子各维从 **`WT_START`=0.2** 起步，每块各维独立随机 **±0.05**，
+      直接 clip 到 **[0.05, 0.45]**；可达集是 0.05 的整格点。
+
+   ⚠ 2026-09-28 两轮修正（记录以免重犯）：旧值 `0.33 / [0.20,0.45] / U(0.25,0.40)` 的
+   判据是"**单机** C_p 保持 86%~100% 最优"，用错了对象。第一轮改成"对准均匀动作的
+   功率峰 `0.20 / [0.15,0.25] / U(0.17,0.23)`"——**同样是错的**：那个峰只是**均匀族**
+   上坐标轮询的结果，而联合最优是**随尾流状态变化的单调上升斜坡**（最下游机组背风侧
+   无机组，其功率 ∝ `CT(a₅)·Ue³` 且上游动作固定时 `Ue` 与 `a₅` 无关 ⇒ 应推向单机最优
+   ≈1/3；需要降载留风的是上游）。这个**形状**取决于尾流效应，**是策略要学的函数**；
+   `WT_PRIOR` 只是它的**一个代表点**，用作**起点与采样中心**，不再声称"最优常数"。
+
+   ⚠ 为什么从"纯中性宽带"改成"混合采样"（`output/TD3PERNOLOW-run57` 实测，2026-10）：
+   旧口径下起点是 5 维**独立** `U(0.05,0.45)`，可离已知最优很远；而 RL 的有效样本几乎
+   全部来自策略自己的时间平均分布（warmup 288 块 vs 自采 ~13,500 块）⇒ **起点运气 ≈
+   早训期探索预算**。run57 收敛到 `[0.328, 0.060, 0.321, 0.187, 0.143]`，与已知最优
+   `[0.2,0.2,0.2,0.2,1/3]` 在 4/5 维上方向相反（ΣCp 低 14.3%）；warmup 288 块里 a5
+   只有 4.5% 的块落在目标值附近，五维**同时**命中该 profile 的概率约为 0。
+   混合采样把探索预算从"找峰"搬到"峰附近塑形"，同时留 30% 覆盖以免"先验错了就全错"。
+
+   ⚠ **opt-out**：`--warmup_wt_sched walk`（可再配 `--warmup_wt_start 0.2` 等）逐位复现
+   2026-10 之前的历史 run —— 该路径的 RNG 消耗序列由 `test_warmup_mix_uniform.py`
+   与 `git show HEAD:hsrl_warmup.py` 做逐位对照回归。
+
+   第 6 维（信号维）与两条口径无关：**起点恒 `SIG_VALUE`=0.0**，之后按价格条件游走
+   （对 SOC 目标语义的项目 a6=0 ⇒ `soc_target ≡ 3`）。它恰好等于 actor 的
+   `init_wt_action_bias(..., sig_value=0.0)`，即 warmup 与策略起步**同分布**。
+
+   RNG 用**独立 RandomState**（不吃全局 np.random 流，避免扰动 episode SOC 随机化与
+   探索噪声）；mix 口径另用两个**独立流**（`rng_near`/`rng_wide`，seed 偏移），
+   使新旧口径的抽样序列互不干扰。
 
 2. `WarmupBessRule` —— warmup 期下层 BESS 的**规则行为体**（BESS-RL 项目专用）：
       * 语义与各项目的 `SocTracker.act` **逐位相同**（`test_warmup_schedule.py` 有对照断言）：
@@ -61,6 +84,24 @@ WT_START = 0.2           # ⚠ 起点由 1/3（单机 Cp 峰）改为 0.2：**wa
 # 见 `agentutil/probe_warmup_coverage.py`。
 WT_STEP = 0.05           # 每块每维 ±0.05
 WT_LO, WT_HI = 0.05, 0.45   # 中性宽带: 只排除停机悬崖(a<0.05)与低效高区(a>0.45)
+
+# ---------------------------------------------------------------- 动作先验（混合采样）
+#: **动作先验中心**（"最优结构"）：前四台降载到 0.20、末台推到单机 Cp 最优 1/3。
+#: 依据：`probe_a_farm_structure.py` 实测**均匀族**峰在 a=0.20（±5% 平台 [0.15,0.30]），
+#: 而末台背风侧无机组 ⇒ 其 `Ue` 与自身动作无关 ⇒ 应推到单机最优 ≈1/3；
+#: 需要降载留风的是上游。⇒ 形状 = **单调上升斜坡**（上游低、下游高）。
+#: ⚠ 这是**单个代表点**，不是"联合最优的完整函数"：真正的联合最优随尾流状态
+#:   （风速/湍流/来向）变化，仍是**策略要学的函数**。此处只把它当作**起点与
+#:   采样的中心**，用于把探索预算从"找峰"转移到"峰附近塑形"。
+WT_PRIOR = (0.20, 0.20, 0.20, 0.20, 1.0 / 3.0)
+#: 先验邻域扰动的**默认**逐维步长（每块 ±）；0.03 ≈ 带宽 0.5 的 6%，
+#: 比全局均匀带的 0.05 步长更细 ⇒ 邻域内点密度更高，利于 critic 拟合局部形状。
+WT_PRIOR_STEP = 0.03
+#: **先验臂占比**（正式口径 0.7）：70% 走"最优结构 + 扰动"、30% 走全局覆盖。
+WT_PRIOR_FRAC = 0.7
+#: 全局覆盖臂的带**放宽倍数**（1.0 = 与 `WT_LO/HI` 相同；>1 会对称外扩，
+#: 仅用于"加大扰动幅度"的对照臂，且始终再夹回 `[WT_LO, WT_HI]` 之外**不越物理带**）。
+WT_WIDE_GAIN = 1.0
 SIG_VALUE = 0.0          # 第 6 维**起点**: SOC 目标语义→target=3; 影子电价语义→中性 0
 #: **第 6 维（SOC 目标信号）的价格条件游走**（用户口径 2026-10-08）：
 #: 低谷(300) 上调 / 平峰(580) 不动 / 高峰(980) 下调，步幅随机。
@@ -107,6 +148,11 @@ WARMUP_BSIZE_MULT = 0.0
 YAW_START = 0.0
 YAW_STEP = 0.2
 YAW_LO, YAW_HI = -1.0, 1.0
+#: 偏航域的"先验中心"：**恒 0**（= 无偏航）。理由：偏航的动力学是"上游偏转 → 下游受益"，
+#: 单机最优点就是 γ=0；而本项目实测的最优偏航轨迹是**上游 +16~25°、下游 0**，
+#: 该"上游偏、下游不偏"的形状**尚未有 5 台机的联合最优点**可作先验，
+#: 故不预设形状、只把中心放在 γ=0，把 30% 的全局覆盖用于探索偏航形状。
+YAW_PRIOR = (0.0, 0.0, 0.0, 0.0, 0.0)
 YAW_WT_NOISE = 0.2       # 探索噪声半宽（带宽的 10%；旧值 0.05 = 0.5 带宽的 10%）
 YAW_PENALTY_NN_H_COEF = 100.0   # 满带越界罚（元/单位）：100 × 带宽 2 = **200 元**，
                                 # 与旧环境 `400 × 0.5 = 200 元` **等值**（README §4）
@@ -144,7 +190,9 @@ class WarmupSchedule:
                  lo=WT_LO, hi=WT_HI, sig_value=SIG_VALUE, seed=None,
                  enabled=True, sig_mode='price_walk',
                  sig_step_lo=SIG_STEP_LO, sig_step_hi=SIG_STEP_HI,
-                 sig_lo=SIG_LO, sig_hi=SIG_HI):
+                 sig_lo=SIG_LO, sig_hi=SIG_HI,
+                 wt_sched='mix', prior=WT_PRIOR, prior_frac=WT_PRIOR_FRAC,
+                 prior_step=WT_PRIOR_STEP, wide_gain=WT_WIDE_GAIN):
         self.nb_turbine = int(nb_turbine)
         self.nb_actions = int(nb_actions) if nb_actions else None
         self.start, self.step = float(start), float(step)
@@ -155,13 +203,69 @@ class WarmupSchedule:
         self.sig_mode = str(sig_mode)
         self.sig_step_lo, self.sig_step_hi = float(sig_step_lo), float(sig_step_hi)
         self.sig_lo, self.sig_hi = float(sig_lo), float(sig_hi)
+        #: 风机 5 维生成方式（`--warmup_wt_sched`）：
+        #:   'walk' = **旧口径**（逐维随机游走，起点 `start`、每块 ±`step`、clip 到 [lo,hi]）
+        #:            ⇒ 显式传 `--warmup_wt_sched walk` 可逐位复现历史 run；
+        #:   'mix'  = **混合采样**（正式口径）：以 `prior_frac` 的概率走"先验邻域"臂 ——
+        #:            以 `prior` 向量为中心、逐维 ±`prior_step` 的独立扰动（= 最优结构 + 扰动）；
+        #:            其余 (1−`prior_frac`) 走"全局覆盖"臂 —— 在 [lo,hi] 上**独立均匀**采样
+        #:            （不逐维游走 ⇒ 五个动作维相互独立，能采到先验邻域之外的组合）。
+        self.wt_sched = str(wt_sched)
+        self.prior = self._mk_prior(prior)
+        self.prior_frac = float(np.clip(prior_frac, 0.0, 1.0))
+        self.prior_step = float(prior_step)
+        self.wide_gain = float(wide_gain)
+        self._seed = seed
+        #: 旧口径的随机流（`wt_sched='walk'` 时**唯一**被使用的流）——保持原样，
+        #: 保证 `--warmup_wt_sched walk` 的 RNG 消耗序列与历史实现逐位相同。
         self.rng = np.random.RandomState(seed if seed is not None and seed > 0 else None)
+        #: 新口径的两个**独立**随机流：与 `self.rng` 分离，避免混合分支改变旧路径的
+        #: 抽样序列（否则同一 seed 下历史 run 无法复现）。
+        self.rng_near = None
+        self.rng_wide = None
+        self._blk = 0
         self.reset()
+
+    def _mk_prior(self, prior):
+        """把先验向量对齐到 `nb_turbine` 维（单一真源 = `prior_for_nb`）。"""
+        return prior_for_nb(self.nb_turbine, prior)
+
+    @property
+    def prior_ready(self):
+        """混合采样是否**真正生效**（关掉 enabled 或退化为全先验/全均匀时不算）。"""
+        return (self.enabled and self.wt_sched == 'mix'
+                and 0.0 < self.prior_frac < 1.0)
+
+    def _wide_bounds(self):
+        """全局覆盖臂的采样带：以 [lo,hi] 中心按 `wide_gain` 对称外扩，再夹回 [lo,hi]。"""
+        c = 0.5 * (self.lo + self.hi)
+        half = 0.5 * (self.hi - self.lo) * max(1.0, self.wide_gain)
+        return (max(self.lo, c - half), min(self.hi, c + half))
+
+    def _sample_mix(self):
+        """混合采样：先验邻域臂 / 全局均匀臂，按**块序号取模**分配（不用 rng 掷币）。
+
+        用"块序号取模"而不是随机掷币有两个好处：
+          ① 288 块的 warmup 里两臂的**实际比例恰好**是 7:3，小样本下不抖；
+          ② 臂的边界可复现、可审计（不依赖随机流状态）。
+        """
+        n_prior = int(round(10.0 * self.prior_frac))     # 0.7 ⇒ 7
+        if (self._blk % 10) < n_prior:
+            d = self.rng_near.uniform(-self.prior_step, self.prior_step,
+                                      self.nb_turbine)
+            return np.clip(self.prior + d, self.lo, self.hi)
+        wlo, whi = self._wide_bounds()
+        return self.rng_wide.uniform(wlo, whi, self.nb_turbine)
 
     def reset(self):
         self._wt = np.full(self.nb_turbine, self.start, dtype=float)
         self._sig = self.sig_value
         self._first = True
+        self._blk = 0
+        s = self._seed if (self._seed is not None and self._seed > 0) else None
+        # 两个新流用 seed 偏移 ⇒ 与 self.rng 完全独立（不同流不会互相消耗）
+        self.rng_near = np.random.RandomState(None if s is None else s + 100003)
+        self.rng_wide = np.random.RandomState(None if s is None else s + 200003)
         return self
 
     @property
@@ -195,12 +299,19 @@ class WarmupSchedule:
             return None
         if self._first:
             self._first = False                      # 第 0 块 = 起点 (start 各维, 信号 sig_value)
+        elif self.wt_sched == 'mix':
+            # ---- 混合采样（正式口径）----
+            self._wt = self._sample_mix()
+            self._sig = float(np.clip(self._sig + self.sig_delta(price),
+                                      self.sig_lo, self.sig_hi))
         else:
+            # ---- 旧口径：逐维随机游走（`--warmup_wt_sched walk` 复现历史 run）----
             self._wt = self._wt + self.rng.choice([-self.step, self.step],
                                                   size=self.nb_turbine)
             self._wt = np.clip(self._wt, self.lo, self.hi)
             self._sig = float(np.clip(self._sig + self.sig_delta(price),
                                       self.sig_lo, self.sig_hi))
+        self._blk += 1
         if self.nb_actions is None:
             return self._wt.copy()
         out = np.empty(self.nb_actions, dtype=float)
@@ -416,7 +527,7 @@ def add_warmup_args(parser, yaw=False):
     """把 warmup 调度的命令行开关挂到各 main 的 parser 上（9 个 main + yawflor 共用）。
 
     `yaw=True` ⇒ 默认值换成**偏航带**（`YAW_START/STEP/LO/HI`，无量纲 `n∈[−1,1]`），
-    文案也换成偏航语义。旧 9 个 main 不传该参数 ⇒ 与历史 run 逐位一致。
+    文案与**先验中心**（`YAW_PRIOR` = 全 0）也换成偏航语义。
     """
     if yaw:
         d_start, d_step, d_lo, d_hi = YAW_START, YAW_STEP, YAW_LO, YAW_HI
@@ -429,14 +540,18 @@ def add_warmup_args(parser, yaw=False):
         h_step = 'warmup 偏航动作每块随机步长 (默认 ±0.2 = 满带宽 2 的 10%%)'
         h_lo = 'warmup 偏航动作 clip 下界 (默认 −1)'
         h_hi = 'warmup 偏航动作 clip 上界 (默认 +1)'
+        prior_center = YAW_PRIOR
     else:
         d_start, d_step, d_lo, d_hi = WT_START, WT_STEP, WT_LO, WT_HI
         sched_help = ('warmup 期上层动作调度: fixed=1/3 起每块±0.05 clip[0.05,0.45]'
                       ' + 信号维恒 0 (本方案); random=旧的 random_action() 对照臂')
-        h_start = 'warmup 风机动作起始值 (默认 1/3 = 单机 Cp 最优)'
+        h_start = ('warmup 风机动作**首块**取值（默认 %.3f）。注意 mix 口径下它的作用'
+                   '仅限于第 0 块：之后由 --warmup_wt_prior 与 --warmup_wt_lo/hi 决定；'
+                   'walk 口径下它才是整条游走的起点' % WT_START)
         h_step = 'warmup 风机动作每块随机步长 (默认 ±0.05)'
         h_lo = 'warmup 风机动作 clip 下界 (默认 0.05)'
         h_hi = 'warmup 风机动作 clip 上界 (默认 0.45)'
+        prior_center = WT_PRIOR
     parser.add_argument('--warmup_bsize_mult', default=WARMUP_BSIZE_MULT, type=float,
                         help='**旧口径**（与 --bsize 挂钩）：>0 时 warmup = 该系数 × --bsize '
                              '（如 4 ⇒ bsize=256 时 1024 步）。默认 %.1f = **不挂钩**，'
@@ -444,6 +559,33 @@ def add_warmup_args(parser, yaw=False):
                              % (WARMUP_BSIZE_MULT, WARMUP_STEPS))
     parser.add_argument('--warmup_sched', default='fixed', choices=['fixed', 'random'],
                         help=sched_help)
+    # ---- 风机/偏航动作的**混合采样**（正式口径；旧口径用 `walk` 复现）----
+    parser.add_argument('--warmup_wt_sched', default='mix', choices=['mix', 'walk'],
+                        help='warmup 期风机动作的生成方式（**正式口径 = mix**）: '
+                             'mix=**混合采样** —— 约 --warmup_wt_prior_frac 比例的块走'
+                             '"先验结构 + 邻域扰动"(--warmup_wt_prior 为中心、逐维 ±'
+                             '--warmup_wt_prior_step)，其余块在 [--warmup_wt_lo,hi] 上'
+                             '**逐维独立均匀**采样（全局覆盖）；'
+                             'walk=**旧口径**的逐维随机游走（起点 --warmup_wt_start、'
+                             '每块 ±--warmup_wt_step）⇒ 复现历史 run 请显式传 walk')
+    parser.add_argument('--warmup_wt_prior',
+                        default=','.join('%.4f' % v for v in prior_center), type=str,
+                        help='先验动作中心（逗号分隔，缺位用末位广播补齐）。'
+                             'WT 域默认 "%s" = 期望形状：前四台降载 0.20 + 末台推到'
+                             '单机 Cp 最优 0.3333（依据 probe_a_farm_structure: 均匀族峰'
+                             ' 0.20、末台背风侧无机组）；偏航域默认全 0。'
+                             % ','.join('%.4f' % v for v in prior_center))
+    parser.add_argument('--warmup_wt_prior_frac', default=WT_PRIOR_FRAC, type=float,
+                        help='先验臂占比（默认 %.2f ⇒ 70%%%% 先验邻域 + 30%%%% 全局覆盖）。'
+                             '按**块序号取模**分配 ⇒ 288 块里比例精确、可审计；'
+                             '0 = 纯全局均匀、1 = 纯先验。' % WT_PRIOR_FRAC)
+    parser.add_argument('--warmup_wt_prior_step', default=WT_PRIOR_STEP, type=float,
+                        help='先验臂的逐维扰动幅度（±，默认 %.3f；比全局带的 %.3f 更细）'
+                             % (WT_PRIOR_STEP, d_step))
+    parser.add_argument('--warmup_wt_wide_gain', default=WT_WIDE_GAIN, type=float,
+                        help='全局覆盖臂的带宽放宽倍数（默认 %.1f = 与 [lo,hi] 相同；'
+                             '>1 对称外扩，用于"加大扰动幅度"的对照臂，仍夹在 [lo,hi] 内）'
+                             % WT_WIDE_GAIN)
     parser.add_argument('--warmup_wt_start', default=d_start, type=float, help=h_start)
     parser.add_argument('--warmup_wt_step', default=d_step, type=float, help=h_step)
     parser.add_argument('--warmup_wt_lo', default=d_lo, type=float, help=h_lo)
@@ -590,6 +732,75 @@ def check_residual_baseline(warmup_rule, sched, args, baseline_fn,
                 sched_signal_fixed=sched_signal_fixed, rule_arm=True)
 
 
+# ---------------------------------------------------------------- 先验解析
+def prior_for_nb(nb, prior=WT_PRIOR):
+    """把先验向量对齐到 `nb` 台机（`WarmupSchedule` 与 `sample_wt_prior` 共用同一条规则）。
+
+    规则（两条分支都显式说明，避免"取首位"这种隐式口径）：
+      * `nb <= 1`：取**末位** —— 单台机组的物理就是"背风侧无机组 ⇒ 推到单机 Cp 最优"，
+        故用 `WT_PRIOR[-1]`（= 1/3）而不是首位（= 0.2，那个值只对**上游**机组成立）；
+      * `nb >= 2`：取前 `nb` 个；不足则**重复末位**补齐。
+    """
+    p = np.asarray(prior, dtype=float).reshape(-1)
+    if p.size == 0:
+        p = np.asarray(WT_PRIOR, dtype=float)
+    nb = int(nb)
+    if nb <= 1:
+        return p[-1:].copy()
+    if p.size >= nb:
+        return p[:nb].copy()
+    return np.concatenate([p, np.full(nb - p.size, p[-1], dtype=float)])
+
+
+def sample_wt_prior(nb, lo, hi, prior=WT_PRIOR, prior_frac=WT_PRIOR_FRAC,
+                    prior_step=WT_PRIOR_STEP, wide_gain=WT_WIDE_GAIN,
+                    rng=None, use_prior=None, tag=''):
+    """**动作先验混合采样**的单一真源（`WarmupSchedule` 与各 main 的
+    `init_wt_action_bias` 共用同一条分布 ⇒ "warmup 与策略起步同分布"的口径不被破坏）。
+
+    返回长度 `nb` 的一维数组：
+      * `prior_frac` 比例的条目 = `prior` 的前 `nb` 维 + 逐维 `U(-prior_step, prior_step)`；
+      * 其余 = 在（可选放宽的）`[lo, hi]` 上**逐维独立均匀**采样。
+
+    `prior` 长度不足 `nb` 时按末位广播补齐（见 `WarmupSchedule._mk_prior` 的理由）。
+    `use_prior=False` ⇒ 退化为**纯均匀** `[lo,hi]`（= 历史 `init_wt_action_bias` 行为）。
+    """
+    rng = np.random if rng is None else rng
+    p = prior_for_nb(nb, prior)
+    if use_prior is None:
+        use_prior = 0.0 < float(prior_frac) < 1.0
+    if not use_prior:
+        return np.asarray(rng.uniform(lo, hi, nb), dtype=float)
+    c = 0.5 * (float(lo) + float(hi))
+    half = 0.5 * (float(hi) - float(lo)) * max(1.0, float(wide_gain))
+    wlo, whi = max(lo, c - half), min(hi, c + half)
+    if float(rng.uniform(0.0, 1.0)) < float(prior_frac):
+        d = np.asarray(rng.uniform(-float(prior_step), float(prior_step), nb))
+        return np.clip(p + d, lo, hi)
+    return np.asarray(rng.uniform(wlo, whi, nb), dtype=float)
+
+
+def parse_prior(spec, default=WT_PRIOR):
+    """把 `--warmup_wt_prior` 的字符串/序列解析成 float 向量。
+
+    接受 `"0.2,0.2,0.2,0.2,0.3333"`、`"0.2 0.2 0.2 0.2 0.3333"` 或已是序列；
+    `None`/空串 ⇒ 返回 `default`。长度不对齐由 `WarmupSchedule._mk_prior` 处理。
+    """
+    if spec is None:
+        return np.asarray(default, dtype=float)
+    if isinstance(spec, (list, tuple, np.ndarray)):
+        v = np.asarray(spec, dtype=float).reshape(-1)
+        return v if v.size else np.asarray(default, dtype=float)
+    s = str(spec).strip()
+    if not s:
+        return np.asarray(default, dtype=float)
+    parts = [p for p in s.replace(';', ',').replace(' ', ',').split(',') if p.strip()]
+    try:
+        return np.asarray([float(p) for p in parts], dtype=float)
+    except ValueError as e:
+        raise ValueError('--warmup_wt_prior 无法解析: %r (%s)' % (spec, e))
+
+
 def build_from_args(args, agent_H, agent_L=None):
     """按 args 构造 (WarmupSchedule, warmup 下层规则, BessFillStats)。
 
@@ -612,7 +823,12 @@ def build_from_args(args, agent_H, agent_L=None):
         enabled=(getattr(args, 'warmup_sched', 'fixed') != 'random'),
         sig_mode=str(getattr(args, 'warmup_sig', 'price_walk')),
         sig_step_lo=float(getattr(args, 'warmup_sig_step_lo', SIG_STEP_LO)),
-        sig_step_hi=float(getattr(args, 'warmup_sig_step_hi', SIG_STEP_HI)))
+        sig_step_hi=float(getattr(args, 'warmup_sig_step_hi', SIG_STEP_HI)),
+        wt_sched=str(getattr(args, 'warmup_wt_sched', 'mix')),
+        prior=parse_prior(getattr(args, 'warmup_wt_prior', None), default=WT_PRIOR),
+        prior_frac=float(getattr(args, 'warmup_wt_prior_frac', WT_PRIOR_FRAC)),
+        prior_step=float(getattr(args, 'warmup_wt_prior_step', WT_PRIOR_STEP)),
+        wide_gain=float(getattr(args, 'warmup_wt_wide_gain', WT_WIDE_GAIN)))
     _mode = str(getattr(args, 'warmup_bess', 'price'))
     if _mode == 'random':
         rule = None

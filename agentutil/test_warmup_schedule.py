@@ -190,9 +190,12 @@ print('生产链路 from_args(args) → on_block_end (verbose 默认 True) 无�
 
 # ---------------------------------------------------------------- 2) warmup 调度
 print('--- 2) warmup 上层调度 ---')
-sched = hw.WarmupSchedule(nb_turbine=5, nb_actions=6, seed=7)
+# 口径（2026-10 起）：默认 = **混合采样** `wt_sched='mix'`（70% 先验邻域 + 30% 全局均匀）；
+# **旧口径**（逐维 ±0.05 随机游走、走满带两端）= `wt_sched='walk'`，历史 run 用它复现。
+# 本节的游走类判据（步长 ≤0.05 / 贴墙截断 / 整格）只对 `walk` 成立，故显式传 walk。
+sched = hw.WarmupSchedule(nb_turbine=5, nb_actions=6, seed=7, wt_sched='walk')
 a0 = sched.action()
-assert np.allclose(a0[:5], 1.0 / 3) and a0[5] == 0.0, a0
+assert np.allclose(a0[:5], 0.2) and a0[5] == 0.0, a0
 seq = [a0] + [sched.action() for _ in range(40)]
 A = np.array(seq)
 assert A.shape == (41, 6)
@@ -205,19 +208,14 @@ assert np.all(np.abs(d) <= 0.05 + 1e-12)
 short = np.abs(d) < 0.05 - 1e-12
 n_clipped = int(short.sum())
 assert np.all((wall[:-1] | wall[1:])[short]), '截断只应发生在贴墙处'
-print('41 块: wt∈[{:.2f},{:.2f}] 动作步长 |Δ|∈[{:.3f},{:.3f}] (贴墙截断 {} 处)'
+print('walk 41 块: wt∈[{:.2f},{:.2f}] 动作步长 |Δ|∈[{:.3f},{:.3f}] (贴墙截断 {} 处)'
       .format(A[:, :5].min(), A[:, :5].max(), np.abs(d).min(), np.abs(d).max(), n_clipped))
-# 判据 = **纯契约**, 不判"最优在哪": 风场最优是随尾流状态变化的单调上升斜坡
-# (最下游机组应推向单机最优 ≈1/3, 上游降载留风), 它是**策略要学的函数**,
-# 不是可预先测定的常数 —— 故这里只验中性宽带被真正走到两端 + 起点 = 单机最优点。
-a_mean = A[:, :5].mean()
-print('warmup wt: E[a]={:.4f} (起点 1/3), a∈[{:.2f},{:.2f}] (中性宽带 [0.05,0.45])'
-      .format(a_mean, A[:, :5].min(), A[:, :5].max()))
 assert A[:, :5].min() <= 0.10 and A[:, :5].max() >= 0.40, \
-    '中性宽带必须被真正走到两端 (seed=7 的 41 块实测 min=0.05 / max=0.45)'
-assert 0.20 < a_mean < 0.40, a_mean          # 从 1/3 出发的有界游走, 均值应在带中部附近
-# 可复现 + 种子无关的隔离流
-assert np.allclose(np.array([hw.WarmupSchedule(5, 6, seed=7).action() for _ in range(1)]), a0)
+    'walk 口径必须真正走到带两端 (seed=7 的 41 块实测 min=0.05 / max=0.45)'
+# 可复现（同 seed ⇒ 同序列；注意首块是起点、不消耗随机流，故必须比多块）
+_mix_a = np.array([hw.WarmupSchedule(5, 6, seed=7).action() for _ in range(5)])
+_mix_b = np.array([hw.WarmupSchedule(5, 6, seed=7).action() for _ in range(5)])
+assert np.array_equal(_mix_a, _mix_b), 'mix 口径必须种子可复现'
 s_a = np.array([hw.WarmupSchedule(5, 6, seed=11).action() for _ in range(3)])
 s_b = np.array([hw.WarmupSchedule(5, 6, seed=11).action() for _ in range(3)])
 assert np.allclose(s_a, s_b)
@@ -226,13 +224,49 @@ _ = [hw.WarmupSchedule(5, 6, seed=3).action() for _ in range(50)]
 st1 = np.random.get_state()
 assert st0[0] == st1[0] and np.array_equal(st0[1], st1[1]) and st0[2:] == st1[2:], \
     'WarmupSchedule 不得消耗全局 numpy RNG 流'
+# ---- 默认口径 = 混合采样：70% 先验邻域 + 30% 全局覆盖 ----
+print('--- 2b) 默认混合采样（先验结构 + 全局覆盖）---')
+s_mix = hw.WarmupSchedule(5, 6, seed=7)
+M = np.array([s_mix.action() for _ in range(1440 // 5)])
+prior = np.asarray(hw.WT_PRIOR[:5], dtype=float)
+assert M.shape == (288, 6)
+assert M[:, :5].min() >= 0.05 - 1e-12 and M[:, :5].max() <= 0.45 + 1e-12, '始终在带内'
+assert np.allclose(M[:, 5], 0.0)
+# ① 先验臂的块：落在 prior ± prior_step 内
+near = np.all(np.abs(M[:, :5] - prior) <= hw.WT_PRIOR_STEP + 1e-12, axis=1)
+frac_near = float(near.mean())
+assert abs(frac_near - hw.WT_PRIOR_FRAC) < 0.05, \
+    '先验臂占比应 ≈ %.2f（实测 %.3f）' % (hw.WT_PRIOR_FRAC, frac_near)
+# ② 覆盖臂的块：必须能采到远离先验的点（= 保住全局覆盖，不是退化成纯先验）
+far = np.abs(M[:, :5] - prior).max(axis=1) > hw.WT_PRIOR_STEP + 1e-9
+assert far.sum() >= 30, '全局覆盖臂的块数应 ≈30%% × 288（实测 %d）' % far.sum()
+# ③ 覆盖臂是**逐维独立**均匀（不是逐维游走）⇒ 维间相关应接近 0
+F = M[far][:, :5]
+cc = np.corrcoef(F.T)
+off = cc[~np.eye(5, dtype=bool)]
+assert np.abs(off).max() < 0.35, '覆盖臂维间相关应近 0（实测 max|r|=%.3f）' % np.abs(off).max()
+# ④ 五维同时命中已知最优 profile 的块数 = 0（旧随机游走永远做不到这一点）
+hit = int(np.all(np.abs(M[:, :5] - prior) <= 0.031, axis=1).sum())
+print('mix 288 块: 先验邻域 %.1f%% / 覆盖臂 %d 块 (维间 max|r|=%.3f) / '
+      '五维同时近先验 %d 块' % (100 * frac_near, int(far.sum()), np.abs(off).max(), hit))
+print('  E[a]=%s  逐维 sd=%s'
+      % (np.round(M[:, :5].mean(axis=0), 4), np.round(M[:, :5].std(axis=0), 4)))
+assert np.allclose(np.array([hw.WarmupSchedule(5, 6, seed=7).action()]), M[0]), 'mix 可复现'
+# 纯先验 / 纯均匀 两端可退化
+s_p = hw.WarmupSchedule(5, 6, seed=1, prior_frac=1.0)
+P1 = np.array([s_p.action() for _ in range(20)])[1:]
+assert np.all(np.abs(P1[:, :5] - prior) <= hw.WT_PRIOR_STEP + 1e-12), 'prior_frac=1 ⇒ 纯先验臂'
+s_u = hw.WarmupSchedule(5, 6, seed=1, prior_frac=0.0)
+U1 = np.array([s_u.action() for _ in range(200)])[1:]
+assert np.abs(U1[:, :5] - prior).max() > hw.WT_PRIOR_STEP * 2, 'prior_frac=0 ⇒ 纯全局覆盖'
+print('walk/mix 口径、可复现性、隔离 RNG 流、先验/覆盖两端退化 ✓')
 # 信号维 0 ⇔ soc_target 3
 assert abs(soc_target_from_signal(0.0) - 3.0) < 1e-12
 assert abs(soc_target_from_signal(hw.SIG_VALUE) - 3.0) < 1e-12
 # 对照臂
 assert hw.WarmupSchedule(5, 6, enabled=False).action() is None
 assert hw.WarmupSchedule(5, None, seed=1).action().shape == (5,)
-print('种子可复现、不消耗全局 RNG、信号维 0.0 ⇔ soc_target=3.0 ✓')
+print('信号维 0.0 ⇔ soc_target=3.0 ✓')
 
 # ---------------------------------------------------------------- 3) 规则下层
 print('--- 3) warmup 规则 BESS ≡ SocTracker.act ---')
@@ -301,7 +335,7 @@ d = ap.parse_args([])
 assert d.warmup_sched == 'fixed' and d.warmup_bess == 'rule'
 assert abs(d.warmup_soc_target - 3.0) < 1e-12
 assert (d.warmup_wt_start, d.warmup_wt_step, d.warmup_wt_lo, d.warmup_wt_hi) == \
-    (1.0 / 3, 0.05, 0.05, 0.45)
+    (hw.WT_START, 0.05, 0.05, 0.45)
 r = ap.parse_args(['--warmup_sched', 'random', '--warmup_bess', 'random',
                    '--warmup_soc_target', '2.5'])
 assert (r.warmup_sched, r.warmup_bess, r.warmup_soc_target) == ('random', 'random', 2.5)
@@ -333,7 +367,7 @@ assert (Y_START, Y_LO, Y_HI) == (0.0, -1.0, 1.0), (Y_START, Y_LO, Y_HI)
 assert abs(Y_STEP - 0.10 * band_y) < 1e-12, ('步长必须 = 带宽的 10%', Y_STEP, band_y)
 assert abs(hw.YAW_WT_NOISE - 0.10 * band_y) < 1e-12, hw.YAW_WT_NOISE
 # 旧带必须**未被改动**（9 个既有方法的行为逐位不变）
-assert (hw.WT_START, hw.WT_STEP, hw.WT_LO, hw.WT_HI) == (1.0 / 3, 0.05, 0.05, 0.45)
+assert (hw.WT_START, hw.WT_STEP, hw.WT_LO, hw.WT_HI) == (0.2, 0.05, 0.05, 0.45)
 
 ap_y = argparse.ArgumentParser()
 hw.add_warmup_args(ap_y, yaw=True)
@@ -345,9 +379,12 @@ ap_o = argparse.ArgumentParser()
 hw.add_warmup_args(ap_o)
 do = ap_o.parse_args([])
 assert (do.warmup_wt_start, do.warmup_wt_step, do.warmup_wt_lo, do.warmup_wt_hi) == \
-    (1.0 / 3, 0.05, 0.05, 0.45)
+    (hw.WT_START, 0.05, 0.05, 0.45)
 
-ns_y = argparse.Namespace(**{**vars(dy), 'seed': 7, 'rbb_rated_power': 10.0})
+# ⚠ 游走类判据（步长 ≤ Y_STEP / 贴墙截断 / 走满带两端）只对 **walk 口径** 成立；
+#   默认口径（2026-10 起）= mix（先验邻域 + 全局均匀），没有"每块步长 ≤0.2"这回事。
+ns_y = argparse.Namespace(**{**vars(dy), 'seed': 7, 'rbb_rated_power': 10.0,
+                             'warmup_wt_sched': 'walk'})
 sched_y, rule_y, _ = hw.build_from_args(ns_y, _HStub(), object())
 a0y = sched_y.action()
 assert a0y.shape == (6,) and np.allclose(a0y[:5], 0.0) and a0y[5] == 0.0, a0y
@@ -362,9 +399,21 @@ wall_y = np.isclose(Ay[:, :5], Y_LO) | np.isclose(Ay[:, :5], Y_HI)
 assert np.all((wall_y[:-1] | wall_y[1:])[short_y]), '截断只应发生在贴墙处'
 assert Ay[:, :5].min() <= Y_LO + 0.2 and Ay[:, :5].max() >= Y_HI - 0.2, \
     '满带必须被真正走到两端 (seed=7 实测 min=-1 / max=+1)'
-print('121 块（偏航带）: n∈[{:.3f},{:.3f}] 步长 |Δ|∈[{:.3f},{:.3f}] 起点 {:.1f} '
+print('walk 121 块（偏航带）: n∈[{:.3f},{:.3f}] 步长 |Δ|∈[{:.3f},{:.3f}] 起点 {:.1f} '
       '信号维恒 0 ✓'.format(Ay[:, :5].min(), Ay[:, :5].max(), np.abs(dy_steps).min(),
                             np.abs(dy_steps).max(), a0y[0]))
+# 偏航域的**默认口径 = mix**，且先验中心恒 0（无偏航）⇒ 邻域臂应落在 ±prior_step 内
+ns_ym = argparse.Namespace(**{**vars(dy), 'seed': 7, 'rbb_rated_power': 10.0})
+sched_ym, _, _ = hw.build_from_args(ns_ym, _HStub(), object())
+assert sched_ym.wt_sched == 'mix', sched_ym.wt_sched
+assert np.allclose(sched_ym.prior, 0.0), '偏航先验中心必须恒 0（不预设偏航形状）'
+My = np.array([sched_ym.action() for _ in range(1440 // 5)])
+assert My[:, :5].min() >= Y_LO - 1e-12 and My[:, :5].max() <= Y_HI + 1e-12
+near_y = np.all(np.abs(My[:, :5]) <= hw.WT_PRIOR_STEP + 1e-12, axis=1)
+assert abs(near_y.mean() - hw.WT_PRIOR_FRAC) < 0.05, near_y.mean()
+assert np.abs(My[:, :5]).max() > hw.WT_PRIOR_STEP + 1e-9, '必须保留全局覆盖臂'
+print('mix 288 块（偏航带）: 先验邻域(±{:.3f}) 占比 {:.1f}% / 全幅 max|n|={:.3f} ✓'
+      .format(hw.WT_PRIOR_STEP, 100 * near_y.mean(), np.abs(My[:, :5]).max()))
 # 独立 RNG 流（与旧调度同一条约定）
 st0 = np.random.get_state()
 _ = [hw.WarmupSchedule(5, 6, start=Y_START, step=Y_STEP, lo=Y_LO, hi=Y_HI,

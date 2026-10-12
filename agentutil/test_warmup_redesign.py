@@ -60,17 +60,42 @@ check((abs(hwarm.WT_LO - 0.05) < 1e-12) and (abs(hwarm.WT_HI - 0.45) < 1e-12),
 _grid = np.round((hwarm.WT_START + 0.05 * np.arange(-20, 21)) / 0.05) * 0.05
 check(np.allclose(_grid, hwarm.WT_START + 0.05 * np.arange(-20, 21)),
       '起点落在 0.05 整格上（旧 1/3=0.3333 会整体偏移）')
-s = hwarm.WarmupSchedule(nb_turbine=5, nb_actions=6, seed=101)
+s = hwarm.WarmupSchedule(nb_turbine=5, nb_actions=6, seed=101, wt_sched='walk')
 a0 = s.action()
 check(np.allclose(a0[:5], 0.2) and abs(a0[5]) < 1e-12,
       '首块动作 = 0.2×5 + 信号 0（实测 %s）' % np.round(a0, 4))
-A = np.array([s.action() for _ in range(300)])
+# 复用同一实例（首块恒为起点 ⇒ 每元素新建实例的写法只会重复拿到起点）
+A = np.array([a0] + [s.action() for _ in range(300)])
 d = np.abs(np.diff(A[:, :5], axis=0))
-check(np.all(d <= 0.05 + 1e-9) or np.alltrue(True), '每块步进 ≤ 0.05（含裁剪）')
+# ⚠ 原实现此处写 `np.all(d <= 0.05) or np.alltrue(True)`：numpy 2 删除了 `np.alltrue`，
+#   该断言**恒真**（失效），且 `or` 短路把前半也废掉了。这里改成对 walk 口径的真实断言。
+check(np.all(d <= 0.05 + 1e-9), 'walk 口径每块步进 ≤ 0.05（含裁剪）')
 check(A[:, :5].min() >= 0.05 - 1e-9 and A[:, :5].max() <= 0.45 + 1e-9, '始终在带内')
 check(np.all(A[:, 5] == 0.0), '第 6 维 warmup 期恒为 0')
 off = np.round((A[:, :5] - 0.2) / 0.05, 6)
-check(np.allclose(off, np.round(off)), '所有取值都在 0.05 整格上')
+check(np.allclose(off, np.round(off)), 'walk 口径所有取值都在 0.05 整格上')
+
+# ---- 默认口径（2026-10 起）= 混合采样：不再要求"整格/步长 ≤0.05"（那是 walk 的性质）----
+print('① b 默认混合采样（70%% 先验邻域 + 30%% 全局覆盖）')
+# ⚠ 必须**复用同一个实例**：`WarmupSchedule` 的第 0 块恒为起点（不消耗随机流），
+#   所以 `[WarmupSchedule(...).action() for _ in range(n)]` 会得到 n 个**同一个起点**，
+#   看起来"完全没抽样"（本会话实测踩到：所有元素都是 0.2 ⇒ 先验臂占比误报 0.000）。
+_s_mix = hwarm.WarmupSchedule(5, 6, seed=101, wt_sched='mix')
+M = np.array([_s_mix.action() for _ in range(1440 // 5)])
+_prior = np.asarray(hwarm.WT_PRIOR[:5], dtype=float)
+check(M[:, :5].min() >= 0.05 - 1e-9 and M[:, :5].max() <= 0.45 + 1e-9,
+      'mix 口径始终在带内（实测 [%.3f, %.3f]）' % (M[:, :5].min(), M[:, :5].max()))
+check(np.all(M[:, 5] == 0.0), 'mix 口径第 6 维仍恒为 0')
+_near = np.all(np.abs(M[:, :5] - _prior) <= hwarm.WT_PRIOR_STEP + 1e-12, axis=1)
+check(abs(_near.mean() - hwarm.WT_PRIOR_FRAC) < 0.05,
+      '先验臂占比 ≈ %.2f（实测 %.3f）' % (hwarm.WT_PRIOR_FRAC, _near.mean()))
+_far = np.abs(M[:, :5] - _prior).max(axis=1) > hwarm.WT_PRIOR_STEP + 1e-9
+check(_far.sum() >= 30, '全局覆盖臂仍有 ≈30%% 的块（实测 %d 块）' % _far.sum())
+_c = np.corrcoef(M[_far][:, :5].T)
+check(np.abs(_c[~np.eye(5, dtype=bool)]).max() < 0.35,
+      '覆盖臂逐维独立（维间 max|r|=%.3f）' % np.abs(_c[~np.eye(5, dtype=bool)]).max())
+check(int(np.all(np.abs(M[:, :5] - _prior) <= 0.031, axis=1).sum()) > 0,
+      '至少有一块五维同时落在已知最优 profile 附近（旧逐维游走做不到）')
 
 print('=' * 88)
 print('② 价格条件随机规则')
