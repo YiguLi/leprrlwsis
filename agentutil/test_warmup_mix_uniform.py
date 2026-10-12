@@ -17,10 +17,17 @@ sys.path.insert(0, _HERE)
 
 import numpy as np  # noqa: E402
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else 'HEAD'
-
+BASE = sys.argv[1] if len(sys.argv) > 1 else 'b72450f^'
+#: ⚠ 默认基准必须钉在**混合采样落地之前**的提交上；若传 `HEAD` 而不带 `^`，
+#:   就会拿新代码跟自己比 ⇒ **平凡通过、什么也没证明**。下面显式检测这种情况。
 src = subprocess.run(['git', 'show', '%s:hsrl_warmup.py' % BASE],
                      capture_output=True, text=True, encoding='utf-8', check=True).stdout
+if 'wt_sched' in src:
+    print('⚠ 警告：基准 %s 的 hsrl_warmup.py 已经含 wt_sched ⇒ 这是"新 vs 新"的平凡对照！'
+          % BASE)
+    print('   请传混合采样落地**之前**的提交，例如 `python %s b72450f^`'
+          % os.path.basename(__file__))
+SELF_COMPARE = 'wt_sched' in src
 # 临时文件必须落在仓库内（受限沙箱下系统 temp 不可写）；放在 agentutil/ 下并随即删除。
 tmp = os.path.join(_HERE, '_old_hsrl_warmup_tmp.py')
 with open(tmp, 'w', encoding='utf-8') as f:
@@ -68,7 +75,13 @@ def cmp(tag, nb_t, nb_a, seed, prices, **kw):
             print('     最大差 %.3e（首个不同块 %s）'
                   % (np.abs(A - B).max(), int(np.argmax((A != B).any(axis=1)))))
         if not ok:
-            fails.append(tag)
+            # 若基准已含新实现（"新 vs 新"的平凡对照），旧版没有 wt_sched 参数 ⇒
+            # 动作必然不同，这不是回归失败；显式区分开。
+            if SELF_COMPARE and 'wt_sched' not in str(
+                    old.WarmupSchedule.__init__.__code__.co_varnames):
+                print('     ↑ 基准即新实现 ⇒ 平凡对照，不计为失败（见脚本头部警告）')
+            else:
+                fails.append(tag)
     else:
         st = kw.get('start', old.WT_START)
         sp = kw.get('step', old.WT_STEP)
