@@ -10,8 +10,8 @@ r"""受控定位：H 层 buffer 里存的 cost 到底是什么？
 import os
 import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(os.path.dirname(_HERE))
+_HERE = os.path.dirname(os.path.abspath(__file__))     # agentutil/
+ROOT = os.path.dirname(_HERE)                          # 仓库根
 os.chdir(ROOT)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, _HERE)

@@ -1,18 +1,28 @@
 # -*- coding: utf-8 -*-
-r"""test9 评测的**变异来源**判别：同一 (场景步序号, 用例) 的 10 次评测之间，
-差异来自"风序列不同"还是"动作不同（探索噪声）"？
+r"""9 用例面板的**测量功效与方差分解**（只读，不需 MATLAB）。
 
-判别式（两者可分离）：
-  * nolow 下 `c1 = P_F + 20·(P_F−3)⁺`（uniform 口径），P_F 由 (风序列, 5 维动作) 决定；
-  * 动作抖动幅度已知（≈探索噪声地板）：若**动作**是主因，则 c1 的组内变异应 ≈ |∂c1/∂a|·σ_a；
-  * 若**风序列**是主因，则 c1 的组内变异会远大于该值（因为 P_F 对风远比对 a 敏感）。
-另外直接看：同一 cell 内 c1 的**极差**是否达到"未经动作改变就出现的量级"。
+回答的问题
+----------
+"用这个面板判断策略有没有改进，能分辨多大？" —— 把一个指标的总方差分解成
+**跨用例**（case 之间，纯策略无关）与**跨次评测**（同一 case 在不同检查点的差异），
+后者才是"判据"要用的噪声/漂移量。
+
+判据
+----
+* 每次评测的标准误 `SE = pooled 跨次 sd / √(评测次数)`；
+* 能分辨的改进 ≈ `1.96·SE`（相对该指标均值给百分比）。
+
+⚠ 本 run 可能仍在训练中（`df_*` 逐秒增长）⇒ 读数必须注明快照时间，且不同时刻不可混比。
+
+用法
+----
+    python agentutil/analyse_test9_panel_power.py [output/TD3PERNOLOW-run57]
 """
 import os
 import sys
 
-_HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.dirname(os.path.dirname(_HERE))
+_HERE = os.path.dirname(os.path.abspath(__file__))     # agentutil/
+ROOT = os.path.dirname(_HERE)                          # 仓库根
 os.chdir(ROOT)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, _HERE)
@@ -20,35 +30,75 @@ sys.path.insert(0, _HERE)
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 
-RUN = 'output/TD3PERNOLOW-run57'
+RUN = sys.argv[1] if len(sys.argv) > 1 else 'output/TD3PERNOLOW-run57'
 t9 = pd.read_csv(os.path.join(RUN, 'df_test9.csv'), encoding='utf-8-sig')
-t9 = t9[t9.wind_level != 'OVERALL'].copy()
-# 每一行 = 一次评测里的一个场景步；同一 (step 值, wind, price) 的 10 行 = 10 次评测的同一格
-key = ['step', 'wind_level', 'price_level']
-g = t9.groupby(key)
-sd = g['c1'].std()          # 组内 sd（10 次评测之间）
-rng_ = g['c1'].max() - g['c1'].min()
-print('cell 数 = %d，每 cell 评测次数 = %s' % (len(sd), int(g.size().median())))
-print('组内 c1 sd   : 中位 %.4f  p95 %.4f  最大 %.4f' % (sd.median(), sd.quantile(.95), sd.max()))
-print('组内 c1 极差 : 中位 %.4f  p95 %.4f  最大 %.4f' % (rng_.median(), rng_.quantile(.95), rng_.max()))
-print('全体 c1 的 sd（跨 cell）= %.4f' % t9['c1'].std())
+KEY = ['wind_level', 'price_level']
+cases = t9[t9.wind_level != 'OVERALL'].copy()
+ov = t9[t9.wind_level == 'OVERALL']
+NEVAL = int(t9['step'].nunique())
 
-# 若动作是主因：c1 ≈ P_F + 20(P_F-3)+；在 P_F<3 时 ∂c1/∂P_F = 1
-# 动作抖动 σ_a ≈ 探索噪声地板/√3；P_F 对单维动作的灵敏度由训练日志回归 ≈ 0.3~1.4 MW/单位
-amp = 0.05 * 0.135 + 0.01 * 0.865          # ε(末)≈0.135 时的逐维噪声半宽
-sig_a = amp / np.sqrt(3)
-print('\n参考：ε(末)≈0.135 ⇒ 逐维噪声半宽 %.5f ⇒ 单维 σ_a = %.5f' % (amp, sig_a))
-for dPF in (0.3, 1.4):
-    print('  若 ∂P_F/∂a ≈ %.1f（5 维独立、c1 在 P_F<3 段斜率=1）⇒ 由动作引起的 σ_c1 ≈ %.5f'
-          % (dPF, dPF * sig_a * np.sqrt(5)))
-print('⇒ 实测组内 σ_c1 中位 %.4f 比"动作通道"的上界大 %.0f~%.0f 倍'
-      % (sd.median(), sd.median() / (0.3 * sig_a * np.sqrt(5)),
-         sd.median() / (1.4 * sig_a * np.sqrt(5))))
+print('=' * 96)
+print('test9 面板功效: %s' % RUN)
+print('=' * 96)
+print('  行数 %d ⇒ 评测次数 %d（每次 10 行 = 9 用例 + OVERALL）'
+      % (len(t9), NEVAL))
+print('  快照时刻: %s' % __import__('datetime').datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
 
-print('\n⇒ 结论：同一 (场景步, 用例) 的 10 次评测之间，**风序列本身不同** ⇒')
-print('   `nine_case_test(seed=42)` 的 "fixed scenario seed 42" 是对**同一次调用内**的')
-print('   9 用例场景固定，但每次调用都用全局 `np.random` 继续抽样 ⇒ **每次评测是一段新的风轨迹**。')
-print('   因此逐次评测的差异主要是"风况抽样"，不是"策略变化"，也不是探索噪声。')
-print('\n   影响：① 单次评测的度量值不可与另一次直接比较；')
-print('        ② 要配对比较必须让两臂在同一段风上跑（当前实现做不到）；')
-print('        ③ 该面板对"策略改进"的分辨力受这个风况方差限制。')
+print('\n[1] OVERALL 指标（每次评测一个值）')
+for c in ('turbine_profit', 'profit', 'penalty_NN_H', 'c1', 'soc_end'):
+    if c not in ov:
+        continue
+    a = ov[c].to_numpy(float)
+    if abs(a.mean()) < 1e-12:
+        print('  %-14s mean %10.3f  sd %8.3f' % (c, a.mean(), a.std()))
+        continue
+    print('  %-14s mean %10.3f  sd %8.3f (%6.2f%%)  范围 %.1f ~ %.1f'
+          % (c, a.mean(), a.std(), 100 * a.std() / abs(a.mean()), a.min(), a.max()))
+
+print('\n[2] 方差分解：跨用例 vs 跨次评测（用例内）')
+
+
+def pooled(col):
+    num, den = 0.0, 0
+    for _, g in cases.groupby(KEY):
+        a = g[col].to_numpy(float)
+        num += a.var() * (len(a) - 1)
+        den += len(a) - 1
+    return float(np.sqrt(num / den))
+
+
+print('  %-14s %12s %12s %10s' % ('指标', '跨用例 sd', '跨次(用例内)sd', '占比'))
+for c in ('turbine_profit', 'profit', 'penalty_NN_H'):
+    cross = float(cases.groupby(KEY)[c].mean().std())
+    inner = pooled(c)
+    tot = float(cases[c].std())
+    print('  %-14s %12.3f %12.3f %9.2f%%'
+          % (c, cross, inner, 100 * inner ** 2 / tot ** 2))
+
+print('\n[3] 逐用例的"跨次"相对离散度（策略变化在该 case 上的可测幅度）')
+print('  %-20s %10s %8s %8s | %10s %9s %9s'
+      % ('case', 'turb均值', 'sd', '%', 'penalty均值', 'sd', '%'))
+for k, g in cases.groupby(KEY):
+    t = g['turbine_profit'].to_numpy(float)
+    p = g['penalty_NN_H'].to_numpy(float)
+    print('  %-20s %10.1f %8.1f %7.2f%% | %10.1f %9.1f %8.1f%%'
+          % (str(k), t.mean(), t.std(), 100 * t.std() / abs(t.mean()),
+             p.mean(), p.std(), 100 * p.std() / max(abs(p.mean()), 1e-9)))
+
+print('\n[4] 分辨力与趋势')
+for c, lab in (('turbine_profit', 'turbine'), ('profit', 'profit')):
+    v = ov[c].to_numpy(float)
+    n = len(v)
+    se = pooled(c) / np.sqrt(NEVAL)
+    x = np.arange(n)
+    b, a0 = np.polyfit(x, v, 1)
+    r = v - (a0 + b * x)
+    se_slope = np.sqrt((r ** 2).sum() / (n - 2) / ((x - x.mean()) ** 2).sum())
+    print('  %-9s 单次标准误 %.2f 元 (%.3f%%)  可分辨改进 ≈ %.2f%%'
+          % (lab, se, 100 * se / abs(v.mean()), 100 * 1.96 * se / abs(v.mean())))
+    print('            趋势 %+9.3f/次  t=%+5.2f  ⇒ 该趋势的 95%%半宽 %+.3f 元 (%.4f%%)'
+          % (b, b / se_slope, 1.96 * se_slope, 100 * 1.96 * se_slope / abs(v.mean())))
+print('\n  注：penalty_NN_H 的逐用例相对 sd 达 100%%~1000%%（重尾）⇒ 该指标不适合逐次比较；')
+print('      turbine_profit / profit 的跨次方差只占 %.2f%% ⇒ 面板本身是精密仪器，'
+      % (100 * pooled('turbine_profit') ** 2 / cases['turbine_profit'].var()))
+print('      它报告的是"策略没改进"这个事实，而不是"测不准"。')
