@@ -1,8 +1,15 @@
 # -*- coding: utf-8 -*-
 """warmup 行为范围探针（只读）。
 
+⚠ **口径变更（2026-10）**：`WarmupSchedule` 的默认已改为**混合采样** `wt_sched='mix'`
+（70% 先验结构 `WT_PRIOR=(0.2,0.2,0.2,0.2,1/3)` + 邻域扰动 `U(±0.03)`，30% 在
+`[0.05,0.45]` 上逐维独立均匀）。下面描述的"逐维随机游走 + 11 个可达格点"只对
+**旧口径 `wt_sched='walk'`**（以及本脚本所读的**历史 run**）成立 ⇒ 本脚本读历史 CSV
+仍然有效，但**不要再**把它的格点叙事套用到新 run 上。
+
 回答的问题：**warmup 到底给 critic 喂了多大的 (s,a) 覆盖？** 这决定"探索是否足够、
-收敛策略是否可能最优"。上层 H 的 warmup 动作由 `hsrl_warmup.WarmupSchedule` 生成：
+收敛策略是否可能最优"。上层 H 的 warmup 动作由 `hsrl_warmup.WarmupSchedule` 生成
+（**以下为 walk 口径**）：
 
     wt ← wt + rng.choice([-step, +step], size=nb_turbine)   # 每维独立 ±0.05
     wt ← clip(wt, 0.05, 0.45)                               # 中性宽带
