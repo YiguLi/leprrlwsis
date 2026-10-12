@@ -76,11 +76,22 @@ def build_dataset(run, from_step=0):
     df['blk'] = df['step'] // BLOCK
     df['pos'] = df['step'] % BLOCK
     first = df[df.pos == 0].copy()
-    # 块奖励 = Σ_{k<5} γ^k r1
     df['r1'] = (df.turbine_profit + df.bess_profit - df.degradation - df.penalty_NN_H)
-    g = df.groupby('blk')['r1'].apply(lambda s: float(sum((GAMMA ** k) * v
-                                                          for k, v in enumerate(s.to_numpy()))))
-    first['blk_r'] = first['blk'].map(g).to_numpy()
+    # ---- 与**在线 buffer 逐字同口径**的折叠奖励 ----
+    #   在线步序（`_emit_nstep`）：`_pending` 里每条是**一个块**、其 `_r` 是**该块 5 步 r1 之和**，
+    #   然后 `r_sum = Σ_{k<nstep} γ^k · _r_k` ⇒ 是**跨 nstep=5 个连续块**的折扣和。
+    #   ⚠ 曾经错写成"块内 5 步的 γ^k 加权" ⇒ 得到 ~196（块内和），与在线 1023 差 Σγ^k=4.52 倍。
+    #   正确两步：① 每块 r_blk = Σ_{块内 5 步} r1；② r_n[i] = Σ_{k<5} γ^k · r_blk[i+k]。
+    blk_sum = df.groupby('blk')['r1'].sum()
+    bs = blk_sum.to_numpy(float)
+    n5 = len(bs)
+    fold = np.full(n5, np.nan)
+    w = GAMMA ** np.arange(NSTEP)
+    for i in range(n5 - NSTEP + 1):
+        fold[i] = float(np.dot(w, bs[i:i + NSTEP]))
+    # blk 是**全局**块号；切片后必须按位置映射，不能直接拿 blk 当索引
+    pos_of = {int(b): i for i, b in enumerate(blk_sum.index.to_numpy())}
+    first['blk_r'] = [fold[pos_of[int(b)]] for b in first['blk'].to_numpy()]
 
     def parse(s):
         return np.array([[float(x) for x in t.strip().strip('[]').split()]
@@ -268,23 +279,25 @@ def main():
           % (ds['n_blk'], ds['step'].min(), ds['step'].max(), os.path.basename(ds['log'])))
     _us = pd.read_csv(os.path.join(args.run, 'update_stats_H.csv'))
     _lam = np.sum(GAMMA ** np.arange(NSTEP))
-    print('  在线对照（同口径）: 裸块奖励 %.1f 元 → n-step 折叠 ×%.4f = %.0f 元；'
-          'td_p ≈ 991 元；Q ≈ 3915 元'
-          % (ds['r'].mean(), _lam, ds['r'].mean() * _lam))
-    print('  自检: 离线奖励即**裸块值**（已逐集验证 Σr1 ≡ episode_reward）\n')
+    _raw = ds['r'].mean() / _lam          # 反推裸块奖励
+    print('  目标口径：与在线 buffer 逐字同口径（折叠权重 γ^k、自举 boot=γ⁵=%.4f）' % G_EFF)
+    print('  在线对照: 折叠奖励 %.1f 元（= 裸块 %.1f × %.4f）；td_p ≈ 991 元；Q ≈ 3915 元'
+          % (ds['r'].mean(), _raw, _lam))
+    print('  自检: 折叠奖励的裸值反推 %.1f 元 ↔ 逐步日志块级 r1 之和 216.8 元（应一致）\n'
+          % _raw)
 
     print('  %-9s %-6s %8s %7s %10s %10s %10s %10s'
           % ('hidden', 'feat', 'updates', 'secs', 'MAE|TD|', 'TD sd', 'Q mean', 'Q sd'))
     if args.sweep:
-        # 网格（全部同机制对照）：先固定 τ=0.001/lr=1e-2 复现在线的学习机制，
-        # 再单独变化 容量 / 特征 / 更新量 / bsize / lr，看残差能压到多低。
+        # 与在线同机制（τ=0.001 / lr=1e-2 / b=256 / 折叠奖励+γ⁵自举）为基线，
+        # 再单独变化 容量 / 特征 / 更新量 / bsize / lr。
         grid = [
             dict(hidden=(16, 100), updates=56000, feat='obs4', tau=1e-3, lr=1e-2, bsize=256),
             dict(hidden=(16, 100), updates=56000, feat='obs7', tau=1e-3, lr=1e-2, bsize=256),
             dict(hidden=(64, 256), updates=56000, feat='obs4', tau=1e-3, lr=1e-2, bsize=256),
             dict(hidden=(16, 100), updates=56000, feat='obs4', tau=1e-3, lr=1e-3, bsize=256),
-            dict(hidden=(16, 100), updates=56000, feat='obs4', tau=1e-3, lr=1e-2, bsize=1024),
-            dict(hidden=(16, 100), updates=400000, feat='obs4', tau=1e-3, lr=1e-2, bsize=256),
+            dict(hidden=(16, 100), updates=56000, feat='obs4', tau=1e-3, lr=1e-3, bsize=1024),
+            dict(hidden=(16, 100), updates=400000, feat='obs4', tau=1e-3, lr=1e-3, bsize=256),
             dict(hidden=(64, 256), updates=400000, feat='obs7', tau=1e-3, lr=1e-3, bsize=1024),
         ]
         recs = []
@@ -293,7 +306,7 @@ def main():
             a2.tau = g['tau']; a2.lr = g['lr']; a2.bsize = g['bsize']
             recs.append(run_one(ds, a2, g['hidden'], g['updates'], g['feat']))
             print(fmt(recs[-1]), flush=True)
-        print('\n  ---- 收敛轨迹（每档 10 个点，MAE 单位元）----')
+        print('\n  ---- 收敛轨迹（每档 10 个点，MAE 单位元；在线对照 991）----')
         for r in recs:
             print('  %-9s %-6s %8d lr=%.0e b=%4d : %s'
                   % (r['hidden'], r['feat'], r['updates'], r['lr'], r['bsize'],
