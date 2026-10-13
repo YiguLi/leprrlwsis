@@ -116,8 +116,10 @@ class _StubL:
     def __init__(self, pb=-0.1):
         self.pb = float(pb)
         self.is_training = True
+        self.obs = []
 
     def select_action(self, obs):
+        self.obs.append(np.asarray(obs, dtype=float).copy())
         return np.array([self.pb], dtype=float)
 
     def reset(self, obs):
@@ -135,12 +137,14 @@ class _StubAmortizedL:
         self.g = float(g)
         self.is_training = True
         self.cmds = []
+        self.obs = []
 
     def reset(self, obs):
         self.i = 0
         self.s = 0.0
 
     def select_action(self, obs):
+        self.obs.append(np.asarray(obs, dtype=float).copy())
         n_rem = 5 - self.i
         need = (self.g - self.s) / float(n_rem)
         self.i += 1
@@ -342,20 +346,39 @@ def main():
 
     # =====================================================================
     print('\n' + '=' * 90)
-    print('G. L 观测：5 维 / 刻度 / （已知局限）Σ 与 n_rem 不可观测')
+    print('G. L 观测：6 维 / 刻度 / 第 6 维 = c_L 的参照点 / （残余局限）n_rem 不可观测')
     print('=' * 90)
     # =====================================================================
-    o = H.build_L_obs_hsrl(10.0, 300.0, 0.25, 1.5, 2.5)
-    check(o.shape == (5,), '观测维数 = 5')
-    check(np.allclose(o, [1.0, 0.3, 0.5, 0.3, 1.0]),
-          '观测 = [u/10, pr/1000, SOC/0.5, P_G/5, g/2.5] = %s' % np.round(o, 4).tolist())
-    o2 = H.build_L_obs_hsrl(10.0, 300.0, 0.25, 1.5, -2.5)
-    check(o2[4] == -1.0, 'g 满量程负向 ⇒ 第 5 维 = −1')
-    o_a = H.build_L_obs_hsrl(10.0, 300.0, 0.25, 1.5, 1.0)
-    o_b = H.build_L_obs_hsrl(10.0, 300.0, 0.25, 1.5, 1.0)
-    check(np.array_equal(o_a, o_b),
-          '（局限记录）观测不含 Σ/n_rem ⇒ 不同块内进度给出**同一个**观测'
-          '（c_L 的参照量对策略不可观测；刻意保留的原方法形态）')
+    o = H.build_L_obs_hsrl(10.0, 300.0, 0.25, 1.5, 2.5, 0.5)
+    check(o.shape == (6,), '观测维数 = 6')
+    check(np.allclose(o, [1.0, 0.3, 0.5, 0.3, 1.0, 0.2]),
+          '观测 = [u/10, pr/1000, SOC/0.5, P_G/5, g/2.5, need/2.5] = %s'
+          % np.round(o, 4).tolist())
+    check(abs(o[5] - 0.5 / H.OBS_NEED_SCALE) < 1e-15 and H.OBS_NEED_SCALE == H.OBS_G_SCALE,
+          '第 6 维 = need/%.1f（与 g 同刻度）' % H.OBS_NEED_SCALE)
+    o2 = H.build_L_obs_hsrl(10.0, 300.0, 0.25, 1.5, -2.5, -2.5)
+    check(o2[4] == -1.0 and o2[5] == -1.0, 'g/need 满量程负向 ⇒ 第 5/6 维 = −1')
+    o3 = H.build_L_obs_hsrl(10.0, 300.0, 0.25, 1.5, 2.5, -0.5)
+    check(o3[4] == 1.0 and abs(o3[5] + 0.2) < 1e-15,
+          'need 可正可负（这里 need=−0.5 ⇒ 第 6 维 = −0.2）⇒ 该维不是 g 的副本')
+    # 参照点必须与 c_L 用的是**同一个量**（零成本动作 = 令 a_L = obs[5]·2.5）
+    _g, _s, _nr = 1.7, 0.4, 3
+    _need = H.plan_need(_g, _s, _nr)
+    _o = H.build_L_obs_hsrl(10.0, 300.0, 0.25, 1.5, _g, _need)
+    check(abs(_o[5] * H.OBS_NEED_SCALE - _need) < 1e-15
+          and H.lower_cost_hsrl(_g, _s, _nr, _need) == 0.0,
+          '观测第 6 维 × 刻度 == plan_need，且 a_L 取该值时 c_L ≡ 0（参照点接线正确）')
+    # 残余局限: 由 (g, need) 无法反解 (Σ, n_rem) ⇒ 下一状态的参照点仍不可预测
+    _g, _need = 1.5, 0.3
+    _pairs = [(_g - _need * _nr, _nr) for _nr in (5, 3)]   # (Σ, n_rem): need 完全相同
+    _obs_a = H.build_L_obs_hsrl(10.0, 300.0, 0.25, 1.5, _g, _need)
+    _obs_b = H.build_L_obs_hsrl(10.0, 300.0, 0.25, 1.5, _g, _need)
+    _next_a = H.plan_need(_g, _pairs[0][0] + 0.5, _pairs[0][1] - 1)
+    _next_b = H.plan_need(_g, _pairs[1][0] + 0.5, _pairs[1][1] - 1)
+    check(np.array_equal(_obs_a, _obs_b) and abs(_next_a - _next_b) > 1e-12,
+          '（残余局限记录）n_rem 仍不可观测: (Σ,n_rem) = (%.2f,5)/(%.2f,3) 给出**同一观测**，'
+          '但下一参照点 = %.3f vs %.3f（本步代价只看本步 need/a_L ⇒ 本步已给全）'
+          % (_pairs[0][0], _pairs[1][0], _next_a, _next_b))
 
     # =====================================================================
     print('\n' + '=' * 90)
@@ -428,7 +451,8 @@ def main():
             aH, aL, env, rbb, pool, seed=1234, phase_mode=0)
         return env, per_blk, overall, meta
 
-    env, per_blk, overall, meta = _run(_StubL(pb=-0.1))
+    stub_const = _StubL(pb=-0.1)
+    env, per_blk, overall, meta = _run(stub_const)
     check(len(per_blk) == 4 and meta['n_steps'] == 20,
           '20 步 = 4 个块（返回 %d 个块）' % len(per_blk))
     check(meta['price'] == 300.0 and all(abs(p - 300.0) < 1e-12 for p in env.price[:20]),
@@ -466,6 +490,15 @@ def main():
           '摊还执行臂的块 r2 = −20·g = %.2f（只有退化成本）' % per_blk2[0]['r2'])
     check(env2.n_env_clip == 0 and env.n_env_clip == 0,
           '两条臂都未触发 env 的 SOC 边界修正（在物理域内 ⇒ 施加值 == 命令值）')
+
+    # ---- 观测第 6 维（c_L 参照点）在该协议下的接线 ----
+    _obs_need = [float(o[5]) * H.OBS_NEED_SCALE for o in stub_const.obs]
+    _need_exp = [(G_TGT - 0.1 * k) / (5 - k) for k in range(5)]
+    check(all(abs(a - b) < 1e-12 for a, b in zip(_obs_need[:5], _need_exp)),
+          '每块第 6 维 = 决策时刻的 need = %s（Σ 只用**本步之前**的累计）'
+          % np.round(_need_exp, 4).tolist())
+    check(len(stub_const.obs[0]) == 6 and len(_run(_StubAmortizedL(G_TGT))[1]) == 4,
+          '测试协议里的 L 观测也是 6 维（与训练同口径）')
 
     print('\n' + '=' * 90)
     if FAIL:

@@ -63,7 +63,8 @@ L: r2 = −1·min(clip_amount, 20)   [MW] 命令与实际之差 (两段 clip 合
     **不含** rulebase 波动裁剪罚）；
   * L cost（图中公式）：`c_L = 1 − exp(−|(g − Σ已放电)/(δ − t_L) − a_L|)`，
     δ = 5、t_L = 块内已过步数、a_L/Σ 都取**实际施加值**（放电为正）；
-  * L 观测 5 维 = `[u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5]`
+  * L 观测 6 维 = `[u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5, need/2.5]`
+    （第 6 维 = c_L 的参照点 `need=(g−Σ已放电)/n_rem`；残余局限见 README §3.8）
     （⚠ 不含 Σ/n_rem ⇒ 对 c_L 的参照量非 Markov；这是刻意的原方法形态，见 README）；
   * λ2 重标 `[2, 50]`（初值 10）、`d_block_L = 0.5`（地板 0.05）；
   * warmup 下层 = **摊还执行器** `clip(−(g−Σ)/n_rem, 物理域)`（c_L ≡ 0 的零成本动作）；
@@ -1050,18 +1051,21 @@ def train_hsrl(num_iterations_H,
         pb_lo, pb_hi = hsrl.feasible_power(E_current)     # 每步物理域 [MW, 正=充电]
 
         # ================================================================
-        # 下层 L 观测 (5 维): [u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5]
+        # 下层 L 观测 (6 维): [u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5, need/2.5]
+        #   第 6 维 = c_L 的参照点 need = (g − Σ已放电)/(δ − t_L)（**本步开始前**的 Σ/n_rem）
         # ================================================================
+        _n_rem_L = 5 - (episode_steps % 5)
+        need_L = hsrl.plan_need(g_applied, sum_disch, _n_rem_L)
         norm_observation_L = hsrl.build_L_obs_hsrl(
-            observation[1], observation[0], E_current, pg_prev, g_applied)
-        prPurple('--L-- obs = {}.'.format(np.round(norm_observation_L, 3)))
+            observation[1], observation[0], E_current, pg_prev, g_applied, need_L)
+        prPurple('--L-- obs = {} (need={:.4f})'.format(
+            np.round(norm_observation_L, 3), need_L))
         if episode_steps % 5 == 0:            # 下层每个 5-step 块 = 一个 episode
             agent_L.reset(norm_observation_L)
 
         # ================================================================
         # 下层 L 动作: **绝对 pb**，只按物理域 (SOC + 额定功率) 裁剪
         # ================================================================
-        _n_rem_L = 5 - (episode_steps % 5)
         if step <= args.warmup:
             if _wb == 'price' and getattr(warmup_rule, 'is_price', False):
                 pb_cmd_L = float(warmup_rule.act(float(observation[0]), pb_lo, pb_hi))
@@ -1127,9 +1131,11 @@ def train_hsrl(num_iterations_H,
         sum_c2 += c2
         sum_disch += a_L_disch
 
+        # 下一状态 L 观测: 第 6 维要用**更新后**的 Σ 与 n_rem 重算（need' = (g−Σ−a_L)/(n_rem−1)）
+        need_L_next = hsrl.plan_need(g_applied, sum_disch, max(1, _n_rem_L - 1))
         norm_observation2_L = hsrl.build_L_obs_hsrl(
             observation2[1], observation2[0], float(observation2[2]),
-            float(observation2[-1]), g_applied)
+            float(observation2[-1]), g_applied, need_L_next)
 
         prGreen('r1 = {} (turb={}, bess={}, bessdeg 已移除) | pen5 = {}, pen6 = {:.3f}'.format(
             round(r1, 3), round(reward_details['turbine_profit'], 3),
@@ -1236,12 +1242,13 @@ def train_hsrl(num_iterations_H,
                                 'r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'pen6', 'cvm',
                                 'pf_viol', 'profit', 'profit_econ', 'soc_start', 'soc_end',
                                 'dsoc', 'g', 'g_raw', 'sum_disch', 'cL_max', 'dev_mean',
-                                'pb_sum')}))
+                                'need_mean', 'pb_sum')}))
                     df_test_rows.append(dict(
                         _common, block='OVERALL', **{k: overall[k] for k in (
                             'r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'pen6', 'cvm',
                             'pf_viol', 'profit', 'profit_econ', 'soc_start', 'soc_end',
-                            'dsoc', 'g', 'g_raw', 'sum_disch', 'cL_max', 'dev_mean')}))
+                            'dsoc', 'g', 'g_raw', 'sum_disch', 'cL_max', 'dev_mean',
+                            'need_mean')}))
                     df_test_written = flush_csv_append_batch(
                         '{}/df_test20_hsrl.csv'.format(output),
                         df_test_rows, df_test_written)
@@ -1276,6 +1283,7 @@ def train_hsrl(num_iterations_H,
                 'pen6_H': pen6_H,
                 # 下层
                 'norm_observation_L': norm_observation_L,
+                'obs_need': float(norm_observation_L[5]),   # 第 6 维（c_L 参照点的归一化值）
                 'original_action_L': original_action_L,
                 'pb_cmd': pb_cmd_L,
                 'pb_applied': pb_applied,
@@ -1718,7 +1726,8 @@ if __name__ == "__main__":
                              'r2 = −200·越界[MW] − 20·放电[MW·min]; '
                              'c_L = 1 − exp(−|(g−Σ已放电)/(δ−t_L) − a_L|); '
                              'λ2 ∈ [2, 50]（初值 10）, d_block_L = 0.5; '
-                             'L 观测 = [u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5]; '
+                             'L 观测(6 维) = [u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5, '
+                             'need/2.5]（need = c_L 的参照点 (g−Σ)/n_rem）; '
                              'warmup 下层 = 摊还执行器; 训练中测试改 20 步协议。'
                              '不加该参数时旧路径**逐位不变**')
     parser.add_argument('--hsrl_pen6_coef', default=hsrl.HSRL_PEN6_COEF, type=float,
@@ -1889,7 +1898,9 @@ if __name__ == "__main__":
     # ---- HSRL 分支: 动作语义变成"绝对 pb"、cost 换成图中指数式 ⇒
     #      λ2 的区间/初值/预算随之重标 (c_L 无量纲 vs r2 元量级; 见 aifflor_hsrl.py) ----
     if args.hsrl:
-        agent_L = SP_TD3(nb_states=5, nb_actions=1, args=args,
+        # HSRL: 观测 = [u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5, need/2.5]（6 维;
+        #   第 6 维 = c_L 的参照点 (g−Σ已放电)/n_rem ⇒ 策略能直接看到"本步该出多少"）
+        agent_L = SP_TD3(nb_states=6, nb_actions=1, args=args,
                          lam_max=hsrl.HSRL_L_LAM_MAX, lam_min=hsrl.HSRL_L_LAM_MIN,
                          ema_lam=True, ema_alpha=0.02, ema_lam_lr=hsrl.HSRL_L_EMA_LAM_LR,
                          policy_delay=args.l_policy_delay,
@@ -1931,9 +1942,10 @@ if __name__ == "__main__":
     else:
         prCyan('下层奖励/成本口径 (HSRL): r2 = -{:.0f}·越界[MW] - {:.0f}·放电[MW·min]; '
                'c_L = 1 - exp(-|(g-Σ已放电)/(5-t_L) - a_L|); '
-               'L 观测 = [u/10, pr/1000, SOC/0.5, P_G(t-1)/5, g/{:.1f}]; '
+               'L 观测(6 维) = [u/10, pr/1000, SOC/0.5, P_G(t-1)/5, g/{:.1f}, need/{:.1f}]; '
                'warmup 下层 = {}'.format(
                    args.hsrl_viol_coef, args.hsrl_deg_coef, hsrl.HSRL_G_FULL,
+                   hsrl.OBS_NEED_SCALE,
                    '摊还执行器' if str(getattr(args, 'warmup_bess', 'rule')) == 'rule'
                    else getattr(args, 'warmup_bess')))
     #TODO 是否预训练

@@ -41,13 +41,21 @@ HSRL 分支（aifflor 专用）——「块总放电量」语义下的上下层�
    （`c2 = -np.exp(-abs((signal - sum(pb_l[:-1]))/(5-tt) - pb)) + 1`）。
    ⇒ c_L ∈ [0, 1)：完全按"摊还计划"执行 ≡ 0；偏离 1 MW ⇒ 1 − e⁻¹ ≈ 0.632。
 
-⑥ **L 观测**（5 维；用户口径 = "H 观测 + 上层目标"）：
+⑥ **L 观测**（6 维；= "H 观测 + 上层目标 + **c_L 的参照点**"）：
 
-       [ u/10 , pr/1000 , SOC/0.5 , P_G(t−1)/5 , g/2.5 ]
+       [ u/10 , pr/1000 , SOC/0.5 , P_G(t−1)/5 , g/2.5 , need/2.5 ]
 
-   ⚠ **已知局限（刻意保留的原方法形态）**：观测里**没有** Σ 与 n_rem ⇒ c_L 的参照量
-   `(g−Σ)/n_rem` 对策略不可观测（单步转移对 c_L 非 Markov；PER 按单步采样会失真）。
-   若要修，见 `aifflor/README.md` 的 `--hsrl` 小节（在那里记了 7 维备选）。
+   第 6 维 `need = (g − Σ已放电)/(δ − t_L)` 就是 c_L 公式里的参照点（`plan_need`）——
+   把它喂给策略，actor 才能**直接**知道"本步该出多少"（零成本动作 = 令 `a_L = need`）。
+   `need/2.5` 用与 `g` 同一个刻度（满量程 = `δ·P_rated`），两维可直接比较。
+
+   ⚠ **残余局限（须知）**：6 维里给了 `g` 与 `need`，但**没有** `n_rem`（也没有 Σ 本身）
+   ⇒ 由 `need = (g−Σ)/n_rem` 无法反解 `(Σ, n_rem)`（一个方程两个未知量），
+   于是**下一状态的参照点** `need' = (g−Σ−a_L)/(n_rem−1)` 仍不能被策略精确预测
+   （同一个观测可对应不同的 `need'`；契约测试第 G 节把这条写成可执行记录）。
+   若要把这块也补上，再加一维 `n_rem/5` 即可（`nb_states` 6→7）。
+   注意本步**代价** `c_L = 1−exp(−|need − a_L|)` 只依赖本步的 `need` 与 `a_L`
+   ⇒ 就"本步该怎么动"而言，第 6 维已经给全了。
 
 ⑦ **L 对偶重标**：c_L 无量纲、r2 是"元"量级 ⇒ λ2 ∈ [2, 50]（初值 10；乘性**对数**步长
    0.02 不变）；每块预算 `d_block_L = 0.5`（= 允许 5 步平均 0.1 的计划偏差），
@@ -120,6 +128,7 @@ OBS_PR_SCALE = 1000.0           # 电价 pr [元/MWh] → /1000
 OBS_E_SCALE = E_MAX             # SOC E [MWh] → /0.5
 OBS_PG_SCALE = 5.0              # P_G(t−1) [MW] → /5
 OBS_G_SCALE = HSRL_G_FULL       # 上层目标 g [MW·min] → /2.5
+OBS_NEED_SCALE = HSRL_G_FULL    # c_L 的参照点 need=(g−Σ)/n_rem [MW] → /2.5（与 g 同刻度）
 
 # ---- warmup ----
 #: warmup 上层第 6 维定标：`g = −HSRL_WARMUP_G_SCALE · sig_walk`，`sig_walk ∈ [−0.5, 0.5]`
@@ -362,18 +371,23 @@ def lower_cost_hsrl(g, sum_disch, n_rem, discharge_applied,
     return c
 
 
-def build_L_obs_hsrl(u, pr, E, pg_prev, g):
-    """HSRL 版 L 观测（5 维，用户口径 = "H 观测 + 上层目标"）：
+def build_L_obs_hsrl(u, pr, E, pg_prev, g, need):
+    """HSRL 版 L 观测（6 维 = "H 观测 + 上层目标 + c_L 的参照点"）：
 
-        [ u/10 , pr/1000 , SOC/0.5 , P_G(t−1)/5 , g/2.5 ]
+        [ u/10 , pr/1000 , SOC/0.5 , P_G(t−1)/5 , g/2.5 , need/2.5 ]
 
-    ⚠ 不含 Σ / n_rem ⇒ 对 c_L 的参照量非 Markov（见模块 docstring ⑥，刻意保留）。
+    `need = plan_need(g, Σ已放电, n_rem)` = c_L 公式里的参照点（**必填**，由调用方按
+    "本步开始前"的 Σ 与 n_rem 算好；下一状态的观测要用**更新后**的 Σ、n_rem 重算）。
+
+    ⚠ 残余局限：`need = (g−Σ)/n_rem` 一个方程两个未知量（Σ 与 n_rem 都不可观测）
+    ⇒ 下一状态的 `need'` 仍不能精确预测（本步的代价则只依赖本步的 need/a_L，已经给全）。
     """
     return np.array([float(u) / OBS_U_SCALE,
                      float(pr) / OBS_PR_SCALE,
                      float(E) / OBS_E_SCALE,
                      float(pg_prev) / OBS_PG_SCALE,
-                     float(g) / OBS_G_SCALE], dtype=np.float64)
+                     float(g) / OBS_G_SCALE,
+                     float(need) / OBS_NEED_SCALE], dtype=np.float64)
 
 
 def amortized_rule_action(g, sum_disch, n_rem, E, eta_c=ETA_C, eta_d=ETA_D,
@@ -425,9 +439,10 @@ def summary():
             'H r1 = pr·P_G·dt − pen5 − pen6 (无 bessdeg, 无块末 gap 罚) | '
             'L 动作 = 绝对 pb, 仅物理域裁剪 | r2 = −{:.0f}·越界 − {:.0f}·放电 | '
             'c_L = 1 − exp(−|(g−Σ)/n_rem − a_L|) | λ2 ∈ [{:.0f}, {:.0f}] 初值 {:.0f} | '
-            'd_block_L = {} | L 观测 = [u/10, pr/1000, E/0.5, P_G/5, g/{:.1f}]'.format(
+            'd_block_L = {} | L 观测(6 维) = [u/10, pr/1000, E/0.5, P_G/5, g/{:.1f}, '
+            'need/{:.1f}]'.format(
                 HSRL_VIOL_COEF, HSRL_DEG_COEF, HSRL_L_LAM_MIN, HSRL_L_LAM_MAX,
-                HSRL_L_LAM_INIT, HSRL_D_BLOCK_L, HSRL_G_FULL))
+                HSRL_L_LAM_INIT, HSRL_D_BLOCK_L, HSRL_G_FULL, OBS_NEED_SCALE))
 
 
 # =============================================================================
@@ -530,7 +545,7 @@ def twenty_step_test_hsrl(agent_H, agent_L, env_test, rbb_system, wind_pool,
                 'viol': 0.0, 'pen6': 0.0, 'cvm': 0, 'pf_viol': 0, 'profit': 0.0,
                 'soc_start': float(soc_start), 'soc_end': float(soc_start),
                 'g_raw': 0.0, 'g': 0.0, 'sum_disch': 0.0, 'pb_sum': 0.0,
-                'cL_max': 0.0, 'dev_abs_sum': 0.0, 'n_step': 0}
+                'cL_max': 0.0, 'dev_abs_sum': 0.0, 'need_sum': 0.0, 'n_step': 0}
                for _ in range(n_blk)]
 
     g = 0.0
@@ -552,7 +567,8 @@ def twenty_step_test_hsrl(agent_H, agent_L, env_test, rbb_system, wind_pool,
             per_blk[bi]['g_raw'] = g_raw
             per_blk[bi]['g'] = g
         n_rem = 5 - (step % 5)
-        obs_L = build_L_obs_hsrl(obs[1], obs[0], obs[2], obs[-1], g)
+        need_L = plan_need(g, sum_disch, n_rem)
+        obs_L = build_L_obs_hsrl(obs[1], obs[0], obs[2], obs[-1], g, need_L)
         if step % 5 == 0:
             agent_L.reset(obs_L)
         raw_L = agent_L.select_action(obs_L)
@@ -594,6 +610,7 @@ def twenty_step_test_hsrl(agent_H, agent_L, env_test, rbb_system, wind_pool,
         pc['pb_sum'] += float(pbrule)
         pc['cL_max'] = max(pc['cL_max'], c_L)
         pc['dev_abs_sum'] += c_info['abs_dev']
+        pc['need_sum'] += c_info['need']
         pc['n_step'] += 1
         sum_disch += a_L
         pc['sum_disch'] = sum_disch
@@ -610,9 +627,10 @@ def twenty_step_test_hsrl(agent_H, agent_L, env_test, rbb_system, wind_pool,
         m['dsoc'] = m['soc_end'] - m['soc_start']
         m['profit_econ'] = m['profit'] + m['dsoc'] * float(hc.PR_REF)
         m['dev_mean'] = m['dev_abs_sum'] / max(m['n_step'], 1)
+        m['need_mean'] = m['need_sum'] / max(m['n_step'], 1)
 
     _sum_keys = ('r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'pen6', 'profit')
-    _mean_keys = ('g', 'g_raw', 'sum_disch', 'cL_max', 'dev_mean')
+    _mean_keys = ('g', 'g_raw', 'sum_disch', 'cL_max', 'dev_mean', 'need_mean')
     overall = {k: float(sum(m[k] for m in per_blk)) for k in _sum_keys}
     overall.update({k: float(np.mean([m[k] for m in per_blk])) for k in _mean_keys})
     overall['cvm'] = int(sum(m['cvm'] for m in per_blk))

@@ -40,7 +40,10 @@ I/O 映射（**本次任务的核心**）
 * `aifflor_env.py`     —— `AifflorPhysics`（非有限值守卫 + 预取）+ `WindBatteryAIF`
 * `aifflor_ddpg.py`    —— **逐字复制** `td3per/td3per_ddpg.py`
 * `aifflor_myfunc.py`  —— **逐字复制** `td3per/td3per_myfunc.py`
+* `aifflor_hsrl.py`    —— **新写**：`--hsrl` 方法分支的全部口径（"块总放电量"语义，见其 docstring
+  与 `aifflor/README.md` §3.8；未加 `--hsrl` 时一行都不会被调用）
 * `aifflor_main.py`    —— `td3per/td3per_main.py` + 替换表（`agentutil/port_aifflor.py`）
+  + `--hsrl` 分支的 `train_hsrl()`（与旧 `train()` 并列）
 
 克隆的**唯一真源**是 `agentutil/port_aifflor.py`（替换表 + `--check` 可逆性校验）。
 

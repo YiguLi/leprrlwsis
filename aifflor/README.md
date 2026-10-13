@@ -482,7 +482,7 @@ python aifflor\aifflor_main.py --hsrl     # HSRL:  块总放电量 + 绝对 pb +
 | L 动作裁剪 | `CheckAction` ±0.5 + RBB 平抑窗口 | **只按 SOC + 额定功率**（RBB 以 `fluctuation_limit=inf` 构造） |
 | **L r2** | `−1·min(clip_amount, 20)`（含波动裁剪那一段） | `−200·越界[MW] − 20·放电[MW·min]` |
 | **L c_L（图上公式）** | `+1·trackerr`（到"Soctrack 范围 ∩ 平抑窗口"的距离） | `1 − exp(−\|(g−Σ已放电)/(δ−t_L) − a_L\|)` |
-| L 观测 | `[pg(t−1)/10, ptur/10, SOC/0.5, target/0.5, n_rem/5]` | `[u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5]` |
+| L 观测 | `[pg(t−1)/10, ptur/10, SOC/0.5, target/0.5, n_rem/5]` | `[u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5, need/2.5]`（6 维，第 6 维 = c_L 的参照点） |
 | λ2 | `[0.5, 2]`，初值 1（MW↔MW 兑换率） | `[2, 50]`，初值 10（c_L 无量纲 vs r2 元量级） |
 | `d_block_L` | 1.2（地板 0.15） | 0.5（地板 0.05） |
 | warmup 下层 | 规则追 `soc_target`（`Δ≡0` 基线） | **摊还执行器** `pb = clip(−(g−Σ)/n_rem, 物理域)` |
@@ -528,11 +528,14 @@ warmup 期的下层规则就是这个"摊还执行器"，启动时用 400 组随
 
 ### 已知局限（**刻意保留**的原方法形态）
 
-1. **L 观测不含 `Σ` / `n_rem`**（用户口径：回到"H 观测 + 上层目标"这 5 维）⇒ `c_L` 的
-   参照量 `(g−Σ)/n_rem` 对策略**不可观测**：单步转移对 `c_L` 非 Markov，PER 按单步采样
-   会带偏 critic。契约测试第 G 节把这条局限写成可执行记录（同一观测对应不同块内进度）。
-   若要修，最小改动是追加两维 → `[u/10, pr/1000, SOC/0.5, P_G/5, g/2.5, Σ/2.5, n_rem/5]`
-   （需同步 `agent_L` 的 `nb_states=7`）。
+1. **L 观测的第 6 维已给出 c_L 的参照点**（`need = (g−Σ已放电)/n_rem`，`--hsrl` 第二轮加入）：
+   策略因此**直接看得到"本步该出多少"**（零成本动作 = 令 `a_L = need`），本步代价
+   `c_L = 1−exp(−|need−a_L|)` 只依赖本步的 `need`/`a_L` ⇒ 就"本步怎么动"而言信息已给全。
+   **残余局限**：`need = (g−Σ)/n_rem` 是**一个方程两个未知量**（Σ 与 n_rem 都不可观测）
+   ⇒ **下一状态的参照点** `need' = (g−Σ−a_L)/(n_rem−1)` 仍不能精确预测（同一个观测可对应
+   不同的 `need'`，契约测试第 G 节把它写成可执行记录）。要补齐就再加一维 `n_rem/5`
+   （`agent_L` 的 `nb_states` 6→7）——但注意 `done_L` 在块末为真，该处 next-state 不参与
+   自助传播，所以影响面主要是**块内前 4 步**的 bootstrapping。
 2. **H 对"块内波动"没有直接控制**：`g` 只约束块**总量**，块内怎么分配由 L 决定，而 L 的
    r2/c_L 都只看沉淀量与计划偏差 ⇒ 平抑压力全部落在 H 的 c1（事后计费）上。
    在容量 0.5 MWh / 额定 0.5 MW 的口径下，BESS 对 3 MW 限幅的平抑能力本就有限
@@ -557,10 +560,10 @@ warmup 期的下层规则就是这个"摊还执行器"，启动时用 400 组随
 
 | 项 | 结果 |
 |---|---|
-| **旧口径逐位不变** | `--max_steps 300 --seed 1`（无 `--hsrl`）改前/改后 `df_aifflor.csv` **SHA256 完全相同**（`0091C06A…F8A2`） |
-| `agentutil/test_aifflor_hsrl_contract.py` | **全部通过**（A–J 共 60+ 条断言：可行域⇔RBB 逐位、c_L⇔原式逐位、符号/裁剪/罚、H 奖励差 = bessdeg、观测、λ2、摊还自检、20 步协议手算逐位） |
-| `--hsrl --warmup 300 --max_steps 1000 --seed 1` 端到端 | 跑通；摊还自检 400 例全过；20 步测试在 step 480/960 各触发一次；FLORIS 坏点 **0**；无 NaN（除 `ema_c1_H`/`ema_cL_L` 在 EMA 建立前的预期 NaN） |
-| 烟测自洽量 | `pbrule ≡ pb_applied`、`clip_amount ≡ viol_L`（逐位）；`g` 在 warmup 期按价格游走饱和到 ∓2.5、策略期由策略自行决定；策略期 `corr(g_raw, 块Σr1) = +0.163`（**奖励梯度方向正确**：放电为正 ⇒ 收益为正） |
+| **旧口径逐位不变** | `--max_steps 300 --seed 1`（无 `--hsrl`）改前/改后 `df_aifflor.csv` **SHA256 完全相同**（`0091C06A…F8A2`）—— 第二轮（加 L 观测第 6 维）后**再次复核，仍逐位相同** |
+| `agentutil/test_aifflor_hsrl_contract.py` | **全部通过**（A–J 共 60+ 条断言：可行域⇔RBB 逐位、c_L⇔原式逐位、符号/裁剪/罚、H 奖励差 = bessdeg、6 维观测与第 6 维参照点、λ2、摊还自检、20 步协议手算逐位） |
+| `--hsrl --warmup 300 --max_steps 1500 --seed 1` 端到端 | 跑通；摊还自检 400 例全过；20 步测试在 step 480/960/1440 各触发一次；episode 边界产出 `df_episode_hsrl.csv`；FLORIS 坏点 **0**；无 NaN（除 `ema_c1_H`/`ema_cL_L` 在 EMA 建立前的预期 NaN） |
+| 烟测自洽量 | `pbrule ≡ pb_applied`、`clip_amount ≡ viol_L`、`obs_need × 2.5 ≡ need`（逐位）；`g` 在 warmup 期按价格游走饱和到 ∓2.5、策略期由策略自行决定；策略期 `corr(g_raw, 块Σr1) = +0.163`（**奖励梯度方向正确**：放电为正 ⇒ 收益为正）；`need` 实测范围 ≈ ±2.2（可超过单步物理域 ±0.5 ⇒ 第 6 维确实携带"够不够得着"的信息） |
 | `agentutil/test_aifflor_contract.py` | **1 项既有失败**（与本改动无关）：`build_L_obs_distilled 逐位相同` —— `td3per_myfunc` 的版本在 `nolow` 提交里多了 `soc_signal=None` 形参，`aifflor_myfunc` 的副本没跟上（`git log` 可查：该漂移早于本次改动）；aifflor 的调用方式不受影响 |
 
 ---
@@ -621,8 +624,8 @@ aifflor 用回 `--env TD3PER`。
 | 项 | 结果 |
 |---|---|
 | 契约测试 `test_aifflor_contract.py` | **全部通过**（myfunc 逐位相同 / 动作语义 / 标定生效 / 不引入 matlab / 观测与守卫 / 预取确定性）—— ⚠ 2026-10 起 `build_L_obs_distilled 逐位相同` 一条为**既有失败**（`nolow` 提交给 td3per 版加过 `soc_signal` 形参，见 §3.8 末表），与本分支无关 |
-| 契约测试 `test_aifflor_hsrl_contract.py`（`--hsrl`） | **全部通过**（可行域⇔RBB 逐位 / c_L⇔原式逐位 / 符号与罚 / H 奖励差 / 观测 / λ2 / 摊还自检 / 20 步协议手算） |
-| `--hsrl` 端到端 1000 步 | 跑通（FLORIS 坏点 0；20 步测试在 step 480/960 触发；产物 `df_hsrl.csv` + `df_test20_hsrl.csv` + `update_stats_H.csv`） |
+| 契约测试 `test_aifflor_hsrl_contract.py`（`--hsrl`） | **全部通过**（可行域⇔RBB 逐位 / c_L⇔原式逐位 / 符号与罚 / H 奖励差 / 6 维观测与参照点 / λ2 / 摊还自检 / 20 步协议手算） |
+| `--hsrl` 端到端 1500 步 | 跑通（FLORIS 坏点 0；20 步测试在 step 480/960/1440 触发；产物 `df_hsrl.csv` + `df_test20_hsrl.csv` + `df_episode_hsrl.csv` + `update_stats_H.csv`） |
 | 旧口径改前/改后同 seed 300 步 | `df_aifflor.csv` **SHA256 完全相同**（`0091C06A…F8A2`）⇒ `--hsrl` 分支对旧路径零影响 |
 | 端到端训练 60 步 | 跑通，**10.4 s**；预取 25 次（批量 25 / 单条 25 / **命中 48**），NaN 守卫 **0** 次 |
 | 输出目录 | **`output/AIFFLOR-runNN`** ✅（产物 `df_aifflor.csv` + tfevents；`--hsrl` 时为 `df_hsrl.csv` 等，见 §3.8） |
