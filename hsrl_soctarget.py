@@ -103,9 +103,9 @@ import numpy as np
 import hsrl_cost as hc
 
 # ---------------------------------------------------------------- 目标映射
-SOC_TARGET_CENTER = 3.0
-SOC_TARGET_SPAN = 5.0
-SOC_TARGET_MIN, SOC_TARGET_MAX = 0.5, 5.5
+SOC_TARGET_CENTER = 0.25
+SOC_TARGET_SPAN = 0.4166666666666667
+SOC_TARGET_MIN, SOC_TARGET_MAX = 0.041666666666666664, 0.4583333333333333
 
 # ---------------------------------------------------------------- L 层数值口径（r2/c2 同为 MW）
 L_CLIP_COEF = 1.0        # r2 = −L_CLIP_COEF · min(clip_amount, L_CLIP_CAP)   [MW]
@@ -364,7 +364,7 @@ def lower_cost_soc_track(soc_target, SOC_prev, SOC_next, pbrulemin, pbrulemax, n
 
 # ---------------------------------------------------------------- L 层对偶（单一真源）
 def rule_action(soc_target, SOC_prev, pbrulemin, pbrulemax, n_rem=None,
-                eta_c=0.98, eta_d=0.98, time=1.0 / 60, rated_power=10.0,
+                eta_c=0.98, eta_d=0.98, time=1.0 / 60, rated_power=0.5,
                 soc_tol=0.0, amortized=False):
     """规则下层 (`SocTracker.act`) 的动作 —— **残余动作的基线**（单一真源）。
 

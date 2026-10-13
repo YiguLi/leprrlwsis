@@ -178,11 +178,11 @@ for _stream in (sys.stdout, sys.stderr):
 # 常量（与各项目 main 保持一致）
 # ----------------------------------------------------------------------------
 DT = 1.0 / 60.0                 # 步长 (小时)
-MAX_E = 6.0                     # BESS 容量 (MWh)
+MAX_E = 0.50                     # BESS 容量 (MWh)
 NB_TURBINE = 5                  # 风机台数
 EPISODE_LENGTH = 1440           # 1 day = 24h × 60min
 FLUCT_LIMIT = 3.0               # 波动限值 (MW)
-RATED_POWER = 10.0              # BESS 额定功率 (MW)
+RATED_POWER = 0.5              # BESS 额定功率 (MW)
 ETA_C = ETA_D = 0.98
 BESS_DEG_RMB_PER_MWH = 490.0    # 放电退化成本 (元/MWh 放电量)
 VIOL_TOL = 1e-6                 # 越限判定浮点容差

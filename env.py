@@ -93,7 +93,7 @@ class WindBattery:
 
     def reset(self):
         # 1. reset电池
-        self.E = 3.
+        self.E = 0.25
         
         # 2. reset风速（固定随机序列，保证跨项目可比较）
         idx = self.episode_count % len(FIXED_DAY_SEQUENCE)

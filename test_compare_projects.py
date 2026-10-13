@@ -48,12 +48,12 @@ import warnings
 warnings.filterwarnings("ignore")
 
 # ---- Constants ----
-MAX_E = 6.0
+MAX_E = 0.50
 NB_TURBINE = 5
 TIME = 1.0 / 60
 EPISODE_LENGTH = 1440  # 1 day
 RBB_FLUCTUATION_LIMIT = 3.0
-RBB_RATED_POWER = 10.0
+RBB_RATED_POWER = 0.5
 
 
 def make_args(device):

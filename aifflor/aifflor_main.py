@@ -1057,7 +1057,7 @@ if __name__ == "__main__":
     # RBB parameters (硬裁剪 + L 层可行域观测输入)
     parser.add_argument('--rbb_fluctuation_limit', default=3.0, type=float,
                         help='Max grid power fluctuation between steps (MW)')
-    parser.add_argument('--rbb_rated_power', default=10.0, type=float,
+    parser.add_argument('--rbb_rated_power', default=0.5, type=float,
                         help='BESS rated charge/discharge power (MW)')
 
     # 上层 gap 罚的豁免裕度 (下层 c2 无死区)
@@ -1121,7 +1121,7 @@ if __name__ == "__main__":
     if args.resume == 'default':
         args.resume = 'output/{}-run0'.format(args.env)
 
-    max_E = 6.
+    max_E = 0.5
     upload = True
     use_csv = True
     args.max_episode_length = 1440  # 1d = 24h*60m = 1440 steps

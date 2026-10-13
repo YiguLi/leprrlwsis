@@ -101,11 +101,11 @@ W_GAP = 10.0
 #   —— 该豁免**只属于上层 gap 罚** (记账约定): 上层只对超过 0.1 MWh 的块末残差付费。
 #      下层 c2 没有死区 (任何"能力内该做没做"的 slack 都计费), 保证"下层能消掉的
 #      残差不少于上层豁免的", 不会出现规则停下而上层照罚的幽灵税。
-SOC_TOL = 0.1
+SOC_TOL = 0.01
 # SOC 目标映射: a6 ∈ [-0.5, 0.5] → soc_target ∈ [0.5, 5.5]
-SOC_TARGET_CENTER = 3.0
-SOC_TARGET_SPAN = 5.0
-SOC_TARGET_MIN, SOC_TARGET_MAX = 0.5, 5.5
+SOC_TARGET_CENTER = 0.25
+SOC_TARGET_SPAN = 0.4166666666666667
+SOC_TARGET_MIN, SOC_TARGET_MAX = 0.041666666666666664, 0.4583333333333333
 
 # 退化系数 (元/MWh): 放电侧; 充电侧可以取更小 (k_c = 0 表示只在放电计退化)
 DEG_COST_DISCHARGE = 490.0
@@ -436,7 +436,7 @@ PENALTY_NN_H_COEF = 100.0  # [元/单位] H 层动作越界罚 (**偏航指令�
 PENALTY_NN_L_COEF = 200.0  # [元/单位] 下层 1 维动作罚 —— **保持 200 不变** (仅诊断, 不进 r2 公式)
 
 
-def CheckAction(action, charge=10.):
+def CheckAction(action, charge=0.5):
     """Clip actions to feasible ranges. YAW(n): [-1,+1], Signal: [-0.5,0.5], Bat: [-charge,charge].
 
     上层 (6 维): 与 td3per 一致 —— **偏航维**越界与信号越界按 PENALTY_NN_H_COEF 计罚,
@@ -481,11 +481,11 @@ def CheckAction(action, charge=10.):
 # 8. Normalization  (H 观测 = 4 维基础观测 + 可选 24h 相位特征)
 # =============================================================================
 
-def Normalize(obs, max_E=6.):
+def Normalize(obs, max_E=0.5):
     return np.array([obs[0] / 1000, obs[1] / 10, obs[2] / 10, obs[3] / 10])
 
 
-def Original(obs, max_E=6.):
+def Original(obs, max_E=0.5):
     return np.array([obs[0] * 1000, obs[1] * 10, obs[2] * 10, obs[3] * 10])
 
 

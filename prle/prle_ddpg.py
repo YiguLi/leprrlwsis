@@ -321,7 +321,7 @@ class PRLE_DDPG(object):
             self.memory.append(s_t, a_t, r_t, c_t, s_t1, done, context=context)
 
     def random_action(self):
-        charge = 10.
+        charge=0.5
         if self.nb_actions == self.nb_turbine:
             action = np.random.uniform(0., 0.5, self.nb_actions)
         if self.nb_actions == 1:

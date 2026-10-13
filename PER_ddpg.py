@@ -332,7 +332,7 @@ class SP_DDPG(object):
 
 
     def random_action(self):
-        charge = 10.
+        charge=0.5
         if self.nb_actions == self.nb_turbine:
             action = np.random.uniform(0., 0.5, self.nb_actions)
         if self.nb_actions == 1:

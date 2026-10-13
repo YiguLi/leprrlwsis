@@ -948,7 +948,7 @@ if __name__ == "__main__":
     # RBB parameters (for soft penalty computation only, no hard clipping)
     parser.add_argument('--rbb_fluctuation_limit', default=3.0, type=float,
                         help='Max grid power fluctuation between steps (MW)')
-    parser.add_argument('--rbb_rated_power', default=10.0, type=float,
+    parser.add_argument('--rbb_rated_power', default=0.5, type=float,
                         help='BESS rated charge/discharge power (MW)')
 
     # 风速分段方法分岔: percentile(33/66分位) / kmeans(簇中心中点) / expert(专家锚点 8.5/12.0)
@@ -997,7 +997,7 @@ if __name__ == "__main__":
     apply_segmentation(args.seg, set_wind_thresholds)
 
     #TODO 修改的命令ppyp
-    max_E = 6.
+    max_E = 0.5
     upload = True
     use_csv = True
     args.max_episode_length = 1440  # 1d = 24h*60m = 1440 steps

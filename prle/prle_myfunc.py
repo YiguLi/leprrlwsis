@@ -444,7 +444,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 # 7. Action Checking (PER convention, unchanged)
 # =============================================================================
 
-def CheckAction(action, charge=10.):
+def CheckAction(action, charge=0.5):
     """Clip actions to feasible ranges. WT: [0,0.5], Signal: [-0.5,0.5], Bat: [-charge,charge]."""
     penalty = 0
     SIGNAL_MIN, SIGNAL_MAX = -0.5, 0.5
@@ -494,11 +494,11 @@ def CheckAction(action, charge=10.):
 # 8. Normalization (unchanged)
 # =============================================================================
 
-def Normalize(obs, max_E=6.):
+def Normalize(obs, max_E=0.5):
     return np.array([obs[0] / 1000, obs[1] / 10, obs[2] / 10, obs[3] / 10])
 
 
-def Original(obs, max_E=6.):
+def Original(obs, max_E=0.5):
     return np.array([obs[0] * 1000, obs[1] * 10, obs[2] * 10, obs[3] * 10])
 
 

@@ -44,7 +44,7 @@ def Eval_Rew(observation, observation2, action_all, cost_single_cons = 3.):
         c = 0.  
     return r, c
 
-def CheckAction(action, charge = 10.):
+def CheckAction(action, charge=0.5):
     penalty = 0
     # case 1 总的action (5 WT + 1 signal + 1 BESS)
     if len(action) == 7:
@@ -112,7 +112,7 @@ def CheckAction(action, charge = 10.):
 
     return applied_action, penalty
 
-def Normalize(obs, max_E = 6.):
+def Normalize(obs, max_E = 0.5):
     # [Pr,U,E,P_last]
     pr = obs[0] / 1000 #TODO 300,580,980
     u = obs[1] / 10
@@ -120,7 +120,7 @@ def Normalize(obs, max_E = 6.):
     p = obs[3] / 10 # park
     return np.array([pr, u, e, p])
 
-def Original(obs, max_E = 6.):
+def Original(obs, max_E = 0.5):
     pr = obs[0] * 1000 # 300,580,980
     u = obs[1] * 10
     e = obs[2] * 10

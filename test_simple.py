@@ -122,7 +122,7 @@ def main():
     # ---- Env & RBB ----
     engine = matlab.engine.start_matlab()
     env = WindBattery(MAX_E, NB_TURBINE, upload=False, engine=engine)
-    rbb = RuleBasedBESS(max_E=MAX_E, min_E_factor=0.0, rated_power=10.0,
+    rbb = RuleBasedBESS(max_E=MAX_E, min_E_factor=0.0, rated_power=0.5,
                         eta_c=0.98, eta_d=0.98, time=TIME, fluctuation_limit=3.0)
 
     # ---- 测试 ----

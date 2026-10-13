@@ -846,7 +846,7 @@ if __name__ == "__main__":
     # RBB parameters
     parser.add_argument('--rbb_fluctuation_limit', default=3.0, type=float,
                         help='Max grid power fluctuation between steps (MW)')
-    parser.add_argument('--rbb_rated_power', default=10.0, type=float,
+    parser.add_argument('--rbb_rated_power', default=0.5, type=float,
                         help='BESS rated charge/discharge power (MW)')
     parser.add_argument('--soc_tol', default=SOC_TOL, type=float,
                         help='【上层】块末 gap 罚的豁免裕度 (MWh): H 只对超过该值的残差付费。'
@@ -916,7 +916,7 @@ if __name__ == "__main__":
     if args.resume == 'default':
         args.resume = 'output/{}-run0'.format(args.env)
 
-    max_E = 6.
+    max_E = 0.5
     upload = True
     use_csv = True
     args.max_episode_length = 1440  # 1d = 24h*60m = 1440 steps

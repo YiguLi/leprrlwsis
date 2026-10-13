@@ -1140,7 +1140,7 @@ if __name__ == "__main__":
     # RBB parameters (hard clipping + feasible-range observation inputs)
     parser.add_argument('--rbb_fluctuation_limit', default=3.0, type=float,
                         help='Max grid power fluctuation between steps (MW)')
-    parser.add_argument('--rbb_rated_power', default=10.0, type=float,
+    parser.add_argument('--rbb_rated_power', default=0.5, type=float,
                         help='BESS rated charge/discharge power (MW)')
 
     # TD3PRLE: LLM configuration
@@ -1209,7 +1209,7 @@ if __name__ == "__main__":
                orig_high_min - 1.0, orig_high_min + 1.0))
 
     #TODO 修改的命令ppyp
-    max_E = 6.
+    max_E = 0.5
     upload = True
     use_csv = True
     args.max_episode_length = 1440  # 1d = 24h*60m = 1440 steps

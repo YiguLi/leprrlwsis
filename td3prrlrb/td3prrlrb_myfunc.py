@@ -92,11 +92,11 @@ W_GAP = 10.0
 # SOC 目标跟踪死区 (MWh): 0.1 MWh = 6 MW × 1 min
 #   —— 下层规则控制器的死区与该裕度【必须同源】: 否则规则停在死区边缘时,
 #      上层会被收一笔永远消不掉的"幽灵税"。
-SOC_TOL = 0.1
+SOC_TOL = 0.01
 # SOC 目标映射: a6 ∈ [-0.5, 0.5] → soc_target ∈ [0.5, 5.5]
-SOC_TARGET_CENTER = 3.0
-SOC_TARGET_SPAN = 5.0
-SOC_TARGET_MIN, SOC_TARGET_MAX = 0.5, 5.5
+SOC_TARGET_CENTER = 0.25
+SOC_TARGET_SPAN = 0.4166666666666667
+SOC_TARGET_MIN, SOC_TARGET_MAX = 0.041666666666666664, 0.4583333333333333
 
 # 退化系数 (元/MWh): 放电侧; 充电侧可以取更小 (k_c = 0 表示只在放电计退化)
 DEG_COST_DISCHARGE = 490.0
@@ -351,7 +351,7 @@ PENALTY_NN_H_COEF = 400.0  # [元/单位] H 层动作越界罚 (机组限功率 
 PENALTY_NN_L_COEF = 200.0  # [元/单位] 下层 1 维动作罚 —— **保持 200 不变** (仅诊断, 不进 r2 公式)
 
 
-def CheckAction(action, charge=10.):
+def CheckAction(action, charge=0.5):
     """Clip actions to feasible ranges. WT: [0,0.5], Signal: [-0.5,0.5], Bat: [-charge,charge].
 
     上层 (6 维): WT 越界与信号越界按 100/单位计罚, **不封顶** (penalty_NN_H)。
@@ -400,11 +400,11 @@ def CheckAction(action, charge=10.):
 # 8. Normalization  (H 观测 = 4 维基础观测 + 可选 24h 相位特征)
 # =============================================================================
 
-def Normalize(obs, max_E=6.):
+def Normalize(obs, max_E=0.5):
     return np.array([obs[0] / 1000, obs[1] / 10, obs[2] / 10, obs[3] / 10])
 
 
-def Original(obs, max_E=6.):
+def Original(obs, max_E=0.5):
     return np.array([obs[0] * 1000, obs[1] * 10, obs[2] * 10, obs[3] * 10])
 
 

@@ -192,7 +192,7 @@ class SP_TD3(object):
         # Per-dimension action amplitude (for target smoothing noise scaling).
         # Matches CheckAction() legal ranges: H = 5 turbines [0,0.5] + 1 signal
         # [-0.5,0.5] (amp 0.5 each); L = 1 BESS action [-charge, charge].
-        charge = 10.0
+        charge=0.50
         if self.nb_actions == self.nb_turbine:
             amp = np.full(self.nb_actions, 0.5)
         elif self.nb_actions == 1:
@@ -552,7 +552,7 @@ class SP_TD3(object):
             self._pending = []
 
     def random_action(self):
-        charge = 10.
+        charge=0.5
         if self.nb_actions == self.nb_turbine:
             action = np.random.uniform(0., 0.5, self.nb_actions)
         if self.nb_actions == 1:

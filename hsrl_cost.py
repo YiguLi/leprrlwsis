@@ -65,7 +65,7 @@ H_CURRICULUM_BLOCKS_5X = 20     # 历史每块 5 次更新（td3prle / prle / pr
 L_CURRICULUM_BLOCKS_SHADOW = 20
 
 W_GAP = 10.0              # 追踪偏好固定价 (元/MWh)，进 r1
-SOC_TOL = 0.1             # 块末残差豁免 (MWh)
+SOC_TOL = 0.01             # 块末残差豁免 (MWh)
 
 # ---------------------------------------------------------------- 值函数回归空间
 VALUE_SCALE = 1000.0      # s_p: r1 → 值函数回归空间的缩放（profit 通道; 1.0 = 不归一化）

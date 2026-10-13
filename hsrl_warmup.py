@@ -109,13 +109,13 @@ SIG_VALUE = 0.0          # 第 6 维**起点**: SOC 目标语义→target=3; 影
 #: 对应信号步幅 **0.06–0.10**；范围 `a6 ∈ [−0.5, 0.5]` ⇔ `target ∈ [0.5, 5.5]`。
 SIG_LO, SIG_HI = -0.5, 0.5
 SIG_STEP_LO, SIG_STEP_HI = 0.06, 0.10
-SOC_TARGET = 3.0         # warmup 期下层规则跟踪的目标 (MWh)
+SOC_TARGET = 0.25         # warmup 期下层规则跟踪的目标 (MWh)
 #: **episode 起始 SOC**（正式口径 = 固定 3.0 MWh）。旧口径每 episode 从 U[0.5,5.5] 随机，
 #: 让前若干块的收益/退化都花在"把 SOC 拉到中性"上并引入与策略无关的方差；见 `--soc_reset_*`。
-SOC_START = 3.0
+SOC_START = 0.25
 ETA_C = ETA_D = 0.98
 DT = 1.0 / 60.0
-RATED_POWER = 10.0
+RATED_POWER = 0.5
 SOC_TOL = 0.0            # 下层无死区 (与各项目 SocTracker 默认一致)
 
 #: **warmup 时长口径**（正式方法统一，2026-10-08 起）：未显式传 `--warmup` 时

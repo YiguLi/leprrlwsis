@@ -40,7 +40,7 @@ class RuleBasedBESS:
         Maximum allowed grid power fluctuation between steps (MW).
     """
 
-    def __init__(self, max_E=6.0, min_E_factor=0.2, rated_power=10.0,
+    def __init__(self, max_E=0.50, min_E_factor=0.2, rated_power=0.5,
                  eta_c=0.98, eta_d=0.98, time=1.0 / 60, fluctuation_limit=3.0):
         self.max_E = max_E
         self.min_E = min_E_factor * max_E
@@ -229,7 +229,7 @@ class SocTracker:
     """
 
     def __init__(self, soc_tol=0.0, eta_c=0.98, eta_d=0.98, time=1.0 / 60,
-                 rated_power=10.0, pb_cap=None):
+                 rated_power=0.5, pb_cap=None):
         self.soc_tol = soc_tol
         self.eta_c = eta_c
         self.eta_d = eta_d

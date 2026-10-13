@@ -518,7 +518,7 @@ if __name__ == "__main__":
     # RBB-specific parameters
     parser.add_argument('--rbb_fluctuation_limit', default=3.0, type=float,
                         help='Max grid power fluctuation between steps (MW)')
-    parser.add_argument('--rbb_rated_power', default=10.0, type=float,
+    parser.add_argument('--rbb_rated_power', default=0.5, type=float,
                         help='BESS rated charge/discharge power (MW)')
 
     args = parser.parse_args()
@@ -526,7 +526,7 @@ if __name__ == "__main__":
     if args.resume == 'default':
         args.resume = 'output/{}-run0'.format(args.env)
 
-    max_E = 6.0
+    max_E = 0.50
     upload = True
     use_csv = True
     args.max_episode_length = 1400

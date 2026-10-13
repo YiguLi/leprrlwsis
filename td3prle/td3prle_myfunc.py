@@ -364,8 +364,8 @@ SOC_SAFE_RANGES = {
 
 # ---- SOC 目标映射 (本轮信号语义): H 信号 (-0.5,0.5) → 目标 SOC [0.5,5.5] MWh ----
 # 上层输出范围不变; 映射在【下层】完成, 使同一物理目标同时供 L 观测、c2 与 H 结算使用。
-SOC_TARGET_CENTER = 3.0     # signal = 0 → 目标 SOC = 3.0 MWh
-SOC_TARGET_SPAN = 5.0       # signal = ±0.5 → 目标 5.5 / 0.5 MWh
+SOC_TARGET_CENTER = 0.25     # signal = 0 → 目标 SOC = 3.0 MWh
+SOC_TARGET_SPAN = 0.4166666666666667       # signal = ±0.5 → 目标 5.5 / 0.5 MWh
 SOC_TARGET_MIN = SOC_TARGET_CENTER - 0.5 * SOC_TARGET_SPAN   # 0.5 MWh
 SOC_TARGET_MAX = SOC_TARGET_CENTER + 0.5 * SOC_TARGET_SPAN   # 5.5 MWh
 
@@ -598,7 +598,7 @@ PENALTY_NN_H_COEF = 400.0  # [元/单位] H 层动作越界罚 (机组限功率 
 PENALTY_NN_L_COEF = 200.0  # [元/单位] 下层 1 维动作罚 —— **保持 200 不变** (仅诊断, 不进 r2 公式)
 
 
-def CheckAction(action, charge=10.):
+def CheckAction(action, charge=0.5):
     """Clip actions to feasible ranges. WT: [0,0.5], Signal: [-0.5,0.5], Bat: [-charge,charge].
 
     penalty_NN_H (H 动作分支, len 5/6): 每维越界量 × 200, **不封顶**
@@ -655,11 +655,11 @@ def CheckAction(action, charge=10.):
 # 8. Normalization (unchanged)
 # =============================================================================
 
-def Normalize(obs, max_E=6.):
+def Normalize(obs, max_E=0.5):
     return np.array([obs[0] / 1000, obs[1] / 10, obs[2] / 10, obs[3] / 10])
 
 
-def Original(obs, max_E=6.):
+def Original(obs, max_E=0.5):
     return np.array([obs[0] * 1000, obs[1] * 10, obs[2] * 10, obs[3] * 10])
 
 
