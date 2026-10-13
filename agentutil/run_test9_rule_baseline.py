@@ -35,17 +35,35 @@ TensorBoard 的 `test9/overall/profit` 所对应的那个标量，在**规则基
   test9_overall.json  同上 + 本次运行的元信息（动作值/引擎/seed/git commit/SOC 目标…）
   test_s_9case.csv    45 步逐步明细（动作、P_F、clip_amount、SOC、pb、上/下层奖励…）
   summary.txt         人读摘要（口径 + 关键读数 + profit 折日）
+  events.out.tfevents.*  TensorBoard 事件（`--no-tensorboard` 关闭）
+
+TensorBoard（`--tensorboard`，默认开）
+--------------------------------------
+输出目录本身就是 run 目录，tag 与各 `*_main.py` 训练期的写法**逐字一致**
+（`test9/overall/{profit,profit_econ,r1,c1,r2,c2,gap_pen,cvm,pf_viol,dsoc,soc_end,
+soc_track_err}` + 逐 case `test9/{WIND}_{PRICE}/{...}`）⇒
+
+    tensorboard --logdir output
+
+可把这条**基线臂**与各 RL run 的 `test9/overall/profit` 曲线放在同一张图里对比。
+本臂没有训练 step ⇒ 默认在单点 `--tb-step 0` 落盘（可指定任意 step 以对齐某个 run）；
+另记 main 未记的三个审计列 `turbine_profit / derate_loss / penalty_NN_H`。
 
 用法
 ----
     python agentutil/run_test9_rule_baseline.py                      # 生产口径（WFSim）
     python agentutil/run_test9_rule_baseline.py --a 0.33 --soc0 3     # 起始 SOC 也钉 3.0
     python agentutil/run_test9_rule_baseline.py --stub-env           # 不需 MATLAB 的自检
+    python agentutil/run_test9_rule_baseline.py --no-tensorboard     # 只出 CSV/JSON
+
+⚠ TensorBoard 需要 `tensorboard` 包（本机在 `F:\\Anaconda\\envs\\wsis\\python.exe`）；
+  缺包时用 `--no-tensorboard`，或换该解释器运行。
 """
 from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import glob
 import importlib
 import json
 import os
@@ -165,6 +183,38 @@ def _fmt(v, w=16, p=6):
         return '{:>{w}}'.format(str(v), w=w)
 
 
+# ---------------------------------------------------------------- TensorBoard
+# tag 清单与各 `*_main.py` 的训练期 test9 写法逐字一致 (见 td3per_main.py:665-689)
+TB_OVERALL_TAGS = ['r1', 'c1', 'r2', 'c2', 'gap_pen', 'cvm', 'pf_viol',
+                   'profit', 'profit_econ', 'dsoc', 'soc_end', 'soc_track_err']
+TB_CASE_TAGS = ['r1', 'c1', 'r2', 'c2', 'gap_pen', 'cvm', 'pf_viol',
+                'profit', 'soc_track_err']
+TB_AUDIT_TAGS = ['turbine_profit', 'derate_loss', 'penalty_NN_H']   # main 未记的审计列
+
+
+def write_tensorboard(out_dir, case_metrics, overall, step, seed, config_text):
+    """把 test9 读数写成 TensorBoard 标量，返回事件文件路径（失败时返回 ''）。"""
+    try:
+        from torch.utils.tensorboard import SummaryWriter
+    except ImportError as exc:                                   # tensorboard 包缺失
+        print('\n  ⚠ 跳过 TensorBoard（{}）；用 --no-tensorboard 可静默关闭'.format(exc))
+        return ''
+    writer = SummaryWriter(out_dir)
+    writer.add_scalar('seed', int(seed), step)
+    writer.add_text('config/run', config_text, step)
+    for k in TB_OVERALL_TAGS + TB_AUDIT_TAGS:
+        if k in overall:
+            writer.add_scalar('test9/overall/{}'.format(k), float(overall[k]), step)
+    for m in case_metrics:
+        tag = 'test9/{}_{}'.format(m['wind_level'], m['price_level'])
+        for k in TB_CASE_TAGS:
+            if k in m:
+                writer.add_scalar('{}/{}'.format(tag, k), float(m[k]), step)
+    writer.flush()
+    writer.close()
+    files = sorted(glob.glob(os.path.join(out_dir, 'events.out.tfevents.*')))
+    return files[-1] if files else ''
+
 def main():
     ap = argparse.ArgumentParser(
         description='test9 纯规则基线：固定风机轴向因子 + RuleBasedBESS（SOC 目标恒 3.0）')
@@ -179,6 +229,12 @@ def main():
                     help='越界乘性惩罚系数（生产默认 0 = 关闭；固定动作全在带内 ⇒ 恒 1.0）')
     ap.add_argument('--stub-env', action='store_true',
                     help='用简化桩环境代替 MATLAB/WFSim（自检用，数值非生产）')
+    ap.add_argument('--tensorboard', dest='tensorboard', action='store_true', default=True,
+                    help='写 TensorBoard 事件（默认开；tag 与各 main 的训练期 test9 逐字一致）')
+    ap.add_argument('--no-tensorboard', dest='tensorboard', action='store_false',
+                    help='不写 TensorBoard（缺 tensorboard 包时用）')
+    ap.add_argument('--tb-step', type=int, default=0,
+                    help='TensorBoard 落点 step（本臂无训练 ⇒ 默认单点 0；可指定以对齐某个 run）')
     ap.add_argument('--output', default=None,
                     help='输出目录（默认 output/test9overallprofit）')
     args_cli = ap.parse_args()
@@ -257,6 +313,20 @@ def main():
     df_cases.to_csv(os.path.join(out_dir, 'test9_cases.csv'), index=False)
     df_overall.to_csv(os.path.join(out_dir, 'test9_overall.csv'), index=False)
 
+    # ---- TensorBoard（tag 与各 main 的训练期 test9 逐字一致）----
+    tb_event = ''
+    if args_cli.tensorboard:
+        tb_event = write_tensorboard(
+            out_dir, case_metrics, overall, int(args_cli.tb_step), int(args_cli.seed),
+            config_text=('test9 纯规则基线 ｜ a = {} (固定) ｜ 下层 = RuleBasedBESS + '
+                         'rule_action(目标 {:.1f}) ｜ 引擎 = {} ｜ seed = {} ｜ git = {}'
+                         .format(action, SOC_TARGET, engine_label, args_cli.seed,
+                                 _git_head()[:8])))
+        if tb_event:
+            print('\n  TensorBoard: {}（step = {}；tag = test9/overall/* 等，'
+                  '与各 run 同口径 ⇒ `tensorboard --logdir output` 可直接对比）'
+                  .format(tb_event, args_cli.tb_step))
+
     meta = {
         'experiment': 'test9overallprofit（纯规则基线）',
         'engine': engine_label,
@@ -273,6 +343,8 @@ def main():
         'rbb': {'max_E': MAX_E, 'min_E_factor': 0.0, 'rated_power': RATED_POWER,
                 'eta_c': ETA_C, 'eta_d': ETA_D, 'time': TIME,
                 'fluctuation_limit': FLUCT_LIMIT},
+        'tensorboard': {'written': bool(tb_event), 'step': int(args_cli.tb_step),
+                        'event_file': os.path.basename(tb_event)},
         'git_commit': _git_head(),
         'timestamp': _dt.datetime.now().isoformat(timespec='seconds'),
         'elapsed_s': round(dt, 1),
@@ -316,6 +388,9 @@ def main():
                  .format(_fmt(abs(float(df_cases['profit'].sum()) - float(overall['profit'])),
                                p=12)))
     lines.append('    耗时 = {:.1f}s ｜ 输出目录 = {}'.format(dt, out_dir))
+    lines.append('    TensorBoard = {}'
+                 .format('{}（step = {}）'.format(os.path.basename(tb_event), args_cli.tb_step)
+                         if tb_event else '未写出'))
     txt = '\n'.join(lines)
 
     print('\n' + '=' * 120)
@@ -328,7 +403,8 @@ def main():
 
     print('\n  输出目录: {}'.format(out_dir))
     print('    test9_cases.csv / test9_overall.csv / test9_overall.json / '
-          'test_s_9case.csv / summary.txt')
+          'test_s_9case.csv / summary.txt{}'.format(' / ' + os.path.basename(tb_event)
+                                                    if tb_event else ''))
 
 
 if __name__ == '__main__':
