@@ -495,11 +495,11 @@ def CheckAction(action, charge=0.5):
 # =============================================================================
 
 def Normalize(obs, max_E=0.5):
-    return np.array([obs[0] / 1000, obs[1] / 10, obs[2] / 10, obs[3] / 10])
+    return np.array([obs[0] / 1000, obs[1] / 10, obs[2] / 0.5, obs[3] / 5.0])
 
 
 def Original(obs, max_E=0.5):
-    return np.array([obs[0] * 1000, obs[1] * 10, obs[2] * 10, obs[3] * 10])
+    return np.array([obs[0] * 1000, obs[1] * 10, obs[2] * 0.5, obs[3] * 5.0])
 
 
 def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info, n_rem=None):

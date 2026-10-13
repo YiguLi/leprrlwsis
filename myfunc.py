@@ -135,10 +135,10 @@ def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info):
     """
     shadow_price = float(applied_action_H[-1]) * 2.0  # (-0.5,0.5) → (-1,1)
     return np.array([
-        rbb_info['pbrulemin'] / 10.0,
-        rbb_info['pbrulemax'] / 10.0,
+        rbb_info['pbrulemin'] / 5.0,
+        rbb_info['pbrulemax'] / 5.0,
         shadow_price,
-        float(observation[2]) / 10.0,
+        float(observation[2]) / 0.5,
         float(observation[1]) / 10.0,  # u: 风速 (0~25 → 0~2.5)
     ])
 
