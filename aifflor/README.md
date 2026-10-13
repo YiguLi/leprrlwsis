@@ -138,11 +138,13 @@ WFSim 侧脚本 `agentutil/run_clip_check_wfsim.m`。）
 | `aifflor/aifflor_main.py` | `td3per/td3per_main.py` + 替换表（env 类 / 不启 MATLAB / **输出目录名 `--env`** / 文案 / RUN_TAG） |
 | `aifflor/aifflor_turbine.py` | **新写**：I/O 映射表 / 口径 / 模型构造 / 向量化求值（单一真源） |
 | `aifflor/aifflor_env.py` | **新写**：`AifflorPhysics`（NaN 守卫 + 预取）+ `WindBatteryAIF` |
+| `aifflor/aifflor_hsrl.py` | **新写**：`--hsrl` **方法分支**的全部口径（常量 + 纯函数，单一真源；见 §3.8） |
 
 ```bash
 python agentutil/port_aifflor.py --apply    # 落盘
 python agentutil/port_aifflor.py --check    # 校验磁盘 == 源 + 替换表（双向）
 python agentutil/test_aifflor_contract.py   # 环境契约（只读，不需 MATLAB）
+python agentutil/test_aifflor_hsrl_contract.py   # --hsrl 分支契约（纯算术 + 桩环境，见 §3.8）
 ```
 
 ---
@@ -449,10 +451,126 @@ AifflorPhysics(nt=5, calibrated=False, power_scale=AT.LEVEL_COEF)
 
 ---
 
+## 3.8 `--hsrl` 方法分支：**"块总放电量"语义**（2026-10 新增）
+
+`aifflor` 现在有**两条方法分支**，靠命令行开关区分（**不加开关 = 旧口径，逐位不变**）：
+
+```powershell
+python aifflor\aifflor_main.py            # 旧口径: SOC 目标信号 + 规则残余动作 + 平抑窗口
+python aifflor\aifflor_main.py --hsrl     # HSRL:  块总放电量 + 绝对 pb + 指数式追踪成本
+```
+
+* **`aifflor/aifflor_hsrl.py` 是 HSRL 口径的唯一真源**（常量 + 纯函数 + warmup 摊还执行器 +
+  20 步测试函数）。共享模块 `hsrl_soctarget.py` / `hsrl_warmup.py` / `aifflor_myfunc.py`
+  **一行都没改** ⇒ 另外 7 个项目不受影响。
+* `aifflor_main.py` 里 `train_hsrl()` 与 `train()` **并列实现**（不共用循环）：
+  未加 `--hsrl` 时 `train_hsrl` 与 `aifflor_hsrl` 的函数**一行都不会被调用**，
+  因此旧路径可以断言"逐位不变"（见本文末的回归证据）。
+
+### 口径对照表
+
+| 项 | 旧口径（`train()`） | `--hsrl`（`train_hsrl()`） |
+|---|---|---|
+| **H 第 6 维含义** | SOC 目标信号 `a6∈[−0.5,0.5]` → `soc_target=0.25+0.41667·a6` | **块总放电量 `g` [MW·min]，放电为正** |
+| H 第 6 维边界 | 人为信号带 `[−0.5, 0.5]` | **可行域** `[−C_max, +D_max]`（SOC + 额定功率，**不含波动**） |
+| H 第 6 维越界罚 | 400 元/单位（不封顶） | 400 元/MW·min（不封顶） |
+| H 第 6 维探索噪声 | `sig_noise_max 0.2 → min 0.01`（信号量纲） | `--hsrl_sig_noise_max 0.5 → 0.025` [MW·min]（= 满量程 2.5 的 20% → 1%） |
+| **H r1** | `pr·P_G·dt − 490·max(−pbrule,0)·dt − pen` | `pr·P_G·dt − pen5 − pen6`（**去掉 bessdeg**） |
+| H 块末 gap 罚 | `10·max(0,\|soc_target−SOC_末\|−tol)` | **删除**（执行偏差由 L 的 c_L 承接） |
+| H c1 | 波动当量 + `W_GAP·unfeasible_gap` | 同公式，但 `unfeasible_gap ≡ 0`（平抑窗口已关） |
+| **L 动作** | 残余 `pb = rule_action(基线) + Δ` | **绝对 `pb`**（正 = 充电，与 env 同号） |
+| L 动作裁剪 | `CheckAction` ±0.5 + RBB 平抑窗口 | **只按 SOC + 额定功率**（RBB 以 `fluctuation_limit=inf` 构造） |
+| **L r2** | `−1·min(clip_amount, 20)`（含波动裁剪那一段） | `−200·越界[MW] − 20·放电[MW·min]` |
+| **L c_L（图上公式）** | `+1·trackerr`（到"Soctrack 范围 ∩ 平抑窗口"的距离） | `1 − exp(−\|(g−Σ已放电)/(δ−t_L) − a_L\|)` |
+| L 观测 | `[pg(t−1)/10, ptur/10, SOC/0.5, target/0.5, n_rem/5]` | `[u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5]` |
+| λ2 | `[0.5, 2]`，初值 1（MW↔MW 兑换率） | `[2, 50]`，初值 10（c_L 无量纲 vs r2 元量级） |
+| `d_block_L` | 1.2（地板 0.15） | 0.5（地板 0.05） |
+| warmup 下层 | 规则追 `soc_target`（`Δ≡0` 基线） | **摊还执行器** `pb = clip(−(g−Σ)/n_rem, 物理域)` |
+| 训练中测试 | 9-case（45 步，`df_test9.csv`） | **20 步协议**（见下，`df_test20_hsrl.csv`） |
+| 产物 CSV | `df_aifflor.csv` / `df_episode_aifflor.csv` | `df_hsrl.csv` / `df_episode_hsrl.csv` / `df_test20_hsrl.csv` |
+
+公式出处：`c_L` 就是 `未命名/PER_main0.py:116-118` 的原式
+（`c2 = -np.exp(-abs((signal - sum(pb_l[:-1]))/(5-tt) - pb)) + 1`；那里 `signal` = H 第六维、
+`tt = step%5`、`pb_l` = 本块已执行的实际功率）——`agentutil/test_aifflor_hsrl_contract.py`
+第 C 节把它逐位对照。
+
+### 三个必须写清的推导 / 坑
+
+**① 块级可行域：单位是 MW·min，且 SOC 约束**不乘 δ**
+
+```
+D_max = min(P_rated·δ , (E − E_min)·η_d·60)          [MW·min]  放电上限（g 的正侧）
+C_max = min(P_rated·δ , (E_max − E)·60/η_c)          [MW·min]  充电上限（g 的负侧）
+g ∈ [−C_max, +D_max]
+```
+
+两条约束都**不含波动**（用户口径）：
+
+1. **额定功率**：每步 `|pb| ≤ P_rated`，块内 δ 步 ⇒ 总量 ≤ `P_rated·δ`；
+2. **SOC 能量**：放电量 `q` [MW·min] 让电池能量下降 `q/η_d` [MW·min]
+   （因 `ΔE = P_D·dt/η_d`，且 `1 MWh = 60 MW·min`）⇒ 整块 ≤ `(E−E_min)·60`
+   ⇒ `Σq ≤ (E−E_min)·η_d·60`（充电同理，效率在分母）。
+
+⚠ **陷阱**：写成 `(E−E_min)·η_d/dt` 只是**单步**功率上限（= 58.8·E MW），
+整块要换算成**能量**（×60，**不是** ×δ）。本项目容量 0.5 MWh、额定 0.5 MW，
+两者在中段都由额定功率决定（±2.5 MW·min 相同），**只有在 SOC 贴边时才分叉**
+（如 `E=0.01 MWh`：正确 0.588 vs 错写 2.94，差 5 倍）。契约测试第 B 节用
+"把 D_max 恰好花完 ⇒ SOC 恰好收在下界"这一物理判据把它钉住。
+
+**② `Σ` 与 `a_L` 都用"实际施加值"**：`a_L = −pb_applied`（`pb_applied` 是 env 回传的
+`P_C − P_D`），`Σ` 是同一口径的块内累计（**不含当前步**）。这与原式一致（那份代码是把
+env 回传的 `action[-1]` 事后 append 进 `pb_l` 的）。
+
+**③ "零成本动作 = 摊还计划"**：`g` 与 `Σ` 都在命令之前确定 ⇒ 若 L 命令
+`pb = −(g−Σ)/n_rem`（且不被物理域裁掉），则 `a_L = (g−Σ)/n_rem` ⇒ `c_L ≡ 0`（精确 0）。
+warmup 期的下层规则就是这个"摊还执行器"，启动时用 400 组随机 `(E,g,Σ,n_rem)` 断言
+（`hsrl.check_amortized_baseline`，被物理域裁剪时 `c_L>0` 只可能来自"物理上做不到"）。
+
+### 已知局限（**刻意保留**的原方法形态）
+
+1. **L 观测不含 `Σ` / `n_rem`**（用户口径：回到"H 观测 + 上层目标"这 5 维）⇒ `c_L` 的
+   参照量 `(g−Σ)/n_rem` 对策略**不可观测**：单步转移对 `c_L` 非 Markov，PER 按单步采样
+   会带偏 critic。契约测试第 G 节把这条局限写成可执行记录（同一观测对应不同块内进度）。
+   若要修，最小改动是追加两维 → `[u/10, pr/1000, SOC/0.5, P_G/5, g/2.5, Σ/2.5, n_rem/5]`
+   （需同步 `agent_L` 的 `nb_states=7`）。
+2. **H 对"块内波动"没有直接控制**：`g` 只约束块**总量**，块内怎么分配由 L 决定，而 L 的
+   r2/c_L 都只看沉淀量与计划偏差 ⇒ 平抑压力全部落在 H 的 c1（事后计费）上。
+   在容量 0.5 MWh / 额定 0.5 MW 的口径下，BESS 对 3 MW 限幅的平抑能力本就有限
+   （见 §2 的波动表），但这仍是语义上一个应当自知的口径。
+3. **`d_block_L = 0.5` 会让 λ2 容易贴顶**：实测 1000 步烟测里 `EMA_c_L ≈ 1.6 > 0.5`
+   ⇒ λ2 很快升到上限 50（此时跟踪项对 L 的权重 = 50 倍）。若希望 λ2 在中段工作，
+   把预算放宽（`--hsrl_d_block_l 2.0` 之类）或等 L 学会兑现计划后由 curriculum 自动
+   减半（减半条件是"连续 50 块 EMA ≤ 预算"，贴顶时不会触发）。这是**调参旋钮**，不是 bug。
+
+### 训练中的测试：20 步协议（替换 9-case）
+
+* 电价**恒 300**（低谷）；风速 = 从 `FFC_speed_noise_1.csv` 的"天"列里**随机取一列 + 随机起点**
+  截 20 步（= 4 个块）；开局 **SOC = 0.25 MWh**（注意 `env.ScenarioReset` 里硬编码的
+  `E = 5.0` 会被显式覆写 —— 旧 9-case 其实一直是在 `E=5 > max_E` 的病态起点上跑的）。
+* **触发频率不变**：`step > warmup` 且 `episode_steps % 480 == 0`（与旧 9-case 同一处）。
+* 采样用**独立** `RandomState`（默认每次触发重新随机，`--hsrl_test_seed >0` 可固定复现）
+  ⇒ 不吃训练流、不改变训练轨迹。
+* 指标：逐块 + `OVERALL` 两档写 `df_test20_hsrl.csv`；TB 走 `test20/overall/*` 与
+  `test20/block{i}/*`（旧 9-case 的 `test9/*` 在 `--hsrl` 下不再产生）。
+
+### 回归证据（本次改动）
+
+| 项 | 结果 |
+|---|---|
+| **旧口径逐位不变** | `--max_steps 300 --seed 1`（无 `--hsrl`）改前/改后 `df_aifflor.csv` **SHA256 完全相同**（`0091C06A…F8A2`） |
+| `agentutil/test_aifflor_hsrl_contract.py` | **全部通过**（A–J 共 60+ 条断言：可行域⇔RBB 逐位、c_L⇔原式逐位、符号/裁剪/罚、H 奖励差 = bessdeg、观测、λ2、摊还自检、20 步协议手算逐位） |
+| `--hsrl --warmup 300 --max_steps 1000 --seed 1` 端到端 | 跑通；摊还自检 400 例全过；20 步测试在 step 480/960 各触发一次；FLORIS 坏点 **0**；无 NaN（除 `ema_c1_H`/`ema_cL_L` 在 EMA 建立前的预期 NaN） |
+| 烟测自洽量 | `pbrule ≡ pb_applied`、`clip_amount ≡ viol_L`（逐位）；`g` 在 warmup 期按价格游走饱和到 ∓2.5、策略期由策略自行决定；策略期 `corr(g_raw, 块Σr1) = +0.163`（**奖励梯度方向正确**：放电为正 ⇒ 收益为正） |
+| `agentutil/test_aifflor_contract.py` | **1 项既有失败**（与本改动无关）：`build_L_obs_distilled 逐位相同` —— `td3per_myfunc` 的版本在 `nolow` 提交里多了 `soc_signal=None` 形参，`aifflor_myfunc` 的副本没跟上（`git log` 可查：该漂移早于本次改动）；aifflor 的调用方式不受影响 |
+
+---
+
 ## 4. 运行与注意
+
 ```powershell
 cd "C:\Users\SCP Site19\Desktop\llm enhanced wsis\leprrlwsis"
-F:\anaconda\envs\wsis\python.exe aifflor\aifflor_main.py
+F:\anaconda\envs\wsis\python.exe aifflor\aifflor_main.py            # 旧口径
+F:\anaconda\envs\wsis\python.exe aifflor\aifflor_main.py --hsrl      # HSRL 分支（见 §3.8）
 ```
 
 * **解释器必须是装了 FLORIS 的那个环境**（原先唯一可用的路径是
@@ -502,8 +620,11 @@ aifflor 用回 `--env TD3PER`。
 
 | 项 | 结果 |
 |---|---|
-| 契约测试 `test_aifflor_contract.py` | **全部通过**（myfunc 逐位相同 / 动作语义 / 标定生效 / 不引入 matlab / 观测与守卫 / 预取确定性） |
+| 契约测试 `test_aifflor_contract.py` | **全部通过**（myfunc 逐位相同 / 动作语义 / 标定生效 / 不引入 matlab / 观测与守卫 / 预取确定性）—— ⚠ 2026-10 起 `build_L_obs_distilled 逐位相同` 一条为**既有失败**（`nolow` 提交给 td3per 版加过 `soc_signal` 形参，见 §3.8 末表），与本分支无关 |
+| 契约测试 `test_aifflor_hsrl_contract.py`（`--hsrl`） | **全部通过**（可行域⇔RBB 逐位 / c_L⇔原式逐位 / 符号与罚 / H 奖励差 / 观测 / λ2 / 摊还自检 / 20 步协议手算） |
+| `--hsrl` 端到端 1000 步 | 跑通（FLORIS 坏点 0；20 步测试在 step 480/960 触发；产物 `df_hsrl.csv` + `df_test20_hsrl.csv` + `update_stats_H.csv`） |
+| 旧口径改前/改后同 seed 300 步 | `df_aifflor.csv` **SHA256 完全相同**（`0091C06A…F8A2`）⇒ `--hsrl` 分支对旧路径零影响 |
 | 端到端训练 60 步 | 跑通，**10.4 s**；预取 25 次（批量 25 / 单条 25 / **命中 48**），NaN 守卫 **0** 次 |
-| 输出目录 | **`output/AIFFLOR-runNN`** ✅（产物 `df_aifflor.csv` + tfevents） |
+| 输出目录 | **`output/AIFFLOR-runNN`** ✅（产物 `df_aifflor.csv` + tfevents；`--hsrl` 时为 `df_hsrl.csv` 等，见 §3.8） |
 | 外部验证（6 随机日 × 100 分钟，每步随机动作） | 非有限值 **0** 条 |
 | `u=10, a=1/3` 单点 | **3.294116 MW**（标定后现值，作为回归锚） |

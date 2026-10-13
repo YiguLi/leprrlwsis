@@ -48,6 +48,27 @@ L: r2 = −1·min(clip_amount, 20)   [MW] 命令与实际之差 (两段 clip 合
        legacy : 加性 lam1（本项目原式）
     L: EMA ← 0.98·EMA + 0.02·sum_c2;  lam2 ← clip(lam2·exp(0.02·(EMA/d_block_L − 1)), 0.5, 2), 初值 1.0 (无量纲兑换率)
        d_block_L = 1.2 (⇔ 允许搁置 0.02 MWh/块), curriculum 减半地板 0.15
+
+--hsrl: 另一条**方法分支**（本文件内并列、互不干扰）
+---------------------------------------------------
+加 `--hsrl` 后走上表的 **"块总放电量"语义**（全部实现见 `aifflor/aifflor_hsrl.py`，
+未加 `--hsrl` 时该模块的函数一行都不会被调用 ⇒ 旧路径逐位不变）：
+
+  * H 第 6 维 = **BESS 在本 5 步块内的总放电量 g [MW·min]**（放电为正），
+    可行域 `[−C_max, +D_max]` 由**块首 SOC + 额定功率**推出（**不含波动约束**）；
+    越界线性罚 400 元/MW·min（不封顶），与 H 前 5 维同处 r1；
+  * H 奖励**去掉 bessdeg**：`r1 = pr·P_G·dt − pen5 − pen6`；**块末 SOC 目标 gap 罚删除**；
+  * L 动作 = **绝对 pb**（不再是"规则基线 + Δ"），只按**每步物理域**（SOC + 额定功率）裁剪；
+  * L reward：`r2 = −200·越界量[MW] − 20·放电量[MW·min]`（退化 = 越界罚的 1/10；
+    **不含** rulebase 波动裁剪罚）；
+  * L cost（图中公式）：`c_L = 1 − exp(−|(g − Σ已放电)/(δ − t_L) − a_L|)`，
+    δ = 5、t_L = 块内已过步数、a_L/Σ 都取**实际施加值**（放电为正）；
+  * L 观测 5 维 = `[u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5]`
+    （⚠ 不含 Σ/n_rem ⇒ 对 c_L 的参照量非 Markov；这是刻意的原方法形态，见 README）；
+  * λ2 重标 `[2, 50]`（初值 10）、`d_block_L = 0.5`（地板 0.05）；
+  * warmup 下层 = **摊还执行器** `clip(−(g−Σ)/n_rem, 物理域)`（c_L ≡ 0 的零成本动作）；
+  * 训练中的测试改跑 **20 步协议**：电价恒 300、风速随机取一列 + 随机起点 20 步、
+    开局 SOC = 0.25，触发频率与旧 9-case 相同（`episode_steps % 480 == 0` 且已过 warmup）。
 """
 import os
 import sys
@@ -66,6 +87,7 @@ sys.path.insert(0, _HSRL_DIR)
 from aifflor.aifflor_env import AifflorPhysics, WindBatteryAIF
 from aifflor import aifflor_turbine as aturb
 from aifflor.aifflor_ddpg import SP_TD3
+from aifflor import aifflor_hsrl as hsrl   # --hsrl 分支的全部口径 (单一真源)
 from util import *
 from td3per.td3per_myfunc import (
     CheckAction, Normalize, Normalize_H,
@@ -867,6 +889,580 @@ def train(num_iterations_H,
                       phase_mismatch))
 
 
+# =============================================================================
+# HSRL 分支的训练主循环（--hsrl；口径总表见 aifflor/aifflor_hsrl.py）
+# =============================================================================
+def train_hsrl(num_iterations_H,
+               agent_H,
+               agent_L,
+               env,
+               env_test,
+               rbb_system,
+               wind_pool,
+               output,
+               max_episode_length=None,
+               debug=False,
+               upload=False,
+               use_csv=False):
+    """`--hsrl` 分支的训练主循环。
+
+    与 `train()` **并列而不共用**：HSRL 的每一条口径（块总放电量语义 / 无 bessdeg 的 H 奖励 /
+    绝对 pb 的 L 动作 / 指数式 c_L / 重标后的 λ2 / 摊还执行器 warmup / 20 步测试）都在这里
+    自成一体 ⇒ **未加 `--hsrl` 时旧 `train()` 一行都不被触碰**（"逐位不变"可断言）。
+
+    单位约定（全函数一致）：
+      * `pb`   ：BESS 功率 [MW]，**正 = 充电**（与 env / RBB 同号）；
+      * `a_L`  ：BESS **放电量** [MW·min]，**正 = 放电**（= −pb，公式里的 a_L^t）；
+      * `g`    ：H 下发的**块总放电量** [MW·min]，**正 = 放电**；
+      * 步长 = 1 min ⇒ 每步的"MW"与"MW·min"数值相等。
+    """
+    agent_H.is_training = True
+    agent_L.is_training = True
+    step = episode = episode_steps = 0
+    episode_reward = episode_cost = episode_cost2 = episode_profit = 0.
+    episode_bess_profit = 0.
+    episode_deg_discharge = 0.
+    episode_deg_charge = 0.
+    observation = None
+    time = hsrl.DT
+
+    # ---- H 层 EMA 对偶（口径未变: sum_c1 = 波动成本 + W_GAP·unfeasible_gap(≡0)）----
+    _h = hc.h_settings()
+    d_block_H = _h['d_block'] if _h else 50.0
+    d_block_H_min = _h['d_block_min'] if _h else 5.0
+    # ---- L 层 EMA 对偶（HSRL 重标: c_L 无量纲 ⇒ λ2 ∈ [2,50], d_block_L = 0.5）----
+    d_block_L = float(getattr(args, 'hsrl_d_block_l', hsrl.HSRL_D_BLOCK_L))
+    d_block_L_min = hsrl.HSRL_D_BLOCK_L_MIN
+    consecutive_satisfied_H = 0
+    consecutive_satisfied_L = 0
+
+    # ---- 越界/退化系数（命令行可覆盖；<=0 的覆盖值不生效，一律取模块常量）----
+    pen6_coef = float(getattr(args, 'hsrl_pen6_coef', hsrl.HSRL_PEN6_COEF) or hsrl.HSRL_PEN6_COEF)
+    viol_coef = float(getattr(args, 'hsrl_viol_coef', hsrl.HSRL_VIOL_COEF) or hsrl.HSRL_VIOL_COEF)
+    deg_coef = float(getattr(args, 'hsrl_deg_coef', hsrl.HSRL_DEG_COEF) or hsrl.HSRL_DEG_COEF)
+
+    if use_csv:
+        df_rows = []
+        df_written = 0
+        df_episode_rows = []
+        df_episode_written = 0
+        df_test_rows = []
+        df_test_written = 0
+        df_update_rows = []
+        df_update_written = 0
+
+    # ---- 1440-step window counters for env metrics ----
+    window_violation_count = 0
+    window_power_sum = 0.0
+
+    # ---- 24h 相位特征 (--phase_feat) ----
+    phase_mode = int(getattr(args, 'phase_feat', 0))
+    phase_table = phase_daily_table() if phase_mode >= 2 else None
+    phase_sched = day_price_schedule()
+    phase_mismatch = 0
+    phase_checked = 0
+
+    # ---- warmup: 上层调度 + 下层"摊还执行器"自检 ----
+    warmup_sched, warmup_rule, bess_fill_stats = hwarm.build_from_args(args, agent_H, agent_L)
+    _wb = str(getattr(args, 'warmup_bess', 'rule'))
+    # HSRL 下 `--warmup_bess rule`（默认）⇒ **摊还执行器**（不是 SOC 目标追踪）:
+    #   命令 = clip(−(g−Σ)/n_rem, 物理域) ⇒ c_L ≡ 0、r2 = −退化项 —— 与策略期的零成本动作同源。
+    #   因此旧的 `check_residual_baseline`（断言"与 SOC 目标规则逐位相同"）在 HSRL 下**不适用**，
+    #   改跑 `hsrl.check_amortized_baseline`（断言"c_L≡0 + 命令恒在物理域内 + SOC 不越界"）。
+    _chk = hsrl.check_amortized_baseline()
+    prCyan('[HSRL] warmup 下层口径 = {} ({});  摊还执行器自检: {} 例, 其中被物理域裁剪 {} 例 '
+           '(裁剪时 c_L>0 属"做不到", 未裁剪时 c_L≡0), max c_L = {:.3e}'.format(
+               _wb, '摊还执行器' if _wb == 'rule' else ('价格条件随机' if _wb == 'price' else '绝对随机'),
+               _chk['n_checked'], _chk['n_clipped'], _chk['max_c_unclipped']))
+    assert _chk['fail'] == 0, 'HSRL 摊还执行器自检未通过: {}'.format(_chk)
+    bias_init = hinit.BiasInitTracker.from_args(args)
+    bias_init.value_scale = float(getattr(agent_H, 'value_scale', hc.value_scale()))
+    bias_init.discount = float(agent_H.discount)
+
+    # ---- 20 步测试的风速池（只含"天"列；FFC_speed_noise_1.csv 第 0 列是行号）----
+    wind_pool = None
+    try:
+        wind_pool = np.asarray(env_test.wind_noise.iloc[:, 1:].to_numpy(dtype=float))
+    except Exception as _e:                                   # pragma: no cover
+        prYellow('[HSRL test20] 风速池不可用 ({}); 本run 跳过 20 步测试'.format(_e))
+    test_seed = int(getattr(args, 'hsrl_test_seed', -1))
+    test_trigger = 0
+
+    while step < num_iterations_H:
+        prYellow('########### step:{} ###########'.format(step))
+        if observation is None:
+            observation = deepcopy(env.reset())          # [Pr,U,E,P_G_last]
+            reset_E = float(np.random.uniform(float(args.soc_reset_low),
+                                              float(args.soc_reset_high)))
+            env.E = reset_E
+            observation[2] = reset_E
+            norm_observation = Normalize_H(observation, phase_minute_of_day(0),
+                                           phase_mode, phase_table)
+            agent_H.reset(norm_observation)
+
+        pm_now = phase_minute_of_day(episode_steps)
+        if phase_mode > 0:
+            if abs(float(observation[0]) - phase_sched[pm_now]) > 1e-6:
+                phase_mismatch += 1
+            phase_checked += 1
+
+        # ================================================================
+        # 块首: H 决策 —— 第 6 维 = 本块总放电量 g [MW·min]（放电为正）
+        # ================================================================
+        if episode_steps % 5 == 0:
+            sum_r1 = 0.0
+            sum_c1 = 0.0
+            sum_c2 = 0.0
+            sum_disch = 0.0
+            E_block_start = float(observation[2])
+            feas_c_max, feas_d_max = hsrl.feasible_total(E_block_start)
+            if step <= args.warmup:
+                _wa = warmup_sched.action(float(observation[0]))   # None ⇒ 对照臂
+                if _wa is None:
+                    original_action_H = np.asarray(agent_H.random_action(), dtype=float).copy()
+                    # 第 6 维按 HSRL 量程重抽（U(−2.5, 2.5) MW·min）
+                    original_action_H[5] = hsrl.random_g()
+                else:
+                    original_action_H = np.asarray(_wa, dtype=float).copy()
+                    # 价格游走 sig → g: **反号 + ×5**（低谷充电 ⇒ g<0；见 hsrl 常量区）
+                    original_action_H[5] = hsrl.g_from_warmup_signal(original_action_H[5])
+                applied_action_H, _pen5_w, _pen6_w = hsrl.check_action_H_hsrl(
+                    original_action_H, E_block_start, pen6_coef=pen6_coef)
+                penalty_NN_H = 0.0          # warmup 期不计越界罚（与旧口径一致）
+                pen6_H = 0.0
+            else:
+                original_action_H = agent_H.select_action(norm_observation)
+                applied_action_H, penalty_NN_H, pen6_H = hsrl.check_action_H_hsrl(
+                    original_action_H, E_block_start, pen6_coef=pen6_coef)
+            g_raw = float(original_action_H[5])
+            g_applied = float(applied_action_H[5])
+            viol_derate = violation_derate(original_action_H, args.viol_derate)
+            norm_observation_H = norm_observation
+            pw_tru = env.PowerOutput(observation[1], applied_action_H)
+            pb_l = list()
+
+        prGreen('--H-- ori a_t = {} (g_raw={:.3f} MW·min)'.format(
+            np.round(np.asarray(original_action_H, dtype=float), 3), g_raw))
+
+        ptur = float(pw_tru)
+        pg_prev = float(observation[-1])
+        E_current = float(observation[2])
+        pb_lo, pb_hi = hsrl.feasible_power(E_current)     # 每步物理域 [MW, 正=充电]
+
+        # ================================================================
+        # 下层 L 观测 (5 维): [u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5]
+        # ================================================================
+        norm_observation_L = hsrl.build_L_obs_hsrl(
+            observation[1], observation[0], E_current, pg_prev, g_applied)
+        prPurple('--L-- obs = {}.'.format(np.round(norm_observation_L, 3)))
+        if episode_steps % 5 == 0:            # 下层每个 5-step 块 = 一个 episode
+            agent_L.reset(norm_observation_L)
+
+        # ================================================================
+        # 下层 L 动作: **绝对 pb**，只按物理域 (SOC + 额定功率) 裁剪
+        # ================================================================
+        _n_rem_L = 5 - (episode_steps % 5)
+        if step <= args.warmup:
+            if _wb == 'price' and getattr(warmup_rule, 'is_price', False):
+                pb_cmd_L = float(warmup_rule.act(float(observation[0]), pb_lo, pb_hi))
+            elif _wb == 'random' or warmup_rule is None:
+                pb_cmd_L = float(np.asarray(agent_L.random_action(),
+                                            dtype=float).reshape(-1)[0])
+            else:   # rule (默认) ⇒ 摊还执行器
+                pb_cmd_L = hsrl.amortized_rule_action(
+                    g_applied, sum_disch, _n_rem_L, E_current)
+            original_action_L = np.array([pb_cmd_L], dtype=np.float64)
+            viol_L = 0.0
+            penalty_NN_L = 0.0
+        else:
+            original_action_L = np.asarray(agent_L.select_action(norm_observation_L),
+                                           dtype=float).reshape(-1)
+            pb_cmd_L = float(original_action_L[0])
+            viol_L = max(0.0, pb_cmd_L - pb_hi) + max(0.0, pb_lo - pb_cmd_L)
+            penalty_NN_L = viol_coef * viol_L
+        prGreen('--L-- cmd = {:.4f} MW | 物理域 [{:.4f}, {:.4f}] | 越界 {:.4f} MW | '
+                'n_rem = {}'.format(pb_cmd_L, pb_lo, pb_hi, viol_L, _n_rem_L))
+
+        action = np.concatenate((applied_action_H, np.array([pb_cmd_L])))
+        # RBB 在 HSRL 下以 fluctuation_limit=inf 构造 ⇒ 退化为"纯物理裁剪 + 记录":
+        #   pbrule ≡ clip(命令, 物理域), clip_amount ≡ viol_L, unfeasible_gap ≡ 0。
+        pb_original = float(pb_cmd_L)
+        pbrule, rbb_info = rbb_system.compute_pbrule(
+            pb_original=pb_original, ptur=ptur, pg_prev=pg_prev, E=E_current)
+
+        action_rbb = action.copy()
+        action_rbb[-1] = pbrule
+        pw_tru2, observation2, action_L_env, penalty_L, done, done_L, info = \
+            env.step(action_rbb[:6], action_rbb[6:], pw_tru)
+        action_rbb[6:] = action_L_env
+        pb_applied = float(np.asarray(action_L_env, dtype=float).reshape(-1)[0])
+        a_L_disch = hsrl.discharge_of(pb_applied)      # 放电为正 [MW·min]
+        prGreen('Applied action = {}.'.format(np.round(np.asarray(action_rbb, dtype=float), 3)))
+        norm_observation2 = Normalize_H(observation2,
+                                        phase_minute_of_day(episode_steps + 1),
+                                        phase_mode, phase_table)
+
+        # ================================================================
+        # H 奖励: r1 = pr·P_G·dt − pen5 − pen6（**无 bessdeg**；**无块末 gap 罚**）
+        # ================================================================
+        r1, c1_step, reward_details = hsrl.cal_rew_rb_hsrl(
+            observation, observation2, action_rbb, rbb_info,
+            penalty_NN=penalty_NN_H + pen6_H, time=time, ptur=ptur,
+            pb_cmd=pb_original, turbine_derate=viol_derate)
+        P_F = reward_details['P_F']
+        sum_r1 += r1
+        sum_c1 += c1_step
+        gap_pen = 0.0        # HSRL: 块末 SOC 目标 gap 罚已删除（执行偏差由 c_L 承接）
+        gap_raw = 0.0
+
+        # ================================================================
+        # L 奖励/成本: r2 = −200·越界 − 20·放电 ;  c_L = 1 − exp(−|need − a_L|)
+        #   need = (g − Σ已放电)/(δ − t_L)，Σ 与 a_L 都用**实际施加值**（env 回传）
+        # ================================================================
+        c2, c2_info = hsrl.lower_cost_hsrl(g_applied, sum_disch, _n_rem_L, a_L_disch,
+                                           return_info=True)
+        r2 = hsrl.lower_reward_hsrl(viol_L, a_L_disch,
+                                    viol_coef=viol_coef, deg_coef=deg_coef)
+        deg_step = deg_coef * max(0.0, a_L_disch)
+        sum_c2 += c2
+        sum_disch += a_L_disch
+
+        norm_observation2_L = hsrl.build_L_obs_hsrl(
+            observation2[1], observation2[0], float(observation2[2]),
+            float(observation2[-1]), g_applied)
+
+        prGreen('r1 = {} (turb={}, bess={}, bessdeg 已移除) | pen5 = {}, pen6 = {:.3f}'.format(
+            round(r1, 3), round(reward_details['turbine_profit'], 3),
+            round(reward_details['bess_profit'], 3),
+            round(penalty_NN_H, 3), round(pen6_H, 3)))
+        prGreen('c1 = {} (fluct={}, unfeasible_gap={})'.format(
+            round(c1_step, 3), round(reward_details['c1_fluct'], 3),
+            round(reward_details['unfeasible_gap'], 4)))
+        prGreen('g = {:.4f} MW·min (raw {:.4f}) | Σ已放电 = {:.4f} | n_rem = {} | '
+                'need = {:.4f} | a_L = {:.4f} | dev = {:+.4f}'.format(
+                    g_applied, g_raw, c2_info['sum_disch_before'], _n_rem_L,
+                    c2_info['need'], c2_info['a_L'], c2_info['dev']))
+        prGreen('r2 = {} (越界 {:.4f} MW, 退化 {:.3f}) | c_L = {:.6f} | SOC = {:.4f}'.format(
+            round(r2, 3), viol_L, round(deg_step, 3), c2, reward_details['SOC']))
+
+        pb_l.append(pb_original)
+
+        if P_F > 3.0 + 1e-4:
+            window_violation_count += 1
+        window_power_sum += observation2[-1]
+
+        if max_episode_length and episode_steps >= max_episode_length - 1:
+            done = True
+
+        # ---- 块末: 两层各自结算 ----
+        if episode_steps % 5 == 4:
+            bias_init.on_block_end(step, sum_r1, sum_c1, agent_H)
+            agent_H.observe_jump(norm_observation_H, original_action_H,
+                                 sum_r1, sum_c1, norm_observation2, done)
+            if step > args.warmup:
+                agent_H.update_ema_cost(sum_c1)
+                hc.dual_update(agent_H, d_block_H)
+                agent_L.update_ema_cost(sum_c2)
+                hsrl.dual_update_L_hsrl(agent_L, d_block_L)
+            # L 层 curriculum: 连续满足块数 ⇒ 预算减半（阈值 = EMA 时间常数）
+            if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
+                consecutive_satisfied_L += 1
+            else:
+                consecutive_satisfied_L = 0
+            if consecutive_satisfied_L >= hsrl.HSRL_L_CURRICULUM_BLOCKS:
+                d_block_L = max(d_block_L / 2.0, d_block_L_min)
+                consecutive_satisfied_L = 0
+                prGreen('L: d_block_L halved to {}'.format(d_block_L))
+            done_L = True
+        hwarm.fill_bess_transition(
+            agent_L, norm_observation_L, original_action_L, r2, c2,
+            norm_observation2_L, done_L,
+            applied_pb=float(pbrule), warmup=bool(step <= args.warmup),
+            cmd_pb=float(pb_cmd_L), rule_pb=None, stats=bess_fill_stats)
+
+        if step > args.warmup:
+            if episode_steps % 5 == 4:
+                for _ in range(args.utd_h):
+                    agent_H.update_policy()
+                if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
+                    consecutive_satisfied_H += 1
+                else:
+                    consecutive_satisfied_H = 0
+                for _ in range(args.utd_l):
+                    agent_L.update_policy()
+                if consecutive_satisfied_H >= hc.H_CURRICULUM_BLOCKS:
+                    d_block_H = max(d_block_H / 2.0, d_block_H_min)
+                    consecutive_satisfied_H = 0
+                    prGreen('H: d_block_H halved to {}'.format(d_block_H))
+
+                if agent_H.record_update_stats and len(agent_H.update_stats) > 0:
+                    _stats = agent_H.update_stats
+                    _mean = {k: float(np.mean([s[k] for s in _stats])) for k in _stats[0]}
+                    agent_H.update_stats = []
+                    if upload:
+                        for _k, _v in _mean.items():
+                            writer.add_scalar('update/' + _k, _v, step)
+                    if use_csv:
+                        df_update_rows.append({'step': step, **_mean})
+                        df_update_written = flush_csv_append_batch(
+                            '{}/update_stats_H.csv'.format(output),
+                            df_update_rows, df_update_written)
+                        df_update_rows = []
+
+            # ---- 20 步测试（触发频率与旧 9-case 相同: episode_steps % 480 == 0）----
+            if episode_steps % 480 == 0 and wind_pool is not None:
+                per_blk, overall, meta = hsrl.twenty_step_test_hsrl(
+                    agent_H, agent_L, env_test, rbb_system, wind_pool,
+                    seed=(None if test_seed < 0 else test_seed),
+                    phase_mode=phase_mode, phase_table=phase_table,
+                    penalty6_coef=pen6_coef)
+                test_trigger += 1
+                prCyan('[HSRL test20] #{} step={} 风列={} 起点={} SOC {:.3f}→{:.3f} | '
+                       'r1={:.2f} c1={:.2f} r2={:.2f} c2={:.4f} 越界={:.3f} 退化={:.2f} | '
+                       'Σ放电={:.3f} (g 均值 {:.3f})'.format(
+                           test_trigger, step, meta['wind_col'], meta['wind_start'],
+                           meta['soc_start'], meta['soc_end'], overall['r1'],
+                           overall['c1'], overall['r2'], overall['c2'],
+                           overall['viol'], overall['deg'],
+                           float(np.sum([m['sum_disch'] for m in per_blk])),
+                           overall['g']))
+                if use_csv:
+                    _common = {'step': step, 'trigger': test_trigger,
+                               'wind_col': meta['wind_col'],
+                               'wind_start': meta['wind_start'], 'price': meta['price']}
+                    for _i, m in enumerate(per_blk):
+                        df_test_rows.append(dict(
+                            _common, block=_i, **{k: m[k] for k in (
+                                'r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'pen6', 'cvm',
+                                'pf_viol', 'profit', 'profit_econ', 'soc_start', 'soc_end',
+                                'dsoc', 'g', 'g_raw', 'sum_disch', 'cL_max', 'dev_mean',
+                                'pb_sum')}))
+                    df_test_rows.append(dict(
+                        _common, block='OVERALL', **{k: overall[k] for k in (
+                            'r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'pen6', 'cvm',
+                            'pf_viol', 'profit', 'profit_econ', 'soc_start', 'soc_end',
+                            'dsoc', 'g', 'g_raw', 'sum_disch', 'cL_max', 'dev_mean')}))
+                    df_test_written = flush_csv_append_batch(
+                        '{}/df_test20_hsrl.csv'.format(output),
+                        df_test_rows, df_test_written)
+                    df_test_rows = []
+                if upload:
+                    for _k in ('r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'pen6',
+                               'profit', 'profit_econ', 'dsoc', 'soc_end', 'g'):
+                        writer.add_scalar('test20/overall/' + _k, overall[_k], step)
+                    writer.add_scalar('test20/overall/cvm', overall['cvm'], step)
+                    writer.add_scalar('test20/overall/pf_viol', overall['pf_viol'], step)
+                    for _i, m in enumerate(per_blk):
+                        for _k in ('r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'g',
+                                   'sum_disch', 'cL_max'):
+                            writer.add_scalar('test20/block{}/{}'.format(_i, _k),
+                                              m[_k], step)
+
+        # ---- 逐步数据落盘 ----
+        if use_csv:
+            df_rows.append({
+                'step': step,
+                'observation': observation,
+                'observation2': observation2,
+                'phase_minute': pm_now,
+                # 上层
+                'original_action_H': original_action_H,
+                'applied_action_H': applied_action_H,
+                'g_raw': g_raw,
+                'g': g_applied,
+                'feas_c_max': feas_c_max,
+                'feas_d_max': feas_d_max,
+                'pen5_H': penalty_NN_H,
+                'pen6_H': pen6_H,
+                # 下层
+                'norm_observation_L': norm_observation_L,
+                'original_action_L': original_action_L,
+                'pb_cmd': pb_cmd_L,
+                'pb_applied': pb_applied,
+                'a_L_disch': a_L_disch,
+                'pb_lo': pb_lo,
+                'pb_hi': pb_hi,
+                'viol_L': viol_L,
+                'n_rem_L': _n_rem_L,
+                'sum_disch_before': c2_info['sum_disch_before'],
+                'sum_disch_after': sum_disch,
+                'need': c2_info['need'],
+                'dev': c2_info['dev'],
+                'action_rbb': action_rbb,
+                'r1': r1, 'c1': c1_step,
+                'r2': r2, 'c2': c2, 'deg_L': deg_step,
+                'gap_pen': gap_pen, 'gap_raw': gap_raw,
+                'lam1': agent_H.lam, 'lam2': agent_L.lam,
+                'd_block_H': d_block_H, 'd_block_L': d_block_L,
+                'ema_c1_H': agent_H.ema_cost, 'ema_cL_L': agent_L.ema_cost,
+                # RBB (= 纯物理裁剪)
+                'pb_original': rbb_info['pb_original'],
+                'pbrule': rbb_info['pbrule'],
+                'pbphysicsmin': rbb_info['pbphysicsmin'],
+                'pbphysicsmax': rbb_info['pbphysicsmax'],
+                'clip_amount': rbb_info['clip_amount'],
+                'unfeasible_gap': rbb_info['unfeasible_gap'],
+                'is_infeasible': float(rbb_info['is_infeasible']),
+                # 风况/电价档位 (仅诊断)
+                'wind_level': reward_details['wind_level'],
+                'price_level': reward_details['price_level'],
+                'pr': reward_details['pr'],
+                'u': reward_details['u'],
+                'turbine_profit': reward_details['turbine_profit'],
+                'bess_profit': reward_details['bess_profit'],
+                'revenue': reward_details['revenue'],
+                'degradation': reward_details['degradation'],
+                'degradation_ref490': reward_details['degradation_ref490'],
+                'c1_fluct': reward_details['c1_fluct'],
+                'SOC': reward_details['SOC'],
+                'P_F': P_F,
+                'soc_next': float(observation2[2]),
+                'bess_profit_net': (reward_details['bess_profit']
+                                    - reward_details['degradation_ref490']),
+            })
+            if step % 50 == 0:
+                df_written = flush_csv_append_batch(
+                    '{}/df_hsrl.csv'.format(output), df_rows, df_written)
+                df_rows = []
+
+        # ---- Periodic checkpoint ----
+        if step > 0 and step % 2000 == 0:
+            agent_H.save_checkpoint(output, step)
+            agent_L.save_checkpoint(output, step)
+            prCyan('Checkpoint saved at step {}'.format(step))
+
+        if upload:
+            writer.add_scalar('r1', r1, step)
+            writer.add_scalar('c1', c1_step, step)
+            writer.add_scalar('r2', r2, step)
+            writer.add_scalar('c2', c2, step)
+            writer.add_scalar('deg_L', deg_step, step)
+            writer.add_scalar('viol_L', viol_L, step)
+            writer.add_scalar('pen6_H', pen6_H, step)
+            writer.add_scalar('g', g_applied, step)
+            writer.add_scalar('g_raw', g_raw, step)
+            writer.add_scalar('sum_disch', c2_info['sum_disch_before'], step)
+            writer.add_scalar('need', c2_info['need'], step)
+            writer.add_scalar('dev', c2_info['dev'], step)
+            writer.add_scalar('wind_speed', env.u, step)
+            writer.add_scalar('lam1', agent_H.lam, step)
+            writer.add_scalar('lam2', agent_L.lam, step)
+            writer.add_scalar('d1', d_block_H, step)
+            writer.add_scalar('d2', d_block_L, step)
+            if agent_H.ema_cost is not None:
+                writer.add_scalar('ema_c1_H', agent_H.ema_cost, step)
+            if agent_L.ema_cost is not None:
+                writer.add_scalar('ema_cL_L', agent_L.ema_cost, step)
+            writer.add_scalar('soc', float(observation[2]), step)
+            writer.add_scalar('P_F', P_F, step)
+            writer.add_scalar('phase/hour', pm_now / 60.0, step)
+            if phase_checked > 0:
+                writer.add_scalar('phase/check_mismatch_frac',
+                                  phase_mismatch / float(phase_checked), step)
+            writer.add_scalar('seg/price_level',
+                              {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}.get(
+                                  reward_details['price_level'], 0), step)
+            writer.add_scalar('seg/wind_level',
+                              {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}.get(
+                                  reward_details['wind_level'], 0), step)
+            writer.add_scalar('reward_upper/turbine_profit',
+                              reward_details['turbine_profit'], step)
+            writer.add_scalar('reward_upper/bess_profit',
+                              reward_details['bess_profit'], step)
+            writer.add_scalar('reward_upper/degradation_ref490',
+                              reward_details['degradation_ref490'], step)
+            writer.add_scalar('rbb/clip_amount', rbb_info['clip_amount'], step)
+            writer.add_scalar('rbb/pbrule', float(pbrule), step)
+            writer.add_scalar('rbb/pb_original', pb_original, step)
+            if episode_steps % 5 == 4:
+                writer.add_scalar('sum_r1', sum_r1, step)
+                writer.add_scalar('sum_c1', sum_c1, step)
+                writer.add_scalar('sum_c2', sum_c2, step)
+                writer.add_scalar('sum_disch_block', sum_disch, step)
+                for i in range(5):
+                    writer.add_scalar('action/a_H_original_{}'.format(i),
+                                      original_action_H[i], step)
+                    writer.add_scalar('action/a_H_clipped_{}'.format(i),
+                                      applied_action_H[i], step)
+                writer.add_scalar('action/g', g_applied, step)
+                writer.add_scalar('action/pb_rule_amortized',
+                                  hsrl.amortized_rule_action(
+                                      g_applied, 0.0, 1, E_block_start), step)
+            if step > 0 and step % 1440 == 0:
+                writer.add_scalar('env/window_violation_count',
+                                  window_violation_count, step)
+                writer.add_scalar('env/window_power_sum', window_power_sum, step)
+                window_violation_count = 0
+                window_power_sum = 0.0
+
+        # ---- 推进 ----
+        step += 1
+        episode_steps += 1
+        episode_reward += r1
+        episode_cost += c1_step
+        episode_cost2 += c2
+        episode_profit += observation2[-1] * observation[0] * time \
+            - 490.0 * max(-float(pbrule), 0) * time
+        episode_bess_profit += reward_details['bess_profit'] \
+            - 490.0 * max(-float(pbrule), 0) * time
+        episode_deg_discharge += max(-float(pbrule), 0.0) * time
+        episode_deg_charge += max(float(pbrule), 0.0) * time
+        norm_observation = deepcopy(norm_observation2)
+        observation = deepcopy(observation2)
+        pw_tru = pw_tru2
+
+        if done:
+            agent_H.save_model(output)
+            agent_L.save_model(output)
+            prGreen('##########{}: episode_profit:{} episode_reward:{} step:{}'.format(
+                episode, round(episode_profit, 2), round(episode_reward, 2), step))
+            if upload:
+                writer.add_scalar('episode_reward', episode_reward, episode)
+                writer.add_scalar('episode_cost', episode_cost, episode)
+                writer.add_scalar('episode_cost2', episode_cost2, episode)
+                writer.add_scalar('episode_profit', episode_profit, episode)
+                writer.add_scalar('env/bessprofit', episode_bess_profit, episode)
+                writer.add_scalar('env/deg_charge', episode_deg_charge, episode)
+                writer.add_scalar('env/deg_discharge', episode_deg_discharge, episode)
+                writer.add_scalar('wind_day', env.j, episode)
+            if use_csv:
+                df_episode_rows.append({
+                    'episode': episode,
+                    'episode_reward': episode_reward,
+                    'episode_cost': episode_cost,
+                    'episode_cost2': episode_cost2,
+                    'episode_profit': episode_profit,
+                    'bess_profit': episode_bess_profit,
+                    'deg_charge': episode_deg_charge,
+                    'deg_discharge': episode_deg_discharge,
+                    'wind_day': env.j,
+                })
+                df_episode_written = flush_csv_append_batch(
+                    '{}/df_episode_hsrl.csv'.format(output),
+                    df_episode_rows, df_episode_written)
+                df_episode_rows = []
+            observation = None
+            episode_steps = 0
+            episode_reward = episode_cost = episode_cost2 = episode_profit = 0.
+            episode_bess_profit = 0.
+            episode_deg_discharge = episode_deg_charge = 0.
+            episode += 1
+
+    if use_csv:
+        flush_csv_append_batch('{}/df_hsrl.csv'.format(output), df_rows, df_written)
+        flush_csv_append_batch('{}/df_episode_hsrl.csv'.format(output),
+                               df_episode_rows, df_episode_written)
+        flush_csv_append_batch('{}/df_test20_hsrl.csv'.format(output),
+                               df_test_rows, df_test_written)
+        flush_csv_append_batch('{}/update_stats_H.csv'.format(output),
+                               df_update_rows, df_update_written)
+
+    if phase_mode > 0:
+        prGreen('phase check: mode={} dims={} checked={} mismatch={} ({:.4f}%)'.format(
+            phase_mode, PHASE_DIM[phase_mode], phase_checked, phase_mismatch,
+            100.0 * phase_mismatch / max(phase_checked, 1)))
+
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
@@ -1109,6 +1705,40 @@ if __name__ == "__main__":
                         help='显式指定成本 critic 基线 (>0 生效, 覆盖 estimate)')
     parser.add_argument('--max_steps', default=0, type=int,
                         help='>0 时覆盖 train_iter_H, 用于短程 A/B')
+
+    # ==================================================================
+    # HSRL 方法分支（--hsrl）—— 口径总表见 aifflor/aifflor_hsrl.py
+    # ==================================================================
+    parser.add_argument('--hsrl', action='store_true',
+                        help='启用 HSRL 分支（**方法分支**）: H 第 6 维 = 本 5 步块内的'
+                             '**总放电量 g [MW·min]**（放电为正；可行域 = SOC + 额定功率，'
+                             '**不含波动约束**，越界线性罚 400 元/MW·min）; '
+                             'H 奖励去掉 bessdeg 与块末 SOC 目标 gap 罚; '
+                             'L 动作 = **绝对 pb**（只按物理域裁剪）; '
+                             'r2 = −200·越界[MW] − 20·放电[MW·min]; '
+                             'c_L = 1 − exp(−|(g−Σ已放电)/(δ−t_L) − a_L|); '
+                             'λ2 ∈ [2, 50]（初值 10）, d_block_L = 0.5; '
+                             'L 观测 = [u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5]; '
+                             'warmup 下层 = 摊还执行器; 训练中测试改 20 步协议。'
+                             '不加该参数时旧路径**逐位不变**')
+    parser.add_argument('--hsrl_pen6_coef', default=hsrl.HSRL_PEN6_COEF, type=float,
+                        help='HSRL: H 第 6 维越界罚系数 [元/MW·min] (默认 %.0f, 不封顶)'
+                             % hsrl.HSRL_PEN6_COEF)
+    parser.add_argument('--hsrl_viol_coef', default=hsrl.HSRL_VIOL_COEF, type=float,
+                        help='HSRL: L 动作越界罚系数 [元/MW] (默认 %.0f)' % hsrl.HSRL_VIOL_COEF)
+    parser.add_argument('--hsrl_deg_coef', default=hsrl.HSRL_DEG_COEF, type=float,
+                        help='HSRL: L 放电退化成本 [元/MW·min, 只对放电] '
+                             '(默认 %.1f = 越界罚的 1/10)' % hsrl.HSRL_DEG_COEF)
+    parser.add_argument('--hsrl_sig_noise_max', default=0.5, type=float,
+                        help='HSRL: 第 6 维探索噪声上限 [MW·min] (默认 0.5 = 满量程 2.5 的 20%%)')
+    parser.add_argument('--hsrl_sig_noise_min', default=0.025, type=float,
+                        help='HSRL: 第 6 维探索噪声地板 [MW·min] (默认 0.025 = 满量程的 1%%)')
+    parser.add_argument('--hsrl_d_block_l', default=hsrl.HSRL_D_BLOCK_L, type=float,
+                        help='HSRL: L 层每块 sum_c_L 预算 (默认 %.2f = 5 步平均 0.1 的偏差)'
+                             % hsrl.HSRL_D_BLOCK_L)
+    parser.add_argument('--hsrl_test_seed', default=-1, type=int,
+                        help='HSRL: 20 步测试的风速段采样种子 (>0 固定可复现; 默认 -1 = 每次触发'
+                             '重新随机)。采样用**独立** RandomState ⇒ 不吃训练流、不改变训练轨迹')
     hwarm.add_warmup_args(parser)
     args = parser.parse_args()
     args = hwarm.resolve_warmup(args)   # WARMUP_AUTO: 正式口径 warmup=bsize*mult, 期零网络更新
@@ -1195,6 +1825,12 @@ if __name__ == "__main__":
         time=1.0 / 60,
         fluctuation_limit=args.rbb_fluctuation_limit,
     )
+    if args.hsrl:
+        # HSRL: 波动窗口**不参与**任何裁剪与奖励 ⇒ 用 inf 关掉它, RBB 退化为
+        # "纯 SOC + 额定功率裁剪 + 记录"(其 pbphysicsmin/max 与 aifflor_hsrl.feasible_power
+        # 逐位同式) ⇒ `pbrule ≡ clip(命令, 物理域)`、`unfeasible_gap ≡ 0`。
+        rbb_system.fluctuation_limit = float('inf')
+        prCyan(hsrl.summary())
 
     # 上层 H: TD3 + EMA 实际成本对偶 (lam1 ∈ [3, 100], 初始 5.0) —— 与 td3perrb 一致
     nb_states_H = 4 + PHASE_DIM[int(getattr(args, 'phase_feat', 0))]
@@ -1232,6 +1868,13 @@ if __name__ == "__main__":
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     if args.wt_bias_init:
         init_wt_action_bias(agent_H, lo=0.05, hi=0.45, sig_value=0.0)
+    if args.hsrl:
+        # HSRL: 第 6 维量纲从"归一化信号 ∈[−0.5,0.5]"换成 **[MW·min]（满量程 ±2.5）**
+        # ⇒ 探索噪声同步重标（前 5 维风机维保持恒定 wt_noise 不变）。
+        agent_H.explore_amp[5] = float(args.hsrl_sig_noise_max)
+        agent_H.explore_floor[5] = float(args.hsrl_sig_noise_min)
+        prYellow('[HSRL] 第 6 维探索噪声: amp={} -> floor={} [MW·min] (满量程 ±{:.2f})'.format(
+            args.hsrl_sig_noise_max, args.hsrl_sig_noise_min, hsrl.HSRL_G_FULL))
 
     # 下层 L: 保留 td3per 自己的 RL BESS 操作
     #   * 观测 5 维蒸馏 = [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
@@ -1243,17 +1886,31 @@ if __name__ == "__main__":
     #       初值 L_LAM_INIT = 1.0 (中性兑换率)
     #   * 每块 1 次**乘性**对偶: λ2 ← clip(λ2·exp(hst.L_EMA_LAM_LR·(EMA_c2/d_block_L − 1)), 0.5, 2);
     #       步级折扣 --l_discount
-    agent_L = SP_TD3(nb_states=5, nb_actions=1, args=args,
-                     lam_max=hst.L_LAM_MAX, lam_min=hst.L_LAM_MIN,
-                     ema_lam=True, ema_alpha=0.02, ema_lam_lr=hst.L_EMA_LAM_LR,
-                     policy_delay=args.l_policy_delay,
-                     policy_noise=args.l_policy_noise,
-                     noise_clip=args.noise_clip,
-                     cost_critic_mode=args.cost_critic_mode)
-    agent_L.lam = hst.L_LAM_INIT
-    agent_L.cost_limit = hst.L_COST_LIMIT  # L层c2专用初始值（单一真源）
+    # ---- HSRL 分支: 动作语义变成"绝对 pb"、cost 换成图中指数式 ⇒
+    #      λ2 的区间/初值/预算随之重标 (c_L 无量纲 vs r2 元量级; 见 aifflor_hsrl.py) ----
+    if args.hsrl:
+        agent_L = SP_TD3(nb_states=5, nb_actions=1, args=args,
+                         lam_max=hsrl.HSRL_L_LAM_MAX, lam_min=hsrl.HSRL_L_LAM_MIN,
+                         ema_lam=True, ema_alpha=0.02, ema_lam_lr=hsrl.HSRL_L_EMA_LAM_LR,
+                         policy_delay=args.l_policy_delay,
+                         policy_noise=args.l_policy_noise,
+                         noise_clip=args.noise_clip,
+                         cost_critic_mode=args.cost_critic_mode)
+        agent_L.lam = hsrl.HSRL_L_LAM_INIT
+        agent_L.cost_limit = hsrl.HSRL_L_COST_LIMIT
+    else:
+        agent_L = SP_TD3(nb_states=5, nb_actions=1, args=args,
+                         lam_max=hst.L_LAM_MAX, lam_min=hst.L_LAM_MIN,
+                         ema_lam=True, ema_alpha=0.02, ema_lam_lr=hst.L_EMA_LAM_LR,
+                         policy_delay=args.l_policy_delay,
+                         policy_noise=args.l_policy_noise,
+                         noise_clip=args.noise_clip,
+                         cost_critic_mode=args.cost_critic_mode)
+        agent_L.lam = hst.L_LAM_INIT
+        agent_L.cost_limit = hst.L_COST_LIMIT  # L层c2专用初始值（单一真源）
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
     # ---- 残余动作: L actor 输出层零初始化 ⇒ t=0 时 Δ≡0 ⇒ 起点逐位等于规则下层 ----
+    #      HSRL 下同样是零初始化, 但语义 = "起点 pb = 0 (不充不放)"。
     hinit.zero_actor_output(agent_L, verbose=True)
     # L 层探索半宽 [MW] (残余动作量级): 旧式 ±0.05 MW 比所需动作小 ~50 倍
     agent_L.explore_amp = np.full(1, float(getattr(args, 'l_noise_amp', 1.0)), dtype=np.float32)
@@ -1266,26 +1923,56 @@ if __name__ == "__main__":
              '探索衰减: L 每 {} 次决策 / H 每 {} 次决策'.format(
                  args.l_policy_delay, args.l_policy_noise, args.policy_delay, args.policy_noise,
                  agent_L.discount, agent_H.discount, args.l_epsilon, args.epsilon))
-    prCyan('下层奖励/成本口径: r2 = -1·min(clip_amount, 20) [两段 clip 合计]; '
-           'c2 = +1·trackerr [MW] (dist(实际施加 pb, 参考集合=Soctrack范围∩平抑窗口)); '
-           'F=∅ ⇒ 无范围, 只有纯粹一个竭力值 r* (顶到才不罚); '
-           'L 观测 = [pg(t-1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]')
+    if not args.hsrl:
+        prCyan('下层奖励/成本口径: r2 = -1·min(clip_amount, 20) [两段 clip 合计]; '
+               'c2 = +1·trackerr [MW] (dist(实际施加 pb, 参考集合=Soctrack范围∩平抑窗口)); '
+               'F=∅ ⇒ 无范围, 只有纯粹一个竭力值 r* (顶到才不罚); '
+               'L 观测 = [pg(t-1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]')
+    else:
+        prCyan('下层奖励/成本口径 (HSRL): r2 = -{:.0f}·越界[MW] - {:.0f}·放电[MW·min]; '
+               'c_L = 1 - exp(-|(g-Σ已放电)/(5-t_L) - a_L|); '
+               'L 观测 = [u/10, pr/1000, SOC/0.5, P_G(t-1)/5, g/{:.1f}]; '
+               'warmup 下层 = {}'.format(
+                   args.hsrl_viol_coef, args.hsrl_deg_coef, hsrl.HSRL_G_FULL,
+                   '摊还执行器' if str(getattr(args, 'warmup_bess', 'rule')) == 'rule'
+                   else getattr(args, 'warmup_bess')))
     #TODO 是否预训练
     # agent_H.load_weights('output/1_2310S-run18')
     # agent_L.load_weights('output/1_2310S-run18')
 
     if args.mode == 'train':
-        train(args.train_iter_H,
-              agent_H,
-              agent_L,
-              env,
-              env_test,
-              rbb_system,
-              args.output,
-              max_episode_length=args.max_episode_length,
-              debug=args.debug,
-              upload=upload,
-              use_csv=use_csv)
+        if args.hsrl:
+            # ---- HSRL 分支: 20 步测试的风速池 = FFC_speed_noise_1.csv 的"天"列 ----
+            _hsrl_wind_pool = None
+            try:
+                _hsrl_wind_pool = np.asarray(
+                    env_test.wind_noise.iloc[:, 1:].to_numpy(dtype=float))
+            except Exception as _e:
+                prYellow('[HSRL] 风速池不可用 ({}); 20 步测试将被跳过'.format(_e))
+            train_hsrl(args.train_iter_H,
+                       agent_H,
+                       agent_L,
+                       env,
+                       env_test,
+                       rbb_system,
+                       _hsrl_wind_pool,
+                       args.output,
+                       max_episode_length=args.max_episode_length,
+                       debug=args.debug,
+                       upload=upload,
+                       use_csv=use_csv)
+        else:
+            train(args.train_iter_H,
+                  agent_H,
+                  agent_L,
+                  env,
+                  env_test,
+                  rbb_system,
+                  args.output,
+                  max_episode_length=args.max_episode_length,
+                  debug=args.debug,
+                  upload=upload,
+                  use_csv=use_csv)
         if upload:
             writer.close()
         prCyan('[aifflor] 训练结束 —— 物理调用统计:')
