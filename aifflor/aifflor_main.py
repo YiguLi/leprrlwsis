@@ -941,6 +941,17 @@ def train_hsrl(num_iterations_H,
     pen6_coef = float(getattr(args, 'hsrl_pen6_coef', hsrl.HSRL_PEN6_COEF) or hsrl.HSRL_PEN6_COEF)
     viol_coef = float(getattr(args, 'hsrl_viol_coef', hsrl.HSRL_VIOL_COEF) or hsrl.HSRL_VIOL_COEF)
     deg_coef = float(getattr(args, 'hsrl_deg_coef', hsrl.HSRL_DEG_COEF) or hsrl.HSRL_DEG_COEF)
+    # ---- 对偶: 分子来源（q=critic cost 的 Q / ema=实际块成本 EMA）与 twin 聚合（=twin 均值）----
+    dual_src = str(getattr(args, 'hsrl_dual_src', hsrl.HSRL_DUAL_SRC))
+    dual_q_agg = str(getattr(args, 'hsrl_dual_q_agg', hsrl.HSRL_DUAL_Q_AGG))
+    # 块首 L 观测（Q 版对偶在块末要用它评估"当前策略的期望块成本"）
+    norm_observation_L0 = None
+    action_L0 = None
+    # 对偶诊断（块末更新，块内保持 —— 与 g 同惯例）
+    q_rate_H = float('nan')
+    q_rate_L = float('nan')
+    q_info_H = {'q_agg': float('nan')}
+    q_info_L = {'q_agg': float('nan')}
 
     if use_csv:
         df_rows = []
@@ -1062,6 +1073,10 @@ def train_hsrl(num_iterations_H,
             np.round(norm_observation_L, 3), need_L))
         if episode_steps % 5 == 0:            # 下层每个 5-step 块 = 一个 episode
             agent_L.reset(norm_observation_L)
+            # 块首观测 + 块首**实际执行**的动作（Q 版对偶要在块首、用实际动作评估 L 的
+            # cost：块末观测已近 episode 终止，Q_c 会退化成"最后一步的成本"）
+            norm_observation_L0 = np.array(norm_observation_L, dtype=float, copy=True)
+            action_L0 = None
 
         # ================================================================
         # 下层 L 动作: **绝对 pb**，只按物理域 (SOC + 额定功率) 裁剪
@@ -1086,6 +1101,9 @@ def train_hsrl(num_iterations_H,
             penalty_NN_L = viol_coef * viol_L
         prGreen('--L-- cmd = {:.4f} MW | 物理域 [{:.4f}, {:.4f}] | 越界 {:.4f} MW | '
                 'n_rem = {}'.format(pb_cmd_L, pb_lo, pb_hi, viol_L, _n_rem_L))
+        if episode_steps % 5 == 0:
+            # 块首实际执行的动作（Q 版对偶的评估点；见 aifflor_hsrl.q_cost_rate 的说明）
+            action_L0 = np.array(original_action_L, dtype=float, copy=True)
 
         action = np.concatenate((applied_action_H, np.array([pb_cmd_L])))
         # RBB 在 HSRL 下以 fluctuation_limit=inf 构造 ⇒ 退化为"纯物理裁剪 + 记录":
@@ -1165,11 +1183,32 @@ def train_hsrl(num_iterations_H,
             bias_init.on_block_end(step, sum_r1, sum_c1, agent_H)
             agent_H.observe_jump(norm_observation_H, original_action_H,
                                  sum_r1, sum_c1, norm_observation2, done)
+            # ---- 对偶上升（HSRL: 分子默认 = critic cost 的 Q，`--hsrl_dual_src` 可退回 EMA）----
+            #   Q 的取值: **块首**观测 + actor 确定性动作 + twin 均值；折算成"每块成本速率"
+            #   （H 视界=块级无限 ⇒ ×(1−γ)；L 视口=5 步有限 ⇒ ÷K）。EMA 仍维护(日志/curriculum/回退)。
+            if norm_observation_L0 is None:
+                norm_observation_L0 = np.array(norm_observation_L, dtype=float, copy=True)
+            if action_L0 is None:
+                action_L0 = np.array(original_action_L, dtype=float, copy=True)
+            # 用**块首状态 + 块首实际执行的动作**评估（与 critic 训练分布一致；见 q_cost_rate）
+            q_rate_H, q_info_H = hsrl.q_cost_rate(
+                agent_H, norm_observation_H, a_t=original_action_H, horizon='infinite',
+                agg=dual_q_agg, return_info=True)
+            q_rate_L, q_info_L = hsrl.q_cost_rate(
+                agent_L, norm_observation_L0, a_t=action_L0, horizon='finite',
+                agg=dual_q_agg, return_info=True)
             if step > args.warmup:
                 agent_H.update_ema_cost(sum_c1)
-                hc.dual_update(agent_H, d_block_H)
+                hsrl.dual_update_H_hsrl(agent_H, d_block_H, q_rate=q_rate_H,
+                                        src=dual_src, ema=agent_H.ema_cost)
                 agent_L.update_ema_cost(sum_c2)
-                hsrl.dual_update_L_hsrl(agent_L, d_block_L)
+                hsrl.dual_update_L_hsrl(agent_L, d_block_L, q_rate=q_rate_L,
+                                        src=dual_src, ema=agent_L.ema_cost)
+                prCyan('dual[{}]: H rate_Q={:.4f} (ratio={:.3f}, lam1={:.5f}) | '
+                       'L rate_Q={:.4f} (ratio={:.3f}, lam2={:.3f})'.format(
+                           dual_src, q_rate_H, q_rate_H / max(d_block_H, 1e-9),
+                           agent_H.lam, q_rate_L, q_rate_L / max(d_block_L, 1e-9),
+                           agent_L.lam))
             # L 层 curriculum: 连续满足块数 ⇒ 预算减半（阈值 = EMA 时间常数）
             if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
                 consecutive_satisfied_L += 1
@@ -1222,7 +1261,12 @@ def train_hsrl(num_iterations_H,
                     seed=(None if test_seed < 0 else test_seed),
                     phase_mode=phase_mode, phase_table=phase_table,
                     penalty6_coef=pen6_coef,
-                    viol_derate_coef=args.viol_derate)
+                    viol_derate_coef=args.viol_derate,
+                    wind_col=(-1 if int(args.hsrl_test_wind_col) < 0
+                              else int(args.hsrl_test_wind_col)),
+                    wind_start=(-1 if int(args.hsrl_test_wind_start) < 0
+                                else int(args.hsrl_test_wind_start)),
+                    random_wind=(str(args.hsrl_test_wind) == 'random'))
                 test_trigger += 1
                 prCyan('[HSRL test20] #{} step={} 风列={} 起点={} SOC {:.3f}→{:.3f} | '
                        'r1={:.2f} c1={:.2f} r2={:.2f} c2={:.4f} 越界={:.3f} 退化={:.2f} | '
@@ -1302,6 +1346,12 @@ def train_hsrl(num_iterations_H,
                 'r2': r2, 'c2': c2, 'deg_L': deg_step,
                 'gap_pen': gap_pen, 'gap_raw': gap_raw,
                 'lam1': agent_H.lam, 'lam2': agent_L.lam,
+                'lam1_phys': agent_H.lam / max(hc.lam_scale(), 1e-12),
+                'dual_src': dual_src,
+                'q_cost_H': q_info_H['q_agg'], 'rate_c_H': q_rate_H,
+                'ratio_c_H': q_rate_H / max(d_block_H, 1e-9),
+                'q_cost_L': q_info_L['q_agg'], 'rate_c_L': q_rate_L,
+                'ratio_c_L': q_rate_L / max(d_block_L, 1e-9),
                 'd_block_H': d_block_H, 'd_block_L': d_block_L,
                 'ema_c1_H': agent_H.ema_cost, 'ema_cL_L': agent_L.ema_cost,
                 # RBB (= 纯物理裁剪)
@@ -1356,6 +1406,13 @@ def train_hsrl(num_iterations_H,
             writer.add_scalar('wind_speed', env.u, step)
             writer.add_scalar('lam1', agent_H.lam, step)
             writer.add_scalar('lam2', agent_L.lam, step)
+            writer.add_scalar('lam1_phys', agent_H.lam / max(hc.lam_scale(), 1e-12), step)
+            writer.add_scalar('dual/q_cost_H', q_info_H['q_agg'], step)
+            writer.add_scalar('dual/rate_c_H', q_rate_H, step)
+            writer.add_scalar('dual/ratio_c_H', q_rate_H / max(d_block_H, 1e-9), step)
+            writer.add_scalar('dual/q_cost_L', q_info_L['q_agg'], step)
+            writer.add_scalar('dual/rate_c_L', q_rate_L, step)
+            writer.add_scalar('dual/ratio_c_L', q_rate_L / max(d_block_L, 1e-9), step)
             writer.add_scalar('d1', d_block_H, step)
             writer.add_scalar('d2', d_block_L, step)
             if agent_H.ema_cost is not None:
@@ -1746,9 +1803,29 @@ if __name__ == "__main__":
     parser.add_argument('--hsrl_d_block_l', default=hsrl.HSRL_D_BLOCK_L, type=float,
                         help='HSRL: L 层每块 sum_c_L 预算 (默认 %.2f = 5 步平均 0.1 的偏差)'
                              % hsrl.HSRL_D_BLOCK_L)
+    parser.add_argument('--hsrl_dual_src', default=hsrl.HSRL_DUAL_SRC,
+                        choices=['q', 'ema'],
+                        help='HSRL: **对偶的分子** q=critic cost 的 Q（默认；比实际块成本的 EMA '
+                             '平滑得多 ⇒ λ 波动小）；ema=实际块成本 EMA（历史口径，A/B 对照）')
+    parser.add_argument('--hsrl_dual_q_agg', default=hsrl.HSRL_DUAL_Q_AGG,
+                        choices=['mean', 'min', 'max'],
+                        help='HSRL: Q 的 twin 聚合（对偶专用，独立于 --cost_critic_mode）: '
+                             'mean=双臂均值（默认，无偏；critic 回归目标已用 max，对偶再用 max '
+                             '是双重高估 ⇒ 会复现"高估→λ 顶死"）；min=保守；max=与目标一致')
+    parser.add_argument('--hsrl_test_wind', default='fixed', choices=['fixed', 'random'],
+                        help='HSRL: test20 的风速段 fixed=**固定段**（默认 col=%d/start=%d，'
+                             '每次触发同一场景 ⇒ 配对看收敛）; random=每次触发随机取列+起点'
+                             % (hsrl.HSRL_TEST_WIND_COL, hsrl.HSRL_TEST_WIND_START))
+    parser.add_argument('--hsrl_test_wind_col', default=-1, type=int,
+                        help='HSRL: test20 固定风速段的**列**（天），默认 -1 ⇒ 用常量 %d'
+                             % hsrl.HSRL_TEST_WIND_COL)
+    parser.add_argument('--hsrl_test_wind_start', default=-1, type=int,
+                        help='HSRL: test20 固定风速段的**起点**（天内步），默认 -1 ⇒ 用常量 %d'
+                             % hsrl.HSRL_TEST_WIND_START)
     parser.add_argument('--hsrl_test_seed', default=-1, type=int,
-                        help='HSRL: 20 步测试的风速段采样种子 (>0 固定可复现; 默认 -1 = 每次触发'
-                             '重新随机)。采样用**独立** RandomState ⇒ 不吃训练流、不改变训练轨迹')
+                        help='HSRL: 仅 --hsrl_test_wind random 时生效的采样种子 '
+                             '(>0 固定; 默认 -1 = 每次触发重新随机)。采样用**独立** RandomState '
+                             '⇒ 不吃训练流、不改变训练轨迹')
     hwarm.add_warmup_args(parser)
     args = parser.parse_args()
     args = hwarm.resolve_warmup(args)   # WARMUP_AUTO: 正式口径 warmup=bsize*mult, 期零网络更新
@@ -1840,7 +1917,16 @@ if __name__ == "__main__":
         # "纯 SOC + 额定功率裁剪 + 记录"(其 pbphysicsmin/max 与 aifflor_hsrl.feasible_power
         # 逐位同式) ⇒ `pbrule ≡ clip(命令, 物理域)`、`unfeasible_gap ≡ 0`。
         rbb_system.fluctuation_limit = float('inf')
+        # 对偶的模块级默认（Q 分子 / twin 聚合）按命令行覆盖
+        hsrl.HSRL_DUAL_SRC = str(args.hsrl_dual_src)
+        hsrl.HSRL_DUAL_Q_AGG = str(args.hsrl_dual_q_agg)
         prCyan(hsrl.summary())
+        _lo1, _hi1, _init1 = hsrl.lam1_phys_bounds()
+        prCyan('[HSRL] 对偶: 分子 = {} | twin 聚合 = {} | λ1 物理价 ∈ [{:.3f}, {:.3f}] '
+               '元/(MW·step) (actor 空间 ×{:.3g} = [{:.4f}, {:.4f}], 初值 {:.4f})'.format(
+                   'critic cost 的 Q' if args.hsrl_dual_src == 'q' else '实际块成本 EMA',
+                   args.hsrl_dual_q_agg, hsrl.HSRL_LAM1_PHYS_MIN, hsrl.HSRL_LAM1_PHYS_MAX,
+                   hc.lam_scale(), _lo1, _hi1, _init1))
 
     # 上层 H: TD3 + EMA 实际成本对偶 (lam1 ∈ [3, 100], 初始 5.0) —— 与 td3perrb 一致
     nb_states_H = 4 + PHASE_DIM[int(getattr(args, 'phase_feat', 0))]
@@ -1869,6 +1955,10 @@ if __name__ == "__main__":
     else:
         print('[H] 越界乘性惩罚已关闭 (--viol_derate 0): 与历史 run 逐位一致')
     agent_H.lam = _HCFG['lam_init'] if _HCFG else 5.0
+    if args.hsrl:
+        # λ1 的**物理价**区间/初值（见 aifflor_hsrl.HSRL_LAM1_PHYS_* 与 README §3.8）
+        _lo1, _hi1, _init1 = hsrl.lam1_phys_bounds()
+        agent_H.lam_min, agent_H.lam_max, agent_H.lam = _lo1, _hi1, _init1
     # 值函数回归空间归一化 (s = hc.value_scale()): 只作用于 H 层 r1/c1 进入
     # critic 之前; buffer/对偶/日志/CSV 仍是原始口径 (见 hsrl_cost 末尾小节)。
     agent_H.value_scale = hc.value_scale()

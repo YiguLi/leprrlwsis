@@ -67,8 +67,15 @@ HSRL 分支（aifflor 专用）——「块总放电量」语义下的上下层�
    高峰放电 ⇒ g>0；符号与旧的"SOC 目标游走"**相反**，因为放电量与 SOC 变动反号）。
 
 ⑨ **训练中的测试**：`--hsrl` 下不再跑 9-case，改跑 `twenty_step_test_hsrl`
-   （电价恒 300、风速从 `FFC_speed_noise_1.csv` 随机取一列 + 随机起点抽 20 步、
+   （电价恒 300、风速用**固定**的 20 步段 `col=120/start=483`（选段依据见常量区）、
    开局 SOC = 0.25；触发频率与旧 9-case 相同：`step > warmup` 且 `episode_step % 480 == 0`）。
+   **固定段**是为了"配对看收敛"（随机段会把场景差异混进曲线）；要看泛化再开
+   `--hsrl_test_wind random`。
+⑩ **对偶的分子改用 critic cost 的 Q**（`--hsrl_dual_src q`，默认）而不是实际块成本的 EMA：
+   Q 是 bootstrap 出来的**期望**成本 ⇒ λ 的波动显著小于"单块实现值"（实测块 sum_c1
+   中位数 4.5、最大 305，重尾）。取值约定：状态 = **块首**观测、动作 = actor 的**确定性**
+   动作、twin 取**均值**（回归目标已用 max，对偶再用 max 是双重高估）。Q 未建立时回退 EMA。
+   EMA 仍然维护（日志 / curriculum / 回退用）。λ1 的物理价区间见 `HSRL_LAM1_PHYS_*`。
 """
 import numpy as np
 
@@ -122,6 +129,35 @@ HSRL_D_BLOCK_L_MIN = 0.05       # curriculum 地板
 HSRL_L_COST_LIMIT = 0.25        # agent_L.cost_limit（仅 non-EMA 分支用）
 HSRL_L_CURRICULUM_BLOCKS = 50   # 预算减半所需连续满足块数（= EMA 时间常数 1/α）
 
+# ---- 对偶的**分子**：critic cost 的 Q（而非实际块成本的 EMA）----
+#: twin cost critic 的聚合方式（对偶专用，**独立于** critic 回归目标的 `--cost_critic_mode`）：
+#:   critic 的 TD 目标用 **max**（安全侧，避免低估），若对偶也用 max 就是**双重高估**
+#:   ⇒ 正是仓库里记载过的"高估 → λ 顶死传导"老路（见 `td3prrbb_main.py` 的相关注释）；
+#:   对偶要的是**约束价格的期望**，故默认取**双臂均值**（无偏）。
+HSRL_DUAL_Q_AGG = 'mean'        # 'mean' | 'min' | 'max'
+HSRL_DUAL_SRC = 'q'             # 'q'（critic cost 的 Q）| 'ema'（实际块成本 EMA，A/B 对照）
+
+# ---- H 层 λ1：**物理价**区间 [元/(MW·step)]（actor 空间 = 物理价 × hc.lam_scale()=s_c/s_p）----
+#: 现行值 = `hsrl_cost` 的 uniform 口径：下界 = 名义边际收益的 10%（RHO_S=0.10）、上界 5×。
+#: ⚠ **待重标定**（用户口径：越限多出的 1 MW·step 的最大惩罚要 > 980×2 = 1960 元）：
+#: c1 = P_F + 20·(P_F−3)⁺ ⇒ 越限每多 1 MW·step，c1 增 21（含基础项）⇒ 罚增 21·λ1
+#: ⇒ λ1_max > 1960/21 ≈ 93.3（只算越限项 20 则 > 98）⇒ 约 **100**，是现值的 20.7 倍。
+#: 本轮先**只换分子**（Q 替代 EMA），区间不动 ⇒ 重标定单独一轮，避免两件事混在一起。
+HSRL_LAM1_PHYS_MIN = 0.967      # = hc.LAM_MIN（580/60 的 10%）
+HSRL_LAM1_PHYS_MAX = 4.833      # = 5×MIN（现行；重标定目标 ≈ 100）
+HSRL_LAM1_PHYS_INIT = HSRL_LAM1_PHYS_MIN
+HSRL_LAM1_ETA = 0.02            # 乘性对数步长（= hc.ETA_LAM）
+
+
+def lam1_phys_bounds():
+    """`(lam_min, lam_max, lam_init)` 的 **actor 空间**值 = 物理价 × `hc.lam_scale()`。
+
+    必须在**调用时**取 `hc.lam_scale()`：本模块在 `hc.set_cost_scale()` 之前被 import，
+    模块级常量会冻结成默认缩放（1.0）而不是生产值（0.1）。
+    """
+    kl = float(hc.lam_scale())
+    return (HSRL_LAM1_PHYS_MIN * kl, HSRL_LAM1_PHYS_MAX * kl, HSRL_LAM1_PHYS_INIT * kl)
+
 # ---- L 层：观测刻度 ----
 OBS_U_SCALE = 10.0              # 风速 u [m/s] → /10
 OBS_PR_SCALE = 1000.0           # 电价 pr [元/MWh] → /1000
@@ -141,6 +177,15 @@ HSRL_WARMUP_G_SCALE = 2.0 * HSRL_G_FULL     # = 5.0
 HSRL_TEST_STEPS = 20            # 20 步 = 4 个块
 HSRL_TEST_PRICE = 300.0         # 固定电价（低谷）
 HSRL_TEST_SOC0 = 0.25           # 开局 SOC [MWh]（= 容量中点）
+#: **固定风速段**（`wind_pool = env_test.wind_noise.iloc[:, 1:]`，行=天内步、列=天）：
+#: 选段依据（`agentutil` 扫描 194 列 × 1421 起点）—— 均值 8~11 m/s 的窗口中
+#: **逐步爬坡 Σ|Δu| 位于前 5%**：u 均值 10.35 m/s（全池均值 10.83，代表性好）、
+#: min 7.70 / max 12.86、Σ|Δu| = 29.0；按平坦地形 5 台机 dP/du ≈ 1.07 MW/(m/s) 估算，
+#: 单步 |ΔP| ≈ 2 MW **< 3 MW 限幅** ⇒ 有可观的波动成本可优化、但基本不出现越限
+#: （越限部分 BESS 只有 0.5 MW，本来就大多不可避 ⇒ 测不出策略差异）。
+#: 固定段的意义：**每次触发都是同一条场景** ⇒ test20 曲线是"配对"的，可直接看收敛。
+HSRL_TEST_WIND_COL = 120        # 列（天）
+HSRL_TEST_WIND_START = 483      # 起点（天内第几步）
 
 
 # =============================================================================
@@ -418,18 +463,33 @@ def random_g(rng=None, full=None):
     return float(r.uniform(-f, f))
 
 
-def dual_update_L_hsrl(agent, d_block):
-    """HSRL 版 L 对偶上升（与 `hst.dual_update_L` 同形，仅区间/地板不同）：
+def dual_update_L_hsrl(agent, d_block, q_rate=None, src=None, ema=None,
+                       lam_min=HSRL_L_LAM_MIN, lam_max=HSRL_L_LAM_MAX,
+                       eta=HSRL_L_EMA_LAM_LR):
+    """HSRL 版 L 对偶上升（乘性，与 `hst.dual_update_L` 同形）：
 
-        λ2 ← clip( λ2 · exp(η2·(EMA_c_L/d_block − 1)) , 2 , 50 )
+        rate ← q_rate（critic cost 的 Q 折成的"每块成本速率"）或 ema（实际块成本 EMA）
+        λ2   ← clip( λ2 · exp(η2·(rate/d_block − 1)) , lam_min , lam_max )
 
-    调用方需先 `agent.update_ema_cost(sum_c_L)`。不动点 = 预算刚好满足；比值 < 1 时回落。
+    **分子默认改用 critic cost 的 Q**（`q_rate`，见 `q_cost_rate`）而不是实际块成本的 EMA：
+    Q 是 bootstrap 出来的**期望**成本，比"单块的实现值"平滑得多 ⇒ λ 的**波动显著变小**
+    （实际块成本重尾：实测策略期块 sum_c1 中位数 4.5 而最大 305）。
+    代价是引入 critic 的**偏差**（尤其 twin 取 max 时高估）⇒ 故对偶默认用双臂**均值**
+    （`HSRL_DUAL_Q_AGG`），并在 Q 尚未建立（None）时**回退** EMA，保证不停摆。
+
+    `src='ema'` 或 `q_rate=None` ⇒ 退回原口径（A/B 对照臂，`--hsrl_dual_src ema`）。
+    调用方需先 `agent.update_ema_cost(sum_c)`（EMA 仍然维护：日志 / curriculum / 回退都用它）。
     """
-    if agent is None or getattr(agent, 'ema_cost', None) is None:
+    _src = HSRL_DUAL_SRC if src is None else str(src)
+    if _src == 'q' and q_rate is not None:
+        rate = float(q_rate)
+    else:
+        rate = None if ema is None else float(ema)
+    if rate is None or agent is None:
         return None
-    ratio = float(agent.ema_cost) / max(float(d_block), 1e-9)
-    lam = float(agent.lam) * float(np.exp(HSRL_L_EMA_LAM_LR * (ratio - 1.0)))
-    agent.lam = float(np.clip(lam, HSRL_L_LAM_MIN, HSRL_L_LAM_MAX))
+    ratio = rate / max(float(d_block), 1e-9)
+    lam = float(agent.lam) * float(np.exp(float(eta) * (ratio - 1.0)))
+    agent.lam = float(np.clip(lam, float(lam_min), float(lam_max)))
     return agent.lam
 
 
@@ -440,9 +500,109 @@ def summary():
             'L 动作 = 绝对 pb, 仅物理域裁剪 | r2 = −{:.0f}·越界 − {:.0f}·放电 | '
             'c_L = 1 − exp(−|(g−Σ)/n_rem − a_L|) | λ2 ∈ [{:.0f}, {:.0f}] 初值 {:.0f} | '
             'd_block_L = {} | L 观测(6 维) = [u/10, pr/1000, E/0.5, P_G/5, g/{:.1f}, '
-            'need/{:.1f}]'.format(
+            'need/{:.1f}] | 对偶分子 = {} (twin 聚合 = {})'.format(
                 HSRL_VIOL_COEF, HSRL_DEG_COEF, HSRL_L_LAM_MIN, HSRL_L_LAM_MAX,
-                HSRL_L_LAM_INIT, HSRL_D_BLOCK_L, HSRL_G_FULL, OBS_NEED_SCALE))
+                HSRL_L_LAM_INIT, HSRL_D_BLOCK_L, HSRL_G_FULL, OBS_NEED_SCALE,
+                ('critic cost 的 Q' if HSRL_DUAL_SRC == 'q' else '实际块成本 EMA'),
+                HSRL_DUAL_Q_AGG))
+
+
+# =============================================================================
+# 4a. 对偶的分子: critic cost 的 Q → "每块成本速率"
+# =============================================================================
+def _cost_scale_of(agent):
+    """agent 的 cost 通道回归缩放 s_c（与 `update_policy` 的取值口径一致）。"""
+    sc = getattr(agent, 'cost_scale', None)
+    if sc:
+        return float(sc)
+    vs = getattr(agent, 'value_scale', 1.0)
+    return float(vs) if vs else 1.0
+
+
+def cost_rate_from_q(q_raw, gamma, block=HSRL_BLOCK, horizon='infinite'):
+    """把 critic cost 的**原始口径 Q** 折算成"每块成本速率"[与 c 同口径]。
+
+    Q 是**折扣回报**，与"每块预算 d_block"不同量纲 ⇒ 必须按层的视界折算：
+
+    * `horizon='infinite'`（H 层：γ 按**块**、视界 1/(1−γ)=20 块 ≪ 一天 288 块）：
+          `rate = (1 − γ)·Q`          （几何级数 ⇒ 稳态每块速率）
+    * `horizon='finite'`（L 层：γ 按**步**、episode = δ 步且块末 `done_L=True`）：
+          `Q = Σ_{k<δ} γ^k·c_step`，常值 c_step 时 `Q = c_step·(1−γ^δ)/(1−γ)`
+          ⇒ `rate = Q/K`，`K = (1−γ^δ)/(δ(1−γ))`（把"每步成本"折成"每块成本"）
+    """
+    g = float(gamma)
+    if horizon == 'infinite':
+        return (1.0 - g) * float(q_raw)
+    n = int(block)
+    k = (1.0 - g ** n) / (n * max(1e-9, 1.0 - g))
+    return float(q_raw) / max(1e-9, k)
+
+
+def q_cost_rate(agent, s_t, a_t=None, horizon='infinite', agg=None, gamma=None,
+                block=HSRL_BLOCK, cost_scale=None, return_info=False):
+    """用 **critic cost 的 Q** 估计"每块成本速率"（对偶的分子，替代实际 EMA）。
+
+    取值约定（写死，便于 A/B 与审计）：
+      * **状态** = 块首观测 `s_t`（H 是块级决策态；L 用**块的第一步**的观测 —— 块末观测
+        已接近 episode 终止，`Q_c` 会退化成"最后一步的成本"，严重低估整块成本）；
+      * **动作** = 缺省 `actor(s_t)`（确定性）；**调用方应传本块第一步"实际执行"的动作**
+        `a_t` —— critic 的 TD 目标是**带探索噪声的实际 cost**，用无噪动作评估会**系统性低估**
+        （`c_L = 1−exp(−|·|)`、`c1 = P_F + 20(P_F−3)⁺` 都是凸的 ⇒ 噪声下 E[c] > c(E)）。
+        实测：L 层 rate 0.317（无噪）vs 1.79（实际 EMA，差 5.6×），改用实际动作后收敛到同量级。
+        用 Q 而不是实际值的好处仍在：噪声的**单次实现**被 critic 的**期望**取代。
+      * **critic** = 在线 `critic_c / critic_c2` 的 twin 聚合（默认 `mean`，见
+        `HSRL_DUAL_Q_AGG` 的说明：回归目标已用 max，对偶再用 max 是双重高估）；
+      * **口径还原**：critic 吃的是 `c/s_c` ⇒ 原始口径 `Q = q·s_c`（`_cost_scale_of`）。
+    """
+    import torch
+    a_np = np.asarray(s_t, dtype=np.float32).reshape(1, -1)
+    dev = getattr(agent, 'device', None)
+    s = torch.as_tensor(a_np) if dev is None else torch.as_tensor(a_np, device=dev)
+    a_given = None
+    if a_t is not None:
+        a_np2 = np.asarray(a_t, dtype=np.float32).reshape(1, -1)
+        a_given = (torch.as_tensor(a_np2) if dev is None
+                   else torch.as_tensor(a_np2, device=dev))
+    with torch.no_grad():
+        act = agent.actor(s) if a_given is None else a_given
+        q1 = float(agent.critic_c([s, act]).reshape(-1)[0])
+        q2 = float(agent.critic_c2([s, act]).reshape(-1)[0])
+    _agg = HSRL_DUAL_Q_AGG if agg is None else str(agg)
+    q_agg = {'mean': 0.5 * (q1 + q2), 'min': min(q1, q2), 'max': max(q1, q2)}[_agg]
+    sc = _cost_scale_of(agent) if cost_scale is None else float(cost_scale)
+    q_raw = q_agg * sc
+    g = float(agent.discount if gamma is None else gamma)
+    rate = cost_rate_from_q(q_raw, g, block=block, horizon=horizon)
+    if return_info:
+        return rate, dict(q1=q1, q2=q2, q_agg=q_agg, agg=_agg, s_c=sc, q_raw=q_raw,
+                          gamma=g, horizon=horizon, rate=rate,
+                          action_given=bool(a_given is not None))
+    return rate
+
+
+def dual_update_H_hsrl(agent, d_block, q_rate=None, src=None, ema=None,
+                       lam_min=None, lam_max=None, eta=None):
+    """HSRL 版 H 对偶上升（乘性，分子默认 = critic cost 的 Q）—— 与 L 版同形。
+
+    ⚠ λ1 的**区间**必须与物理价口径一致（`λ_phys = λ_actor/lam_scale = λ_actor·s_p/s_c`）：
+    区间/初值由 `HSRL_LAM1_PHYS_*` 给出，见那里的推导（用户口径：越限多出的 1 MW 的
+    最大惩罚要 > 980×2 元）。
+    """
+    _src = HSRL_DUAL_SRC if src is None else str(src)
+    if _src == 'q' and q_rate is not None:
+        rate = float(q_rate)
+    else:
+        rate = None if ema is None else float(ema)
+    if rate is None or agent is None:
+        return None
+    _lo, _hi, _ = lam1_phys_bounds()
+    lo = _lo if lam_min is None else float(lam_min)
+    hi = _hi if lam_max is None else float(lam_max)
+    _eta = HSRL_LAM1_ETA if eta is None else float(eta)
+    ratio = rate / max(float(d_block), 1e-9)
+    lam = float(agent.lam) * float(np.exp(_eta * (ratio - 1.0)))
+    agent.lam = float(np.clip(lam, lo, hi))
+    return agent.lam
 
 
 # =============================================================================
@@ -502,15 +662,19 @@ def twenty_step_test_hsrl(agent_H, agent_L, env_test, rbb_system, wind_pool,
                           seed=None, phase_mode=0, phase_table=None,
                           n_steps=HSRL_TEST_STEPS, price=HSRL_TEST_PRICE,
                           soc_start=HSRL_TEST_SOC0, penalty6_coef=None,
-                          viol_derate_coef=None):
+                          viol_derate_coef=None,
+                          wind_col=None, wind_start=None, random_wind=False):
     """HSRL 分支的 20 步测试（替换旧 9-case）。
 
-    协议（用户口径）：电价恒 `price`(=300)；风速 = 从 `wind_pool` 里**随机取一列（某天）
-    + 随机起点**截取 `n_steps`(=20) 步；开局 SOC = `soc_start`(=0.25 MWh)。
-    `wind_pool` 由 main 传入（`env_test.wind_noise.iloc[:, 1:].to_numpy()`，即只含"天"列）。
+    协议（用户口径）：电价恒 `price`(=300)；风速 = **固定的 20 步段**
+    （默认 `HSRL_TEST_WIND_COL=120 / HSRL_TEST_WIND_START=483`，见那里选段依据）；
+    开局 SOC = `soc_start`(=0.25 MWh)。`wind_pool` 由 main 传入
+    （`env_test.wind_noise.iloc[:, 1:].to_numpy()`，即只含"天"列）。
 
-    `seed` 为 None / 负数 ⇒ 每次触发**重新随机**（默认；用一个**独立** RandomState，
-    不吃训练流的随机数，也不改变训练轨迹）；给正数则固定可复现。
+    **为什么固定段**：每次触发都用**同一条场景** ⇒ test20 曲线是"配对"的，可直接看收敛
+    （随机段会把场景间差异混进曲线，看不出策略是否变好）。要看泛化再开 `random_wind=True`：
+    这时用**独立** `RandomState` 抽（列+起点），不吃训练流的随机数、也不改变训练轨迹；
+    `seed>0` 则每次都抽到同一段（等价于固定，但由种子决定）。
 
     r1 的记账与**训练同口径**：`r1 = pr·P_G·dt − (pen5 + pen6)`（块级动作越界罚按**步**摊入，
     与 `train_hsrl`/旧 `train()` 的写法一致 ⇒ 一个块内被计 5 次），并同样支持
@@ -529,9 +693,15 @@ def twenty_step_test_hsrl(agent_H, agent_L, env_test, rbb_system, wind_pool,
     if n_row < n_steps:
         raise ValueError('twenty_step_test_hsrl: wind_pool 只有 {} 行, 不足 {} 步'
                          .format(n_row, n_steps))
-    rs = np.random.RandomState(None if (seed is None or int(seed) < 0) else int(seed))
-    col = int(rs.randint(0, n_col))
-    start = int(rs.randint(0, n_row - n_steps + 1))
+    if random_wind:
+        rs = np.random.RandomState(None if (seed is None or int(seed) < 0) else int(seed))
+        col = int(rs.randint(0, n_col))
+        start = int(rs.randint(0, n_row - n_steps + 1))
+    else:
+        col = int(HSRL_TEST_WIND_COL if wind_col is None else wind_col)
+        start = int(HSRL_TEST_WIND_START if wind_start is None else wind_start)
+    col = int(np.clip(col, 0, n_col - 1))
+    start = int(np.clip(start, 0, n_row - n_steps))
     wind_seq = pool[start:start + n_steps, col].copy()
     price_seq = np.full(n_steps, float(price), dtype=float)
 

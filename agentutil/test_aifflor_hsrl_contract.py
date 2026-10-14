@@ -157,6 +157,7 @@ class _StubAmortizedL:
 def main():
     import aifflor.aifflor_hsrl as H
     import aifflor.aifflor_myfunc as AMF
+    import hsrl_cost as hc
     from rbb.rbb_rule_bess import RuleBasedBESS
 
     P_RATED, ETA_C, ETA_D, DT, BLOCK = H.P_RATED, H.ETA_C, H.ETA_D, H.DT, H.HSRL_BLOCK
@@ -383,7 +384,7 @@ def main():
 
     # =====================================================================
     print('\n' + '=' * 90)
-    print('H. λ2 对偶 + warmup 摊还执行器自检')
+    print('H. λ2/λ1 对偶：Q 版与 EMA 版、区间/地板/乘性步长、warmup 摊还执行器自检')
     print('=' * 90)
     # =====================================================================
 
@@ -391,22 +392,107 @@ def main():
         def __init__(self, ema, lam):
             self.ema_cost = ema
             self.lam = lam
+    # ---- Q 分子（默认）：乘性、单调、封顶/触底 ----
     a = _A(1.0, 10.0)
-    H.dual_update_L_hsrl(a, 0.5)                       # ratio = 2 ⇒ λ 上升
-    check(a.lam > 10.0, 'EMA/d_block = 2 ⇒ λ2 上升（乘性对数步长）')
-    a = _A(0.1, 10.0)
-    H.dual_update_L_hsrl(a, 0.5)                       # ratio = 0.2 ⇒ λ 下降
-    check(a.lam < 10.0, 'EMA/d_block = 0.2 ⇒ λ2 回落')
-    a = _A(1e9, 10.0)
-    H.dual_update_L_hsrl(a, 0.5)
+    H.dual_update_L_hsrl(a, 0.5, q_rate=1.0)            # ratio = 2 ⇒ λ 上升
+    check(a.lam > 10.0, 'Q 分子: rate/d_block = 2 ⇒ λ2 上升（乘性对数步长）')
+    a = _A(1.0, 10.0)
+    H.dual_update_L_hsrl(a, 0.5, q_rate=0.1)            # ratio = 0.2 ⇒ λ 回落
+    check(a.lam < 10.0, 'Q 分子: rate/d_block = 0.2 ⇒ λ2 回落')
+    a = _A(1.0, 10.0)
+    H.dual_update_L_hsrl(a, 0.5, q_rate=0.5)            # ratio = 1 ⇒ 不动点
+    check(abs(a.lam - 10.0) < 1e-12, 'Q 分子: rate == d_block ⇒ λ2 不动（不动点）')
+    a = _A(1.0, 10.0)
+    H.dual_update_L_hsrl(a, 0.5, q_rate=1e9)
     check(a.lam == H.HSRL_L_LAM_MAX, 'λ2 封顶 = %.0f' % H.HSRL_L_LAM_MAX)
-    a = _A(0.0, H.HSRL_L_LAM_MIN)
-    H.dual_update_L_hsrl(a, 0.5)
+    a = _A(1.0, H.HSRL_L_LAM_MIN)
+    H.dual_update_L_hsrl(a, 0.5, q_rate=0.0)
     check(a.lam == H.HSRL_L_LAM_MIN,
-          'λ2 触底 = %.0f（EMA=0 时再压也不破下界）' % H.HSRL_L_LAM_MIN)
-    a = _A(0.5, 10.0)
-    H.dual_update_L_hsrl(a, 0.5)                       # ratio = 1 ⇒ 不动点
-    check(abs(a.lam - 10.0) < 1e-12, 'EMA == d_block ⇒ λ2 不动（不动点）')
+          'λ2 触底 = %.0f（rate=0 时再压也不破下界）' % H.HSRL_L_LAM_MIN)
+    # ---- EMA 分子（A/B 对照臂）与回退 ----
+    a = _A(1.0, 10.0)
+    H.dual_update_L_hsrl(a, 0.5, src='ema', ema=1.0)
+    check(a.lam > 10.0, 'EMA 分子（--hsrl_dual_src ema）仍可用（A/B 对照）')
+    a = _A(1.0, 10.0)
+    H.dual_update_L_hsrl(a, 0.5, q_rate=None, ema=1.0)
+    check(a.lam > 10.0, 'q_rate 缺失（critic 未建立）⇒ **回退 EMA**，对偶不停摆')
+    a = _A(None, 10.0)
+    check(H.dual_update_L_hsrl(a, 0.5, q_rate=None, ema=None) is None and a.lam == 10.0,
+          'Q 与 EMA 都缺 ⇒ 不动 λ（返回 None）')
+
+    # ---- Q → "每块成本速率" 的折算（duck-typed agent，纯算术）----
+    import torch as _torch
+
+    class _StubQ:
+        def __init__(self, q1, q2, gamma=0.95, sc=100.0, vs=1000.0):
+            self.device = 'cpu'
+            self.discount = float(gamma)
+            self.cost_scale = float(sc)
+            self.value_scale = float(vs)
+            self.seen = []
+
+            class _Act:
+                def __call__(self, s):
+                    return _torch.zeros(s.shape[0], 1)
+            self.actor = _Act()
+
+            def _q(v):
+                def f(sa):
+                    self.seen.append(np.asarray(sa[1].detach().cpu()).reshape(-1).copy())
+                    return _torch.full((1, 1), float(v))
+                return f
+            self.critic_c = _q(q1)
+            self.critic_c2 = _q(q2)
+
+    _obs5 = H.build_L_obs_hsrl(10.0, 300.0, 0.25, 1.5, 0.1, 0.02)
+    _stubq = _StubQ(q1=2.0, q2=4.0, gamma=0.95, sc=100.0)
+    _rate, _info = H.q_cost_rate(_stubq, _obs5, horizon='infinite', agg='mean',
+                                return_info=True)
+    check(abs(_rate - (1.0 - 0.95) * 3.0 * 100.0) < 1e-9,
+          'H 视界: rate = (1−γ)·mean(q1,q2)·s_c = %.3f（γ=0.95, q̄=3, s_c=100）' % _rate)
+    check(abs(_info['q_raw'] - 300.0) < 1e-9,
+          '口径还原: 原始 Q = q̄·s_c = %.1f（critic 吃的是 c/s_c）' % _info['q_raw'])
+    _rmin, _ = H.q_cost_rate(_stubq, _obs5, horizon='infinite', agg='min', return_info=True)
+    _rmax, _ = H.q_cost_rate(_stubq, _obs5, horizon='infinite', agg='max', return_info=True)
+    check(_rmin < _rate < _rmax,
+          'twin 聚合三档有序: min %.1f < mean %.1f < max %.1f' % (_rmin, _rate, _rmax))
+    _K = (1.0 - 0.98 ** 5) / (5 * (1.0 - 0.98))
+    _stubq98 = _StubQ(q1=0.5, q2=0.5, gamma=0.98, sc=1.0)
+    _rateL, _ = H.q_cost_rate(_stubq98, _obs5, horizon='finite', agg='mean',
+                              return_info=True)
+    check(abs(_rateL - 0.5 / _K) < 1e-9,
+          'L 视界（5 步有限）: rate = Q/K = %.6f, K = %.4f' % (_rateL, _K))
+    check(abs(H.cost_rate_from_q(300.0, 0.95, horizon='infinite') - 15.0) < 1e-9,
+          '折算固定点: Q = d/(1−γ) ⇒ rate = d（Q=300, γ=0.95 ⇒ 15 = d_block_H）')
+    # 传了 a_t ⇒ 必须用**实际执行的动作**评估（否则与 critic 训练分布不一致，系统性低估）
+    _r_given, _i_given = H.q_cost_rate(_stubq, _obs5, a_t=np.array([0.77]),
+                                       horizon='infinite', agg='mean', return_info=True)
+    check(_i_given['action_given'] and abs(_stubq.seen[-1][0] - 0.77) < 1e-6,
+          'a_t 给了 ⇒ critic 用实际执行的动作评估（实测收到 %.3f）' % _stubq.seen[-1][0])
+    _stubq.seen = []
+    H.q_cost_rate(_stubq, _obs5, horizon='infinite', agg='mean')
+    check(abs(_stubq.seen[-1][0]) < 1e-9,
+          '未给 a_t ⇒ 退回 actor 的确定性动作（本桩输出 0）')
+
+    # ---- λ1：物理价区间 ↔ actor 空间、单调与封顶 ----
+    _kl = float(hc.lam_scale())
+    _lo1, _hi1, _init1 = H.lam1_phys_bounds()
+    check(abs(_init1 - H.HSRL_LAM1_PHYS_INIT * _kl) < 1e-15
+          and abs(_hi1 - H.HSRL_LAM1_PHYS_MAX * _kl) < 1e-15,
+          'λ1 区间（actor）= 物理价 × lam_scale(%.3g) = [%.4f, %.4f]' % (_kl, _lo1, _hi1))
+    a = _A(0.0, _init1)
+    H.dual_update_H_hsrl(a, 15.0, q_rate=30.0)          # ratio = 2
+    check(a.lam > _init1 and a.lam <= _hi1, 'H 对偶（Q 分子）: ratio=2 ⇒ λ1 上升且不破上界')
+    a = _A(0.0, _init1)
+    H.dual_update_H_hsrl(a, 15.0, q_rate=15.0)
+    check(abs(a.lam - _init1) < 1e-15, 'H 对偶: ratio == 1 ⇒ λ1 不动（不动点）')
+    a = _A(0.0, _init1)
+    H.dual_update_H_hsrl(a, 15.0, q_rate=1e9)
+    check(a.lam == _hi1, 'λ1 封顶 = %.4f（actor 空间）' % _hi1)
+    a = _A(0.0, _init1)
+    H.dual_update_H_hsrl(a, 15.0, q_rate=None, src='ema', ema=30.0)
+    check(a.lam > _init1, 'H 对偶的 EMA 臂（A/B）仍可用')
+
     chk = H.check_amortized_baseline()
     check(chk['fail'] == 0 and chk['max_c_unclipped'] == 0.0,
           '摊还执行器自检: %d 例全过（未被裁剪时 c_L ≡ 0；被裁剪 %d 例）'
@@ -437,19 +523,24 @@ def main():
 
     # =====================================================================
     print('\n' + '=' * 90)
-    print('J. 20 步测试协议端到端（桩 env + 桩 agent）')
+    print('J. 20 步测试协议端到端（桩 env + 桩 agent；固定风速段）')
     print('=' * 90)
     # =====================================================================
-    pool = np.zeros((100, 2))
-    pool[:, 0] = 9.0
-    pool[:, 1] = 11.0
+    # 风速池做够宽，让默认固定段 (col=HSRL_TEST_WIND_COL, start=HSRL_TEST_WIND_START)
+    # 落在池内、不被 clip；并把该段填成 README 记的那 20 个真实风速值 ⇒ 可逐位核对选段。
+    _SEG = np.array([10.37, 10.35, 12.35, 10.53, 11.23, 9.95, 11.76, 10.31, 12.86,
+                     10.29, 12.03, 8.71, 9.11, 9.68, 9.88, 10.74, 8.74, 7.70, 10.90,
+                     9.43])
+    pool = np.full((1440, 130), 10.0)
+    pool[H.HSRL_TEST_WIND_START:H.HSRL_TEST_WIND_START + 20,
+         H.HSRL_TEST_WIND_COL] = _SEG
     G_TGT = 1.5
 
-    def _run(stub_L, stub_H=None):
+    def _run(stub_L, stub_H=None, **kw):
         env = _StubEnv(E0=E_MID)
         aH, aL = (stub_H or _StubH(G_TGT)), stub_L
         per_blk, overall, meta = H.twenty_step_test_hsrl(
-            aH, aL, env, rbb, pool, seed=1234, phase_mode=0)
+            aH, aL, env, rbb, pool, phase_mode=0, **kw)
         return env, per_blk, overall, meta
 
     stub_const = _StubL(pb=-0.1)
@@ -460,9 +551,22 @@ def main():
           '电价恒 300（20 步都是同一个价）')
     check(abs(meta['soc_start'] - 0.25) < 1e-12 and abs(per_blk[0]['soc_start'] - 0.25) < 1e-12,
           '开局 SOC = 0.25 MWh（覆写了 env.ScenarioReset 的硬编码 5.0）')
-    check(0 <= meta['wind_col'] < pool.shape[1] and 0 <= meta['wind_start'] <= 80
-          and len(meta['wind_seq']) == 20,
-          '风速段: 随机列 %d + 起点 %d 取 20 步' % (meta['wind_col'], meta['wind_start']))
+    # ---- 固定风速段（不再随机起步）----
+    check((meta['wind_col'], meta['wind_start'])
+          == (H.HSRL_TEST_WIND_COL, H.HSRL_TEST_WIND_START),
+          '默认用**固定**段 col=%d / start=%d' % (H.HSRL_TEST_WIND_COL, H.HSRL_TEST_WIND_START))
+    check(np.allclose(meta['wind_seq'], _SEG),
+          '固定段的风速序列与 README 记录的 20 个值逐位一致')
+    _m2 = _run(_StubL(pb=-0.1), seed=777)[3]
+    _m3 = _run(_StubL(pb=-0.1), random_wind=True, seed=1)[3]
+    _m4 = _run(_StubL(pb=-0.1), random_wind=True, seed=2)[3]
+    _m5 = _run(_StubL(pb=-0.1), random_wind=True, seed=1)[3]
+    check((_m2['wind_col'], _m2['wind_start'])
+          == (H.HSRL_TEST_WIND_COL, H.HSRL_TEST_WIND_START),
+          '固定段不受 --hsrl_test_seed 影响（随机起步已关闭）')
+    check((_m3['wind_col'], _m3['wind_start']) != (_m4['wind_col'], _m4['wind_start'])
+          and (_m3['wind_col'], _m3['wind_start']) == (_m5['wind_col'], _m5['wind_start']),
+          '--hsrl_test_wind random: 不同 seed 抽不同段、同 seed 可复现（对照臂仍可用）')
     # 手算 c_L（每块 5 步: Σ_prev = 0.1k, n_rem = 5−k, a_L = 0.1）
     c_expected = sum(1.0 - np.exp(-abs((G_TGT - 0.1 * k) / (5 - k) - 0.1)) for k in range(5))
     check(abs(per_blk[0]['c2'] - c_expected) < 1e-12,
