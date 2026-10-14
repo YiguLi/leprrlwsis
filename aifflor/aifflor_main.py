@@ -1221,7 +1221,8 @@ def train_hsrl(num_iterations_H,
                     agent_H, agent_L, env_test, rbb_system, wind_pool,
                     seed=(None if test_seed < 0 else test_seed),
                     phase_mode=phase_mode, phase_table=phase_table,
-                    penalty6_coef=pen6_coef)
+                    penalty6_coef=pen6_coef,
+                    viol_derate_coef=args.viol_derate)
                 test_trigger += 1
                 prCyan('[HSRL test20] #{} step={} 风列={} 起点={} SOC {:.3f}→{:.3f} | '
                        'r1={:.2f} c1={:.2f} r2={:.2f} c2={:.4f} 越界={:.3f} 退化={:.2f} | '
@@ -1239,16 +1240,16 @@ def train_hsrl(num_iterations_H,
                     for _i, m in enumerate(per_blk):
                         df_test_rows.append(dict(
                             _common, block=_i, **{k: m[k] for k in (
-                                'r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'pen6', 'cvm',
-                                'pf_viol', 'profit', 'profit_econ', 'soc_start', 'soc_end',
-                                'dsoc', 'g', 'g_raw', 'sum_disch', 'cL_max', 'dev_mean',
-                                'need_mean', 'pb_sum')}))
+                                'r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'pen5', 'pen6',
+                                'cvm', 'pf_viol', 'profit', 'profit_econ', 'soc_start',
+                                'soc_end', 'dsoc', 'g', 'g_raw', 'sum_disch', 'cL_max',
+                                'dev_mean', 'need_mean', 'pb_sum')}))
                     df_test_rows.append(dict(
                         _common, block='OVERALL', **{k: overall[k] for k in (
-                            'r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'pen6', 'cvm',
-                            'pf_viol', 'profit', 'profit_econ', 'soc_start', 'soc_end',
-                            'dsoc', 'g', 'g_raw', 'sum_disch', 'cL_max', 'dev_mean',
-                            'need_mean')}))
+                            'r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'pen5', 'pen6',
+                            'cvm', 'pf_viol', 'profit', 'profit_econ', 'soc_start',
+                            'soc_end', 'dsoc', 'g', 'g_raw', 'sum_disch', 'cL_max',
+                            'dev_mean', 'need_mean')}))
                     df_test_written = flush_csv_append_batch(
                         '{}/df_test20_hsrl.csv'.format(output),
                         df_test_rows, df_test_written)

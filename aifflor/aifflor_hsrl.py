@@ -79,14 +79,14 @@ try:                                        # 主路径: aifflor 作为包
         get_wind_level, get_price_level, Cal_soc_deviation,
         DEG_COST_DISCHARGE, DEG_COST_CHARGE,
         PENALTY_NN_H_COEF, PENALTY_NN_L_COEF, W_GAP, C1_RISK_COEF,
-        Normalize_H, rep_minute_for_price_level,
+        Normalize_H, rep_minute_for_price_level, violation_derate,
     )
 except ImportError:                         # 兼容: 直接把 aifflor/ 放进 sys.path
     from aifflor_myfunc import (            # type: ignore
         get_wind_level, get_price_level, Cal_soc_deviation,
         DEG_COST_DISCHARGE, DEG_COST_CHARGE,
         PENALTY_NN_H_COEF, PENALTY_NN_L_COEF, W_GAP, C1_RISK_COEF,
-        Normalize_H, rep_minute_for_price_level,
+        Normalize_H, rep_minute_for_price_level, violation_derate,
     )
 
 
@@ -501,7 +501,8 @@ def check_amortized_baseline(n_cases=400, seed=12345):
 def twenty_step_test_hsrl(agent_H, agent_L, env_test, rbb_system, wind_pool,
                           seed=None, phase_mode=0, phase_table=None,
                           n_steps=HSRL_TEST_STEPS, price=HSRL_TEST_PRICE,
-                          soc_start=HSRL_TEST_SOC0, penalty6_coef=None):
+                          soc_start=HSRL_TEST_SOC0, penalty6_coef=None,
+                          viol_derate_coef=None):
     """HSRL 分支的 20 步测试（替换旧 9-case）。
 
     协议（用户口径）：电价恒 `price`(=300)；风速 = 从 `wind_pool` 里**随机取一列（某天）
@@ -510,6 +511,10 @@ def twenty_step_test_hsrl(agent_H, agent_L, env_test, rbb_system, wind_pool,
 
     `seed` 为 None / 负数 ⇒ 每次触发**重新随机**（默认；用一个**独立** RandomState，
     不吃训练流的随机数，也不改变训练轨迹）；给正数则固定可复现。
+
+    r1 的记账与**训练同口径**：`r1 = pr·P_G·dt − (pen5 + pen6)`（块级动作越界罚按**步**摊入，
+    与 `train_hsrl`/旧 `train()` 的写法一致 ⇒ 一个块内被计 5 次），并同样支持
+    `--viol_derate`（默认 0 = 关闭）。
 
     Returns
     -------
@@ -542,7 +547,8 @@ def twenty_step_test_hsrl(agent_H, agent_L, env_test, rbb_system, wind_pool,
 
     n_blk = int(n_steps // 5)
     per_blk = [{'r1': 0.0, 'c1': 0.0, 'r2': 0.0, 'c2': 0.0, 'deg': 0.0,
-                'viol': 0.0, 'pen6': 0.0, 'cvm': 0, 'pf_viol': 0, 'profit': 0.0,
+                'viol': 0.0, 'pen5': 0.0, 'pen6': 0.0, 'cvm': 0, 'pf_viol': 0,
+                'profit': 0.0,
                 'soc_start': float(soc_start), 'soc_end': float(soc_start),
                 'g_raw': 0.0, 'g': 0.0, 'sum_disch': 0.0, 'pb_sum': 0.0,
                 'cL_max': 0.0, 'dev_abs_sum': 0.0, 'need_sum': 0.0, 'n_step': 0}
@@ -557,8 +563,9 @@ def twenty_step_test_hsrl(agent_H, agent_L, env_test, rbb_system, wind_pool,
         bi = step // 5
         if step % 5 == 0:
             raw_H = np.asarray(agent_H.select_action(norm_obs), dtype=float).reshape(-1)
-            action_H, _pen5, pen6 = check_action_H_hsrl(raw_H, float(obs[2]),
-                                                        pen6_coef=penalty6_coef)
+            action_H, pen5, pen6 = check_action_H_hsrl(raw_H, float(obs[2]),
+                                                       pen6_coef=penalty6_coef)
+            _derate = violation_derate(raw_H, viol_derate_coef)   # 默认 0 ⇒ 恒 1.0
             g_raw = float(raw_H[5])
             g = float(action_H[5])
             sum_disch = 0.0
@@ -589,8 +596,8 @@ def twenty_step_test_hsrl(agent_H, agent_L, env_test, rbb_system, wind_pool,
         c_L, c_info = lower_cost_hsrl(g, sum_disch, n_rem, a_L, return_info=True)
         r2 = lower_reward_hsrl(viol, a_L)
         r1, c1_step, details = cal_rew_rb_hsrl(
-            obs, obs2, action_rbb, rbb_info, penalty_NN=pen6, time=time,
-            ptur=ptur, pb_cmd=pb_cmd)
+            obs, obs2, action_rbb, rbb_info, penalty_NN=pen5 + pen6, time=time,
+            ptur=ptur, pb_cmd=pb_cmd, turbine_derate=_derate)
 
         pc = per_blk[bi]
         pc['r1'] += r1
@@ -599,6 +606,7 @@ def twenty_step_test_hsrl(agent_H, agent_L, env_test, rbb_system, wind_pool,
         pc['c2'] += c_L
         pc['deg'] += HSRL_DEG_COEF * max(0.0, a_L)
         pc['viol'] += viol
+        pc['pen5'] += pen5
         pc['pen6'] += pen6
         if c1_step > 0:
             pc['cvm'] += 1
@@ -629,7 +637,7 @@ def twenty_step_test_hsrl(agent_H, agent_L, env_test, rbb_system, wind_pool,
         m['dev_mean'] = m['dev_abs_sum'] / max(m['n_step'], 1)
         m['need_mean'] = m['need_sum'] / max(m['n_step'], 1)
 
-    _sum_keys = ('r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'pen6', 'profit')
+    _sum_keys = ('r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'pen5', 'pen6', 'profit')
     _mean_keys = ('g', 'g_raw', 'sum_disch', 'cL_max', 'dev_mean', 'need_mean')
     overall = {k: float(sum(m[k] for m in per_blk)) for k in _sum_keys}
     overall.update({k: float(np.mean([m[k] for m in per_blk])) for k in _mean_keys})

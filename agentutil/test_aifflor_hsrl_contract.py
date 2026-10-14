@@ -97,14 +97,15 @@ class _StubEnv:
 
 
 class _StubH:
-    """固定动作的 H 桩：前 5 维 0.2、第 6 维（块总放电量）= g。"""
+    """固定动作的 H 桩：前 5 维 `a_wt`、第 6 维（块总放电量）= g。"""
 
-    def __init__(self, g=1.5):
+    def __init__(self, g=1.5, a_wt=0.2):
         self.g = float(g)
+        self.a_wt = float(a_wt)
         self.is_training = True
 
     def select_action(self, obs):
-        return np.array([0.2] * 5 + [self.g], dtype=float)
+        return np.array([self.a_wt] * 5 + [self.g], dtype=float)
 
     def reset(self, obs):
         return None
@@ -444,9 +445,9 @@ def main():
     pool[:, 1] = 11.0
     G_TGT = 1.5
 
-    def _run(stub_L):
+    def _run(stub_L, stub_H=None):
         env = _StubEnv(E0=E_MID)
-        aH, aL = _StubH(G_TGT), stub_L
+        aH, aL = (stub_H or _StubH(G_TGT)), stub_L
         per_blk, overall, meta = H.twenty_step_test_hsrl(
             aH, aL, env, rbb, pool, seed=1234, phase_mode=0)
         return env, per_blk, overall, meta
@@ -499,6 +500,18 @@ def main():
           % np.round(_need_exp, 4).tolist())
     check(len(stub_const.obs[0]) == 6 and len(_run(_StubAmortizedL(G_TGT))[1]) == 4,
           '测试协议里的 L 观测也是 6 维（与训练同口径）')
+
+    # ---- r1 的记账必须与训练同口径: r1 = pr·P_G·dt − (pen5 + pen6) ----
+    _env_bad, _pb_bad, _ov_bad, _ = _run(_StubL(pb=-0.1), _StubH(G_TGT, a_wt=0.6))
+    _pen5_step = AMF.PENALTY_NN_H_COEF * 0.1 * 5     # 5 维 × 每维越界 0.1
+    _pen5_blk = _pen5_step * 5                       # 块级动作的罚在块内**按步**摊入（5 次）
+    _dr1 = _pb_bad[0]['r1'] - per_blk[0]['r1']
+    check(abs(_pb_bad[0]['pen5'] - _pen5_blk) < 1e-9,
+          '前 5 维越界(0.6>0.5) 的罚计入并记录: 块内 pen5 = %.1f (= %.0f/步 × 5 步)'
+          % (_pb_bad[0]['pen5'], _pen5_step))
+    check(abs(_dr1 + _pen5_blk) < 1e-9,
+          'r1 确实扣掉 pen5（实测 Δr1 = %.1f = −%.0f）⇒ 测试与训练记账同口径'
+          % (_dr1, _pen5_blk))
 
     print('\n' + '=' * 90)
     if FAIL:
