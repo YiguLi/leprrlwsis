@@ -474,6 +474,57 @@ def main():
     check(abs(_stubq.seen[-1][0]) < 1e-9,
           '未给 a_t ⇒ 退回 actor 的确定性动作（本桩输出 0）')
 
+    # ---- S1: 近端 N 条批均值 × **当前策略**动作（`--hsrl_dual_q_src recent_batch`）----
+    from PER_buffer import PrioritizedReplayBuffer
+    _np = np
+
+    class _StubRecent:
+        """duck-typed agent：真回放缓冲（含环绕）+ 与存储动作**不同**的 actor 输出。"""
+
+        def __init__(self, n_app=12, cap=8, a_out=0.9, gamma=0.95, sc=100.0):
+            self.device = 'cpu'
+            self.discount = float(gamma)
+            self.cost_scale = float(sc)
+            self.value_scale = 1000.0
+            self.memory = PrioritizedReplayBuffer(cap, 0.6)
+            for i in range(n_app):
+                self.memory.append(_np.array([float(i), float(i) + 100.0], dtype=_np.float32),
+                                   _np.array([-3.0], dtype=_np.float32),   # 存储的是**旧行为动作**
+                                   float(i), float(i) * 2.0,
+                                   _np.array([float(i) + 1, float(i) + 101.0], dtype=_np.float32),
+                                   0.0)
+
+            class _Act:
+                def __call__(self, s):
+                    return _torch.full((s.shape[0], 1), float(a_out))
+            self.actor = _Act()
+            # critic 只依赖动作（10·a）⇒ 用它反查"到底喂了哪个动作"
+            self.critic_c = lambda sa: 10.0 * sa[1]
+            self.critic_c2 = lambda sa: 10.0 * sa[1]
+
+    _sr = _StubRecent(n_app=12, cap=8, a_out=0.9, gamma=0.95, sc=100.0)
+    _s_states, _s_acts, _s_costs = H.recent_states(_sr, 4)
+    check(_s_states[:, 0].tolist() == [8.0, 9.0, 10.0, 11.0]
+          and _s_costs.tolist() == [16.0, 18.0, 20.0, 22.0],
+          '近端读取（环形已环绕）: 最近 4 条 = 第 8~11 次写入，按写入顺序')
+    _s_all, _, _ = H.recent_states(_sr, 100)
+    check(_s_all.shape[0] == 8 and _s_all[:, 0].tolist() == [4.0, 5, 6, 7, 8, 9, 10, 11],
+          '请求条数 > 容量时只给容量内、仍按写入顺序（n=%d）' % _s_all.shape[0])
+    _rate_b, _info_b = H.policy_batch_cost_rate(_sr, n=4, horizon='infinite', agg='mean',
+                                                return_info=True)
+    check(abs(_info_b['q_agg'] - 9.0) < 1e-6,
+          'critic 收到的是 **actor 的动作 0.9**（q = 10·0.9 = 9），不是缓冲里存的 −3.0')
+    check(abs(_rate_b - (1.0 - 0.95) * 9.0 * 100.0) < 1e-9,
+          'S1 折算（H 视界）: rate = (1−γ)·mean_i Q(s_i,π(s_i))·s_c = %.3f' % _rate_b)
+    _srl = _StubRecent(gamma=0.98, sc=1.0)
+    _rate_bl, _info_bl = H.policy_batch_cost_rate(_srl, n=256, horizon='finite', agg='mean',
+                                                  return_info=True)
+    _K98 = (1.0 - 0.98 ** 5) / (5 * (1.0 - 0.98))
+    check(abs(_rate_bl - 9.0 / _K98) < 1e-9 and _info_bl['n_batch'] == 8,
+          'S1 折算（L 视界）+ 缓冲不足时用满 8 条: rate = Q/K = %.4f' % _rate_bl)
+    check(H.HSRL_DUAL_Q_SRC == 'recent_batch' and H.HSRL_DUAL_RECENT_N == 256,
+          '默认口径: recent_batch / N = 256（≈1 天，H 每块 1 条）')
+
     # ---- λ1：物理价区间 ↔ actor 空间、单调与封顶 ----
     _kl = float(hc.lam_scale())
     _lo1, _hi1, _init1 = H.lam1_phys_bounds()

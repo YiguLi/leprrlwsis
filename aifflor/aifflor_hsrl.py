@@ -137,6 +137,22 @@ HSRL_L_CURRICULUM_BLOCKS = 50   # 预算减半所需连续满足块数（= EMA �
 #:   对偶要的是**约束价格的期望**，故默认取**双臂均值**（无偏）。
 HSRL_DUAL_Q_AGG = 'mean'        # 'mean' | 'min' | 'max'
 HSRL_DUAL_SRC = 'q'             # 'q'（critic cost 的 Q）| 'ema'（实际块成本 EMA，A/B 对照）
+#: `src='q'` 时**用哪种 Q 估计**（`--hsrl_dual_q_src`）：
+#:   * `recent_batch`（默认，S1）: **近端 N 条状态的批均值 × 当前策略动作**
+#:       `rate = (1−γ_H)·mean_i Q_c(s_i, π(s_i))·s_c`
+#:     实证动机（`output/AIFFLOR-run73`，26.9k 块）：
+#:       - 单点 `Q_c(s₀,a₀)` 与**当日风况**相关 **+0.74**（块内 ΣP_F +0.57）⇒ λ1 的慢趋势里
+#:         97% 是风况驱动（λ 自身与 u 相关 +0.18）——"是否违约极大受当日风速影响"的定量证据；
+#:       - 换成**批均值**后风相关降到 **−0.01**、分子 sd 缩 4.3×，但若动作仍用**旧的行为动作**，
+#:         它锚在**历史行为分布**上（均值 16.9 > 预算 15，且被 PER 高误差样本过采抬高）⇒ λ1 有
+#:         69.5% 时间贴上界、四分位均值几乎不动（16.7→16.2）＝**不反映策略进步**；
+#:       - 故最终取"**近端状态 + 当前策略动作**"：风被跨天平均掉（N=256 条 ≈ 1 天）、
+#:         动作是 π(s) ⇒ 随策略改进而变；且与 actor 被罚的泛函同源
+#:         （actor loss 用 `Q_c(s, actor(s))`）⇒ 固定点 = "actor 自己的平均成本 = 预算"，无泛函错配。
+#:   * `point`: 旧的单点 `Q_c(s₀,a₀)`（A/B 对照，风依赖强）。
+#:   * `ema`: 实际块成本 EMA（= `--hsrl_dual_src ema`，历史口径）。
+HSRL_DUAL_Q_SRC = 'recent_batch'
+HSRL_DUAL_RECENT_N = 256        # 近端批的条数（H 每块 1 条 ⇒ ≈256 块 ≈ 21 h，覆盖一天的风况）
 
 # ---- H 层 λ1：**物理价**区间 [元/(MW·step)]（actor 空间 = 物理价 × hc.lam_scale()=s_c/s_p）----
 #: 已定稿（第三轮讨论，用户口径 D1 = 单通道只重标定区间）：
@@ -584,6 +600,75 @@ def q_cost_rate(agent, s_t, a_t=None, horizon='infinite', agg=None, gamma=None,
         return rate, dict(q1=q1, q2=q2, q_agg=q_agg, agg=_agg, s_c=sc, q_raw=q_raw,
                           gamma=g, horizon=horizon, rate=rate,
                           action_given=bool(a_given is not None))
+    return rate
+
+
+def recent_states(agent, n=HSRL_DUAL_RECENT_N):
+    """回放缓冲里**最近 n 条**转移的 (states, actions, costs)（按**写入顺序**）。
+
+    直接读 `memory._storage` / `memory._next_idx`（`PER_buffer.ReplayBuffer` 的口径）：
+    `_storage` 是列表、`_next_idx` 是环形写指针 ⇒ 未环绕时取尾部、已环绕时按模取环尾。
+    **不调用 `memory.sample()`** ⇒ 不消耗随机流、不改变训练轨迹（可复现性不被破坏）。
+    """
+    mem = getattr(agent, 'memory', None)
+    st = list(getattr(mem, '_storage', []) or [])
+    L = len(st)
+    if L == 0:
+        return (np.zeros((0, 0), dtype=np.float32), np.zeros((0, 0), dtype=np.float32),
+                np.zeros((0,), dtype=np.float32))
+    k = min(max(1, int(n)), L)
+    m = int(getattr(mem, '_maxsize', L) or L)
+    if L < m:                                   # 未环绕：写入顺序 == 列表顺序
+        idxs = list(range(L - k, L))
+    else:                                       # 已环绕：_next_idx 指向最老的一条
+        nx = int(getattr(mem, '_next_idx', 0))
+        idxs = [int((nx - k + i) % m) for i in range(k)]
+    s = np.asarray([st[i][0] for i in idxs], dtype=np.float32)
+    a = np.asarray([st[i][1] for i in idxs], dtype=np.float32)
+    c = np.asarray([float(st[i][2 + 1]) for i in idxs], dtype=np.float32)   # 第 4 项 = cost
+    return s, a, c
+
+
+def policy_batch_cost_rate(agent, n=HSRL_DUAL_RECENT_N, horizon='infinite', agg=None,
+                           gamma=None, block=HSRL_BLOCK, cost_scale=None, return_info=False):
+    """**S1 分子**：近端 n 条状态的批均值，动作取**当前策略** `π(s_i)`：
+
+        rate = K_horizon · mean_i Q_c(s_i, π(s_i)) · s_c
+        （H: K=(1−γ_H)；L: K=1/K_finite，K_finite=(1−γ_L^δ)/(δ(1−γ_L))）
+
+    三个性质（`output/AIFFLOR-run73` 上离线验过前两条）：
+      * **风无关**：状态取近端 n 条（n=256 ⇒ H 覆盖 ≈1 天）⇒ 当日风况被平均掉；
+      * **反映策略进步**：动作是 `π(s_i)` 而非旧的行为动作 ⇒ 策略改进时分子随之下降；
+      * **与 actor 的惩罚项同泛函** ⇒ 对偶的固定点 = "actor 自己的平均成本 Q = 预算"。
+    """
+    import torch
+    s_np, _a_stored, _c_np = recent_states(agent, n)
+    if s_np.shape[0] == 0:
+        if return_info:
+            return 0.0, dict(q_agg=float('nan'), n_batch=0, rate=0.0, empty=True)
+        return 0.0
+    dev = getattr(agent, 'device', None)
+    s = torch.as_tensor(s_np) if dev is None else torch.as_tensor(s_np, device=dev)
+    with torch.no_grad():
+        act = agent.actor(s)
+        q1 = agent.critic_c([s, act]).reshape(-1)
+        q2 = agent.critic_c2([s, act]).reshape(-1)
+    _agg = HSRL_DUAL_Q_AGG if agg is None else str(agg)
+    if _agg == 'mean':
+        q_pair = 0.5 * (q1 + q2)
+    elif _agg == 'min':
+        q_pair = torch.minimum(q1, q2)
+    else:
+        q_pair = torch.maximum(q1, q2)
+    q_mean = float(q_pair.mean())
+    sc = _cost_scale_of(agent) if cost_scale is None else float(cost_scale)
+    q_raw = q_mean * sc
+    g = float(agent.discount if gamma is None else gamma)
+    rate = cost_rate_from_q(q_raw, g, block=block, horizon=horizon)
+    if return_info:
+        return rate, dict(q_agg=q_mean, q_raw=q_raw, s_c=sc, gamma=g, horizon=horizon,
+                          n_batch=int(s_np.shape[0]), agg=_agg, rate=rate,
+                          cost_recent_mean=float(_c_np.mean()) if _c_np.size else float('nan'))
     return rate
 
 
