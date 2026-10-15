@@ -44,9 +44,10 @@ L: r2 = −1·min(clip_amount, 20)   [MW] 命令与实际之差 (两段 clip 合
 ----------------------------------
     H: EMA ← 0.98·EMA + 0.02·sum_c1
        uniform: 乘性 lam1 ← lam1·exp(0.02·(rate/d_block_H − 1)), rate = critic cost 的 Q
-                lam1 ∈ actor [5.0, 10.0]（**下界按 actor 空间指定 = 5**，用户第四轮口径）
-                ⇔ 物理 [50, 100] 元/(MW·step)，初值 = 5.0（= 下限）, d_block_H = 15.0 (= 3 MW × 5 步)
-                ⚠ 旧口径 [0.967, 100]/初值 0.967 已被取代（见 hsrl.HSRL_LAM1_ACTOR_MIN 的注释）
+                lam1 ∈ 物理 [2.0, 50.0] 元/(MW·step)（= actor [0.2, 5.0]），初值 = 下限 2.0
+                依据: 上界 = max(平抑资源边际成本 20, 峰价降载 16.33) 的 2.5×；界外波动单价 20·λ1
+                d_block_H = 15.0 (= 3 MW × 5 步)
+                ⚠ 历史口径 [0.967, 100] / [50, 100] 已被取代（见 hsrl.HSRL_LAM1_PHYS_MIN 的注释）
        legacy : 加性 lam1（本项目原式）
     L: EMA ← 0.98·EMA + 0.02·sum_c2;  lam2 ← clip(lam2·exp(0.02·(EMA/d_block_L − 1)), 0.5, 2), 初值 1.0 (无量纲兑换率)
        d_block_L = 1.2 (⇔ 允许搁置 0.02 MWh/块), curriculum 减半地板 0.15
@@ -1883,6 +1884,14 @@ if __name__ == "__main__":
     parser.add_argument('--hsrl_dual_recent_n', default=hsrl.HSRL_DUAL_RECENT_N, type=int,
                         help='HSRL: recent_batch（λ2，以及 λ1 选 recent_batch 时）的近端条数'
                              '（默认 %d: H 每块 1 条 ⇒ ≈1 天）' % hsrl.HSRL_DUAL_RECENT_N)
+    parser.add_argument('--hsrl_lam1_min', default=hsrl.HSRL_LAM1_PHYS_MIN, type=float,
+                        help='HSRL: λ1 的**物理价下限** [元/(MW·step)]（默认 %.1f；= 名义边际收益 9.67 的 '
+                             '21%%、低电价边际收益 5.0 的 40%%，且 < BESS 退化边际价 20 ⇒ 界内波动不值得'
+                             '动用 BESS）。当前实现把上界设为 20 的 2.5× = 50' % hsrl.HSRL_LAM1_PHYS_MIN)
+    parser.add_argument('--hsrl_lam1_max', default=hsrl.HSRL_LAM1_PHYS_MAX, type=float,
+                        help='HSRL: λ1 的**物理价上限** [元/(MW·step)]（默认 %.1f = max(平抑资源边际成本: '
+                             'BESS 退化 20, 峰价降载 16.33) 的 2.5×；界外波动单价是 20·λ1 ⇒ '
+                             '20×50 = 1000 远大于峰价 16.33）。⚠ 上界必须 > 下界' % hsrl.HSRL_LAM1_PHYS_MAX)
     parser.add_argument('--hsrl_test_wind', default='fixed', choices=['fixed', 'random'],
                         help='HSRL: test20 的风速段 fixed=**固定段**（默认 col=%d/start=%d，'
                              '每次触发同一场景 ⇒ 配对看收敛）; random=每次触发随机取列+起点'
@@ -1993,7 +2002,7 @@ if __name__ == "__main__":
         hsrl.HSRL_DUAL_Q_AGG = str(args.hsrl_dual_q_agg)
         hsrl.HSRL_DUAL_Q_SRC = str(args.hsrl_dual_q_src)
         prCyan(hsrl.summary())
-        _lo1, _hi1, _init1 = hsrl.lam1_phys_bounds()
+        _lo1, _hi1, _init1 = hsrl.lam1_phys_bounds(args.hsrl_lam1_min, args.hsrl_lam1_max)
         prCyan('[HSRL] 对偶: 分子 = {} | twin 聚合 = {} | λ1 物理价 ∈ [{:.3f}, {:.3f}] '
                '元/(MW·step) (actor 空间 ×{:.3g} = [{:.4f}, {:.4f}], 初值 {:.4f})'.format(
                    ('critic cost 的 Q（{}）'.format(
@@ -2001,7 +2010,8 @@ if __name__ == "__main__":
                         'recent_batch': '近端 %d 条批均值 × 当前策略动作' % args.hsrl_dual_recent_n,
                         'point': '块首单点 Q(s0,a0)'}.get(args.hsrl_dual_q_src, args.hsrl_dual_q_src))
                     if args.hsrl_dual_src == 'q' else '实际块成本 EMA'),
-                   args.hsrl_dual_q_agg, hsrl.HSRL_LAM1_PHYS_MIN, hsrl.HSRL_LAM1_PHYS_MAX,
+                   args.hsrl_dual_q_agg,
+                   _lo1 / max(1e-12, hc.lam_scale()), _hi1 / max(1e-12, hc.lam_scale()),
                    hc.lam_scale(), _lo1, _hi1, _init1))
 
     # 上层 H: TD3 + EMA 实际成本对偶 (lam1 ∈ [3, 100], 初始 5.0) —— 与 td3perrb 一致
@@ -2033,7 +2043,7 @@ if __name__ == "__main__":
     agent_H.lam = _HCFG['lam_init'] if _HCFG else 5.0
     if args.hsrl:
         # λ1 的**物理价**区间/初值（见 aifflor_hsrl.HSRL_LAM1_PHYS_* 与 README §3.8）
-        _lo1, _hi1, _init1 = hsrl.lam1_phys_bounds()
+        _lo1, _hi1, _init1 = hsrl.lam1_phys_bounds(args.hsrl_lam1_min, args.hsrl_lam1_max)
         agent_H.lam_min, agent_H.lam_max, agent_H.lam = _lo1, _hi1, _init1
     # 值函数回归空间归一化 (s = hc.value_scale()): 只作用于 H 层 r1/c1 进入
     # critic 之前; buffer/对偶/日志/CSV 仍是原始口径 (见 hsrl_cost 末尾小节)。
