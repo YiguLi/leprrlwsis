@@ -959,6 +959,8 @@ def train_hsrl(num_iterations_H,
     # 近端批（S1）诊断：块末更新，块内保持
     b_info_H = {'q_agg': float('nan'), 'n_batch': 0, 'cost_recent_mean': float('nan')}
     b_info_L = {'q_agg': float('nan'), 'n_batch': 0, 'cost_recent_mean': float('nan')}
+    # update 批均值（update_batch 分子）诊断：块末更新，块内保持
+    ud_info_H = {'q_agg': float('nan'), 'n_update': 0}
 
     if use_csv:
         df_rows = []
@@ -1185,67 +1187,11 @@ def train_hsrl(num_iterations_H,
         if max_episode_length and episode_steps >= max_episode_length - 1:
             done = True
 
-        # ---- 块末: 两层各自结算 ----
+        # ---- 块末: 两层各自结算（对偶已移到本块 update **之后**，见下方）----
         if episode_steps % 5 == 4:
             bias_init.on_block_end(step, sum_r1, sum_c1, agent_H)
             agent_H.observe_jump(norm_observation_H, original_action_H,
                                  sum_r1, sum_c1, norm_observation2, done)
-            # ---- 对偶上升（HSRL: 分子默认 = critic cost 的 Q，`--hsrl_dual_src` 可退回 EMA）----
-            #   Q 的取值: **块首**观测 + actor 确定性动作 + twin 均值；折算成"每块成本速率"
-            #   （H 视界=块级无限 ⇒ ×(1−γ)；L 视口=5 步有限 ⇒ ÷K）。EMA 仍维护(日志/curriculum/回退)。
-            if norm_observation_L0 is None:
-                norm_observation_L0 = np.array(norm_observation_L, dtype=float, copy=True)
-            if action_L0 is None:
-                action_L0 = np.array(original_action_L, dtype=float, copy=True)
-            # 诊断（两种 Q 估计同时算，成本可忽略）：单点在 (s₀, 实际执行动作)
-            _, q_info_H = hsrl.q_cost_rate(
-                agent_H, norm_observation_H, a_t=original_action_H, horizon='infinite',
-                agg=dual_q_agg, return_info=True)
-            _, q_info_L = hsrl.q_cost_rate(
-                agent_L, norm_observation_L0, a_t=action_L0, horizon='finite',
-                agg=dual_q_agg, return_info=True)
-            # ---- 对偶用的分子（`--hsrl_dual_src` / `--hsrl_dual_q_src`）----
-            if dual_src == 'ema':
-                q_rate_H = float(agent_H.ema_cost) if agent_H.ema_cost is not None else None
-                q_rate_L = float(agent_L.ema_cost) if agent_L.ema_cost is not None else None
-                b_info_H = b_info_L = {'n_batch': 0, 'q_agg': float('nan')}
-            elif dual_q_src == 'recent_batch':
-                # S1: 近端 N 条状态的批均值 × **当前策略**动作（风无关 + 反映进步）
-                q_rate_H, b_info_H = hsrl.policy_batch_cost_rate(
-                    agent_H, n=dual_recent_n, horizon='infinite', agg=dual_q_agg,
-                    return_info=True)
-                q_rate_L, b_info_L = hsrl.policy_batch_cost_rate(
-                    agent_L, n=dual_recent_n, horizon='finite', agg=dual_q_agg,
-                    return_info=True)
-            else:                                   # point: 旧单点（A/B 对照）
-                q_rate_H, _ = hsrl.q_cost_rate(
-                    agent_H, norm_observation_H, a_t=original_action_H, horizon='infinite',
-                    agg=dual_q_agg, return_info=True)
-                q_rate_L, _ = hsrl.q_cost_rate(
-                    agent_L, norm_observation_L0, a_t=action_L0, horizon='finite',
-                    agg=dual_q_agg, return_info=True)
-                b_info_H = b_info_L = {'n_batch': 0, 'q_agg': float('nan')}
-            if step > args.warmup:
-                agent_H.update_ema_cost(sum_c1)
-                hsrl.dual_update_H_hsrl(agent_H, d_block_H, q_rate=q_rate_H,
-                                        src=dual_src, ema=agent_H.ema_cost)
-                agent_L.update_ema_cost(sum_c2)
-                hsrl.dual_update_L_hsrl(agent_L, d_block_L, q_rate=q_rate_L,
-                                        src=dual_src, ema=agent_L.ema_cost)
-                prCyan('dual[{}/{}]: H rate={:.4f} (ratio={:.3f}, lam1={:.5f}) | '
-                       'L rate={:.4f} (ratio={:.3f}, lam2={:.3f}) | 近端批 n={}'.format(
-                           dual_src, dual_q_src, q_rate_H, q_rate_H / max(d_block_H, 1e-9),
-                           agent_H.lam, q_rate_L, q_rate_L / max(d_block_L, 1e-9),
-                           agent_L.lam, b_info_H.get('n_batch', 0)))
-            # L 层 curriculum: 连续满足块数 ⇒ 预算减半（阈值 = EMA 时间常数）
-            if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
-                consecutive_satisfied_L += 1
-            else:
-                consecutive_satisfied_L = 0
-            if consecutive_satisfied_L >= hsrl.HSRL_L_CURRICULUM_BLOCKS:
-                d_block_L = max(d_block_L / 2.0, d_block_L_min)
-                consecutive_satisfied_L = 0
-                prGreen('L: d_block_L halved to {}'.format(d_block_L))
             done_L = True
         hwarm.fill_bess_transition(
             agent_L, norm_observation_L, original_action_L, r2, c2,
@@ -1268,10 +1214,12 @@ def train_hsrl(num_iterations_H,
                     consecutive_satisfied_H = 0
                     prGreen('H: d_block_H halved to {}'.format(d_block_H))
 
+                _block_stats = None
                 if agent_H.record_update_stats and len(agent_H.update_stats) > 0:
                     _stats = agent_H.update_stats
                     _mean = {k: float(np.mean([s[k] for s in _stats])) for k in _stats[0]}
                     agent_H.update_stats = []
+                    _block_stats = _stats          # 供对偶的 `update_batch` 分子使用
                     if upload:
                         for _k, _v in _mean.items():
                             writer.add_scalar('update/' + _k, _v, step)
@@ -1281,6 +1229,78 @@ def train_hsrl(num_iterations_H,
                             '{}/update_stats_H.csv'.format(output),
                             df_update_rows, df_update_written)
                         df_update_rows = []
+
+                # ================================================================
+                # 对偶上升（块末，**放在本块 update 之后**）
+                #   * **λ1 的分子默认 = 本块 update 已算好的 `Qc` 批均值**（`q_c_mean`/`q_c2_mean`，
+                #     即 PER 批在行为动作下的 cost Q 均值）—— 用户口径：靠**缓冲的自然淘汰**
+                #     （环形容量 rmsize）让这个均值随策略改进而下降，从而驱动 λ1 下降/上升；
+                #     它不含"当日风况"这一项（跨批平均）⇒ 直接消掉风况引起的慢漂。
+                #   * λ2 的分子 = 近端批均值 × 当前策略动作（S1；`update_batch` 要给 L 开
+                #     `record_update_stats`，本轮按用户口径**只改 lam1**）。
+                #   * EMA 仍每块维护（日志 / curriculum / 回退）。
+                # ================================================================
+                if norm_observation_L0 is None:
+                    norm_observation_L0 = np.array(norm_observation_L, dtype=float, copy=True)
+                if action_L0 is None:
+                    action_L0 = np.array(original_action_L, dtype=float, copy=True)
+                # 诊断（单点 Q 在 (s₀, 实际执行动作)；成本可忽略）
+                _, q_info_H = hsrl.q_cost_rate(
+                    agent_H, norm_observation_H, a_t=original_action_H, horizon='infinite',
+                    agg=dual_q_agg, return_info=True)
+                _, q_info_L = hsrl.q_cost_rate(
+                    agent_L, norm_observation_L0, a_t=action_L0, horizon='finite',
+                    agg=dual_q_agg, return_info=True)
+                b_info_H = {'q_agg': float('nan'), 'n_batch': 0, 'cost_recent_mean': float('nan')}
+                b_info_L = {'q_agg': float('nan'), 'n_batch': 0, 'cost_recent_mean': float('nan')}
+                ud_info_H = {'q_agg': float('nan'), 'n_update': 0}
+                # ---- λ1 的分子 ----
+                if dual_src == 'ema':
+                    q_rate_H = float(agent_H.ema_cost) if agent_H.ema_cost is not None else None
+                elif dual_q_src == 'update_batch':
+                    q_rate_H, ud_info_H = hsrl.update_batch_cost_rate(
+                        agent_H, stats=_block_stats, horizon='infinite', agg=dual_q_agg,
+                        return_info=True)
+                elif dual_q_src == 'recent_batch':
+                    q_rate_H, b_info_H = hsrl.policy_batch_cost_rate(
+                        agent_H, n=dual_recent_n, horizon='infinite', agg=dual_q_agg,
+                        return_info=True)
+                else:                                   # point
+                    q_rate_H, _ = hsrl.q_cost_rate(
+                        agent_H, norm_observation_H, a_t=original_action_H,
+                        horizon='infinite', agg=dual_q_agg, return_info=True)
+                # ---- λ2 的分子（本轮固定 S1；`--hsrl_dual_src ema` 时走 EMA）----
+                if dual_src == 'ema':
+                    q_rate_L = float(agent_L.ema_cost) if agent_L.ema_cost is not None else None
+                else:
+                    q_rate_L, b_info_L = hsrl.policy_batch_cost_rate(
+                        agent_L, n=dual_recent_n, horizon='finite', agg=dual_q_agg,
+                        return_info=True)
+                agent_H.update_ema_cost(sum_c1)
+                hsrl.dual_update_H_hsrl(agent_H, d_block_H, q_rate=q_rate_H,
+                                        src=dual_src, ema=agent_H.ema_cost)
+                agent_L.update_ema_cost(sum_c2)
+                hsrl.dual_update_L_hsrl(agent_L, d_block_L, q_rate=q_rate_L,
+                                        src=dual_src, ema=agent_L.ema_cost)
+                _rh = float('nan') if q_rate_H is None else q_rate_H
+                _rl = float('nan') if q_rate_L is None else q_rate_L
+                prCyan('dual[{}/{}]: H rate={:.4f} (ratio={:.3f}, lam1={:.5f}, n_upd={}) | '
+                       'L rate={:.4f} (ratio={:.3f}, lam2={:.3f}, n_recent={})'.format(
+                           dual_src, dual_q_src, _rh, _rh / max(d_block_H, 1e-9),
+                           agent_H.lam, ud_info_H.get('n_update', 0), _rl,
+                           _rl / max(d_block_L, 1e-9), agent_L.lam,
+                           b_info_L.get('n_batch', 0)))
+                q_rate_H = _rh
+                q_rate_L = _rl
+                # L 层 curriculum: 连续满足块数 ⇒ 预算减半（阈值 = EMA 时间常数）
+                if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
+                    consecutive_satisfied_L += 1
+                else:
+                    consecutive_satisfied_L = 0
+                if consecutive_satisfied_L >= hsrl.HSRL_L_CURRICULUM_BLOCKS:
+                    d_block_L = max(d_block_L / 2.0, d_block_L_min)
+                    consecutive_satisfied_L = 0
+                    prGreen('L: d_block_L halved to {}'.format(d_block_L))
 
             # ---- 20 步测试（触发频率与旧 9-case 相同: episode_steps % 480 == 0）----
             if episode_steps % 480 == 0 and wind_pool is not None:
@@ -1384,6 +1404,9 @@ def train_hsrl(num_iterations_H,
                                  and dual_q_src == 'recent_batch' else float('nan')),
                 'n_recent_H': b_info_H.get('n_batch', 0),
                 'cost_recent_H': b_info_H.get('cost_recent_mean', float('nan')),
+                'q_upd_H': ud_info_H.get('q_agg', float('nan')),
+                'q_upd_raw_H': ud_info_H.get('q_raw', float('nan')),
+                'n_upd_H': ud_info_H.get('n_update', 0),
                 'q_cost_L': q_info_L['q_agg'], 'rate_c_L': q_rate_L,
                 'ratio_c_L': q_rate_L / max(d_block_L, 1e-9),
                 'q_batch_L': b_info_L.get('q_agg', float('nan')),
@@ -1849,14 +1872,15 @@ if __name__ == "__main__":
                              'mean=双臂均值（默认，无偏；critic 回归目标已用 max，对偶再用 max '
                              '是双重高估 ⇒ 会复现"高估→λ 顶死"）；min=保守；max=与目标一致')
     parser.add_argument('--hsrl_dual_q_src', default=hsrl.HSRL_DUAL_Q_SRC,
-                        choices=['recent_batch', 'point'],
-                        help='HSRL: src=q 时**用哪种 Q 估计**做分子。'
-                             'recent_batch（默认，S1）= 近端 N 条状态的批均值 × **当前策略动作** '
-                             '⇒ 风况被跨天平均掉（实测与当日风相关 −0.01 vs 单点 +0.74）、'
-                             '且随策略改进而变；point = 旧的单点 Q(s0,a0)（A/B 对照）')
+                        choices=['update_batch', 'recent_batch', 'point'],
+                        help='HSRL: src=q 时**用哪种 Q 估计**做分子（λ1）。'
+                             'update_batch（默认）= 直接用 update_policy 本块已算好的 cost Q '
+                             '**批均值**（q_c_mean/q_c2_mean）⇒ 靠缓冲自然淘汰让均值随策略下降、'
+                             '且不含当日风况；recent_batch = 近端 N 条状态的批均值 × 当前策略动作'
+                             '（λ2 固定用它）；point = 旧的单点 Q(s0,a0)（A/B 对照）')
     parser.add_argument('--hsrl_dual_recent_n', default=hsrl.HSRL_DUAL_RECENT_N, type=int,
-                        help='HSRL: recent_batch 的近端条数（默认 %d: H 每块 1 条 ⇒ ≈1 天）'
-                             % hsrl.HSRL_DUAL_RECENT_N)
+                        help='HSRL: recent_batch（λ2，以及 λ1 选 recent_batch 时）的近端条数'
+                             '（默认 %d: H 每块 1 条 ⇒ ≈1 天）' % hsrl.HSRL_DUAL_RECENT_N)
     parser.add_argument('--hsrl_test_wind', default='fixed', choices=['fixed', 'random'],
                         help='HSRL: test20 的风速段 fixed=**固定段**（默认 col=%d/start=%d，'
                              '每次触发同一场景 ⇒ 配对看收敛）; random=每次触发随机取列+起点'
@@ -1971,8 +1995,9 @@ if __name__ == "__main__":
         prCyan('[HSRL] 对偶: 分子 = {} | twin 聚合 = {} | λ1 物理价 ∈ [{:.3f}, {:.3f}] '
                '元/(MW·step) (actor 空间 ×{:.3g} = [{:.4f}, {:.4f}], 初值 {:.4f})'.format(
                    ('critic cost 的 Q（{}）'.format(
-                       '近端 %d 条批均值 × 当前策略动作' % args.hsrl_dual_recent_n
-                       if args.hsrl_dual_q_src == 'recent_batch' else '块首单点 Q(s0,a0)')
+                       {'update_batch': '本块 update 的 Qc 批均值（靠缓冲自然淘汰跟随策略）',
+                        'recent_batch': '近端 %d 条批均值 × 当前策略动作' % args.hsrl_dual_recent_n,
+                        'point': '块首单点 Q(s0,a0)'}.get(args.hsrl_dual_q_src, args.hsrl_dual_q_src))
                     if args.hsrl_dual_src == 'q' else '实际块成本 EMA'),
                    args.hsrl_dual_q_agg, hsrl.HSRL_LAM1_PHYS_MIN, hsrl.HSRL_LAM1_PHYS_MAX,
                    hc.lam_scale(), _lo1, _hi1, _init1))

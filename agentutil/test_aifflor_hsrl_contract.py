@@ -522,8 +522,39 @@ def main():
     _K98 = (1.0 - 0.98 ** 5) / (5 * (1.0 - 0.98))
     check(abs(_rate_bl - 9.0 / _K98) < 1e-9 and _info_bl['n_batch'] == 8,
           'S1 折算（L 视界）+ 缓冲不足时用满 8 条: rate = Q/K = %.4f' % _rate_bl)
-    check(H.HSRL_DUAL_Q_SRC == 'recent_batch' and H.HSRL_DUAL_RECENT_N == 256,
-          '默认口径: recent_batch / N = 256（≈1 天，H 每块 1 条）')
+    check(H.HSRL_DUAL_Q_SRC == 'update_batch' and H.HSRL_DUAL_RECENT_N == 256,
+          '默认口径: λ1 用 update_batch（本块 update 的 Qc 批均值）/ λ2 用 recent_batch N=256')
+
+    # ---- update_batch: 直接用 update_stats 里的 q_c_mean / q_c2_mean（**已是原始口径**）----
+    class _AUpd:
+        def __init__(self, stats, gamma=0.95, sc=100.0):
+            self.device = 'cpu'
+            self.discount = float(gamma)
+            self.cost_scale = float(sc)
+            self.value_scale = 1000.0
+            self.update_stats = stats
+
+    _st4 = [{'q_c_mean': 300.0, 'q_c2_mean': 320.0}, {'q_c_mean': 340.0, 'q_c2_mean': 360.0}]
+    _au = _AUpd(_st4, gamma=0.95, sc=100.0)
+    _ru, _iu = H.update_batch_cost_rate(_au, horizon='infinite', agg='mean', return_info=True)
+    _q_exp = 0.5 * (0.5 * (300 + 320) + 0.5 * (340 + 360))          # = 330（先 twin 均值再批均值）
+    check(abs(_iu['q_raw'] - _q_exp) < 1e-9 and abs(_ru - (1 - 0.95) * _q_exp) < 1e-9,
+          'update_batch（H 视界）: q_raw = %.1f（**不再乘 s_c**，因为它已是原始口径）⇒ rate = %.3f'
+          % (_iu['q_raw'], _ru))
+    check(abs(_iu['q_agg'] - _q_exp / 100.0) < 1e-9,
+          '诊断列 q_agg 报网络口径（÷s_c = %.4f），便于与点估计/近端批的列比较' % _iu['q_agg'])
+    _rul, _iul = H.update_batch_cost_rate(_AUpd(_st4, gamma=0.98, sc=1.0), horizon='finite',
+                                          agg='mean', return_info=True)
+    check(abs(_rul - _q_exp / _K98) < 1e-9,
+          'update_batch（L 视界，若将来给 L 开 record_update_stats）: rate = Q/K = %.3f' % _rul)
+    _rmax_u, _ = H.update_batch_cost_rate(_au, horizon='infinite', agg='max', return_info=True)
+    check(abs(_rmax_u - 0.05 * 340.0) < 1e-9, 'twin 聚合 max 作用在批均值上（%.1f）' % _rmax_u)
+    _re, _ie = H.update_batch_cost_rate(_AUpd([]), horizon='infinite', return_info=True)
+    check(_re is None and _ie['empty'] and _ie['n_update'] == 0,
+          '统计为空（warmup / 未开 record_update_stats）⇒ 返回 None，由调用方回退 EMA')
+    _a = _A(0.0, 0.967)
+    H.dual_update_H_hsrl(_a, 15.0, q_rate=None, src='q', ema=30.0)
+    check(_a.lam > 0.967, '分子为 None 时 H 对偶**自动回退 EMA**（λ1 仍会动）')
 
     # ---- λ1：物理价区间 ↔ actor 空间、单调与封顶 ----
     _kl = float(hc.lam_scale())

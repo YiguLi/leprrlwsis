@@ -138,20 +138,20 @@ HSRL_L_CURRICULUM_BLOCKS = 50   # 预算减半所需连续满足块数（= EMA �
 HSRL_DUAL_Q_AGG = 'mean'        # 'mean' | 'min' | 'max'
 HSRL_DUAL_SRC = 'q'             # 'q'（critic cost 的 Q）| 'ema'（实际块成本 EMA，A/B 对照）
 #: `src='q'` 时**用哪种 Q 估计**（`--hsrl_dual_q_src`）：
-#:   * `recent_batch`（默认，S1）: **近端 N 条状态的批均值 × 当前策略动作**
+#:   * `update_batch`（**默认**，用户口径）：直接用 `update_policy` **本块已算好的**
+#:     cost Q 批均值（`update_stats` 里的 `q_c_mean`/`q_c2_mean`）——
+#:     靠**缓冲的自然淘汰**（环形容量 = `--rmsize`）让这个均值随策略改进而下降来驱动 λ1；
+#:     批是随机抽的、跨天混合 ⇒ **不含当日风况**（消掉风况引起的慢漂）。
+#:   * `recent_batch`（S1，λ2 仍用它）: **近端 N 条状态的批均值 × 当前策略动作**
 #:       `rate = (1−γ_H)·mean_i Q_c(s_i, π(s_i))·s_c`
 #:     实证动机（`output/AIFFLOR-run73`，26.9k 块）：
 #:       - 单点 `Q_c(s₀,a₀)` 与**当日风况**相关 **+0.74**（块内 ΣP_F +0.57）⇒ λ1 的慢趋势里
 #:         97% 是风况驱动（λ 自身与 u 相关 +0.18）——"是否违约极大受当日风速影响"的定量证据；
-#:       - 换成**批均值**后风相关降到 **−0.01**、分子 sd 缩 4.3×，但若动作仍用**旧的行为动作**，
-#:         它锚在**历史行为分布**上（均值 16.9 > 预算 15，且被 PER 高误差样本过采抬高）⇒ λ1 有
-#:         69.5% 时间贴上界、四分位均值几乎不动（16.7→16.2）＝**不反映策略进步**；
-#:       - 故最终取"**近端状态 + 当前策略动作**"：风被跨天平均掉（N=256 条 ≈ 1 天）、
-#:         动作是 π(s) ⇒ 随策略改进而变；且与 actor 被罚的泛函同源
-#:         （actor loss 用 `Q_c(s, actor(s))`）⇒ 固定点 = "actor 自己的平均成本 = 预算"，无泛函错配。
+#:       - 换成**批均值**后风相关降到 **−0.01**、分子 sd 缩 4.3×；若动作用**旧的行为动作**
+#:         （= `update_batch` 的口径）它锚在"近期回放分布"上 ⇒ 靠自然淘汰缓慢跟随。
 #:   * `point`: 旧的单点 `Q_c(s₀,a₀)`（A/B 对照，风依赖强）。
 #:   * `ema`: 实际块成本 EMA（= `--hsrl_dual_src ema`，历史口径）。
-HSRL_DUAL_Q_SRC = 'recent_batch'
+HSRL_DUAL_Q_SRC = 'update_batch'
 HSRL_DUAL_RECENT_N = 256        # 近端批的条数（H 每块 1 条 ⇒ ≈256 块 ≈ 21 h，覆盖一天的风况）
 
 # ---- H 层 λ1：**物理价**区间 [元/(MW·step)]（actor 空间 = 物理价 × hc.lam_scale()=s_c/s_p）----
@@ -669,6 +669,50 @@ def policy_batch_cost_rate(agent, n=HSRL_DUAL_RECENT_N, horizon='infinite', agg=
         return rate, dict(q_agg=q_mean, q_raw=q_raw, s_c=sc, gamma=g, horizon=horizon,
                           n_batch=int(s_np.shape[0]), agg=_agg, rate=rate,
                           cost_recent_mean=float(_c_np.mean()) if _c_np.size else float('nan'))
+    return rate
+
+
+def update_batch_cost_rate(agent, stats=None, horizon='infinite', agg=None, gamma=None,
+                           block=HSRL_BLOCK, cost_scale=None, return_info=False):
+    """**`update_batch` 分子**（λ1 默认）：直接用 `update_policy` **本块已算好的** cost Q 批均值。
+
+    `update_stats` 里每条对应一次 `update_policy`，其中
+
+      * `q_c_mean` / `q_c2_mean` = twin cost critic 在该次采样的 **PER 批**上、**行为动作**
+        下的 Q 均值（`mean_i Q_c(s_i, a_i)`，`a_i` 来自 buffer）；
+      * ⚠ 这两个数在记录时**已经乘回 `s_c`**（见 `aifflor_ddpg.update_policy` 末尾的口径还原）
+        ⇒ 它们**已是原始口径**，这里**不再乘 `s_c`**（重复乘会差 100 倍，是很隐蔽的坑）。
+
+    口径含义（用户选择）：该批均值随**缓冲的自然淘汰**（环形容量 = `--rmsize`）而更新 ——
+    旧 transition 被覆盖后均值跟着当前行为分布走 ⇒ 作为"策略进步"的代理；且批是随机抽的、
+    跨天混合 ⇒ **不含当日风况**（消掉风况引起的慢漂）。代价：它同时带 PER 过采偏差与
+    行为动作（探索噪声）成分，且跟随速度受 `rmsize` 限制。
+
+    统计缺失（`record_update_stats` 关 / 本块还没更新 / warmup 期）⇒ 返回 `None`，
+    由调用方回退到 EMA（`dual_update_*_hsrl` 的 `ema=` 分支）。
+    """
+    st = getattr(agent, 'update_stats', None) if stats is None else stats
+    if not st:
+        if return_info:
+            return None, dict(q_agg=float('nan'), n_update=0, empty=True)
+        return None
+    keys = set(st[0].keys())
+    if 'q_c_mean' not in keys:
+        if return_info:
+            return None, dict(q_agg=float('nan'), n_update=0, empty=True)
+        return None
+    q1 = float(np.mean([float(s['q_c_mean']) for s in st]))
+    q2 = float(np.mean([float(s['q_c2_mean']) for s in st])) if 'q_c2_mean' in keys else q1
+    _agg = HSRL_DUAL_Q_AGG if agg is None else str(agg)
+    q_raw = {'mean': 0.5 * (q1 + q2), 'min': min(q1, q2), 'max': max(q1, q2)}[_agg]
+    sc = _cost_scale_of(agent) if cost_scale is None else float(cost_scale)
+    g = float(agent.discount if gamma is None else gamma)
+    rate = cost_rate_from_q(q_raw, g, block=block, horizon=horizon)
+    if return_info:
+        # `q_agg` 统一报成**网络（归一化）口径**（÷s_c），便于与点估计/近端批的列直接比较
+        return rate, dict(q_agg=q_raw / max(1e-12, sc), q_raw=q_raw, q1=q1, q2=q2, agg=_agg,
+                          s_c=sc, gamma=g, horizon=horizon, rate=rate,
+                          n_update=len(st), empty=False)
     return rate
 
 
