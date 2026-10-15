@@ -552,16 +552,19 @@ def main():
     _re, _ie = H.update_batch_cost_rate(_AUpd([]), horizon='infinite', return_info=True)
     check(_re is None and _ie['empty'] and _ie['n_update'] == 0,
           '统计为空（warmup / 未开 record_update_stats）⇒ 返回 None，由调用方回退 EMA')
-    _a = _A(0.0, 0.967)
-    H.dual_update_H_hsrl(_a, 15.0, q_rate=None, src='q', ema=30.0)
-    check(_a.lam > 0.967, '分子为 None 时 H 对偶**自动回退 EMA**（λ1 仍会动）')
-
-    # ---- λ1：物理价区间 ↔ actor 空间、单调与封顶 ----
+    # ---- λ1：区间（下界按 **actor 空间** 指定 = 5）、单调与封顶 ----
     _kl = float(hc.lam_scale())
     _lo1, _hi1, _init1 = H.lam1_phys_bounds()
-    check(abs(_init1 - H.HSRL_LAM1_PHYS_INIT * _kl) < 1e-15
-          and abs(_hi1 - H.HSRL_LAM1_PHYS_MAX * _kl) < 1e-15,
-          'λ1 区间（actor）= 物理价 × lam_scale(%.3g) = [%.4f, %.4f]' % (_kl, _lo1, _hi1))
+    check(abs(_lo1 - H.HSRL_LAM1_ACTOR_MIN) < 1e-12 and abs(_init1 - _lo1) < 1e-12,
+          'λ1 **actor 空间下界 = 5**、初值 = 下界（用户第四轮口径；此前 0.0967）')
+    check(abs(_hi1 - H.HSRL_LAM1_PHYS_MAX * _kl) < 1e-12,
+          'λ1 区间（actor）= [下限 5（不随 lam_scale 变）, 物理上界 %.0f×lam_scale(%.3g)] = [%.4f, %.4f]'
+          % (H.HSRL_LAM1_PHYS_MAX, _kl, _lo1, _hi1))
+    check(abs(H.HSRL_LAM1_PHYS_MIN - 50.0) < 1e-9,
+          'λ1 的**物理价下限（生产 lam_scale=0.1）= 50** 元/(MW·step) ⇒ 生产区间物理 [50, 100]')
+    _a = _A(0.0, _init1)
+    H.dual_update_H_hsrl(_a, 15.0, q_rate=None, src='q', ema=30.0)
+    check(_a.lam > _init1, '分子为 None 时 H 对偶**自动回退 EMA**（λ1 仍会动，且 ≥ 新下限 5）')
     a = _A(0.0, _init1)
     H.dual_update_H_hsrl(a, 15.0, q_rate=30.0)          # ratio = 2
     check(a.lam > _init1 and a.lam <= _hi1, 'H 对偶（Q 分子）: ratio=2 ⇒ λ1 上升且不破上界')

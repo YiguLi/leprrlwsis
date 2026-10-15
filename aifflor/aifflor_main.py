@@ -43,8 +43,10 @@ L: r2 = −1·min(clip_amount, 20)   [MW] 命令与实际之差 (两段 clip 合
 对偶上升 (两层都是 EMA 实际块成本)
 ----------------------------------
     H: EMA ← 0.98·EMA + 0.02·sum_c1
-       uniform: 乘性 lam1 ← lam1·exp(0.02·(EMA/d_block_H − 1)),
-                lam1 ∈ [0.967, 4.833], 初值 0.967, d_block_H = 15.0 (= 3 MW × 5 步)
+       uniform: 乘性 lam1 ← lam1·exp(0.02·(rate/d_block_H − 1)), rate = critic cost 的 Q
+                lam1 ∈ actor [5.0, 10.0]（**下界按 actor 空间指定 = 5**，用户第四轮口径）
+                ⇔ 物理 [50, 100] 元/(MW·step)，初值 = 5.0（= 下限）, d_block_H = 15.0 (= 3 MW × 5 步)
+                ⚠ 旧口径 [0.967, 100]/初值 0.967 已被取代（见 hsrl.HSRL_LAM1_ACTOR_MIN 的注释）
        legacy : 加性 lam1（本项目原式）
     L: EMA ← 0.98·EMA + 0.02·sum_c2;  lam2 ← clip(lam2·exp(0.02·(EMA/d_block_L − 1)), 0.5, 2), 初值 1.0 (无量纲兑换率)
        d_block_L = 1.2 (⇔ 允许搁置 0.02 MWh/块), curriculum 减半地板 0.15
