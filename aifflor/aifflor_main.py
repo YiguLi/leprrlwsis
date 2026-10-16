@@ -47,6 +47,7 @@ L: r2 = −1·min(clip_amount, 20)   [MW] 命令与实际之差 (两段 clip 合
                 lam1 ∈ 物理 [2.0, 50.0] 元/(MW·step)（= actor [0.2, 5.0]），初值 = 下限 2.0
                 依据: 上界 = max(平抑资源边际成本 20, 峰价降载 16.33) 的 2.5×；界外波动单价 20·λ1
                 d_block_H = 15.0 (= 3 MW × 5 步)
+                curriculum 地板 = 0（用户第六轮）：d_block_H 可一直减半，连续 50 块不满足即自行停止
                 ⚠ 历史口径 [0.967, 100] / [50, 100] 已被取代（见 hsrl.HSRL_LAM1_PHYS_MIN 的注释）
        legacy : 加性 lam1（本项目原式）
     L: EMA ← 0.98·EMA + 0.02·sum_c2;  lam2 ← clip(lam2·exp(0.02·(EMA/d_block_L − 1)), 0.5, 2), 初值 1.0 (无量纲兑换率)
@@ -933,10 +934,13 @@ def train_hsrl(num_iterations_H,
     # ---- H 层 EMA 对偶（口径未变: sum_c1 = 波动成本 + W_GAP·unfeasible_gap(≡0)）----
     _h = hc.h_settings()
     d_block_H = _h['d_block'] if _h else 50.0
-    d_block_H_min = _h['d_block_min'] if _h else 5.0
-    # ---- L 层 EMA 对偶（HSRL 重标: c_L 无量纲 ⇒ λ2 ∈ [2,50], d_block_L = 0.5）----
+    # curriculum 地板：**HSRL 分支用 0（用户第六轮）** ⇒ 允许一直减半、由可达性自行停止
+    #   （此前沿用 `_h['d_block_min'] = D_BLOCK = 初值` ⇒ 减半是空操作、curriculum 被设计性禁用）。
+    #   ⚠ 非 HSRL 的旧 train() 仍用 `_h['d_block_min']`，逐位不变。
+    d_block_H_min = float(getattr(args, 'hsrl_d_block_h_min', hsrl.HSRL_D_BLOCK_H_MIN))
+    # ---- L 层 EMA 对偶（HSRL 重标: c_L 无量纲 ⇒ λ2 ∈ [2,50], d_block_L = 0.1）----
     d_block_L = float(getattr(args, 'hsrl_d_block_l', hsrl.HSRL_D_BLOCK_L))
-    d_block_L_min = hsrl.HSRL_D_BLOCK_L_MIN
+    d_block_L_min = float(getattr(args, 'hsrl_d_block_l_min', hsrl.HSRL_D_BLOCK_L_MIN))
     consecutive_satisfied_H = 0
     consecutive_satisfied_L = 0
 
@@ -1863,8 +1867,9 @@ if __name__ == "__main__":
     parser.add_argument('--hsrl_sig_noise_min', default=0.025, type=float,
                         help='HSRL: 第 6 维探索噪声地板 [MW·min] (默认 0.025 = 满量程的 1%%)')
     parser.add_argument('--hsrl_d_block_l', default=hsrl.HSRL_D_BLOCK_L, type=float,
-                        help='HSRL: L 层每块 sum_c_L 预算 (默认 %.2f = 5 步平均 0.1 的偏差)'
-                             % hsrl.HSRL_D_BLOCK_L)
+                        help='HSRL: L 层每块 sum_c_L 预算的**初值** (默认 %.2f；地板见 '
+                             '--hsrl_d_block_l_min = %.1f)' % (hsrl.HSRL_D_BLOCK_L,
+                                                              hsrl.HSRL_D_BLOCK_L_MIN))
     parser.add_argument('--hsrl_dual_src', default=hsrl.HSRL_DUAL_SRC,
                         choices=['q', 'ema'],
                         help='HSRL: **对偶的分子** q=critic cost 的 Q（默认；比实际块成本的 EMA '
@@ -1892,6 +1897,14 @@ if __name__ == "__main__":
                         help='HSRL: λ1 的**物理价上限** [元/(MW·step)]（默认 %.1f = max(平抑资源边际成本: '
                              'BESS 退化 20, 峰价降载 16.33) 的 2.5×；界外波动单价是 20·λ1 ⇒ '
                              '20×50 = 1000 远大于峰价 16.33）。⚠ 上界必须 > 下界' % hsrl.HSRL_LAM1_PHYS_MAX)
+    parser.add_argument('--hsrl_d_block_h_min', default=hsrl.HSRL_D_BLOCK_H_MIN, type=float,
+                        help='HSRL: H 层 curriculum 的**收敛下限**（地板，默认 %.1f ⇒ 可一直减半，'
+                             '由"连续 50 块不满足 ema ≤ d"自行停止）。此前沿用 hc.h_settings 的 '
+                             'd_block_min = 初值 15 ⇒ 减半是空操作（curriculum 被禁用）'
+                             % hsrl.HSRL_D_BLOCK_H_MIN)
+    parser.add_argument('--hsrl_d_block_l_min', default=hsrl.HSRL_D_BLOCK_L_MIN, type=float,
+                        help='HSRL: L 层 curriculum 的**收敛下限**（地板，默认 %.1f；此前 0.05）'
+                             % hsrl.HSRL_D_BLOCK_L_MIN)
     parser.add_argument('--hsrl_test_wind', default='fixed', choices=['fixed', 'random'],
                         help='HSRL: test20 的风速段 fixed=**固定段**（默认 col=%d/start=%d，'
                              '每次触发同一场景 ⇒ 配对看收敛）; random=每次触发随机取列+起点'

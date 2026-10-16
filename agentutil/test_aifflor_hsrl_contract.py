@@ -568,6 +568,26 @@ def main():
           '--hsrl_lam1_min/--hsrl_lam1_max 可覆盖（[10, 40] 物理），且仍走 ×lam_scale')
     _o2 = H.lam1_phys_bounds(lam_min=60.0, lam_max=40.0)         # 非空保护
     check(abs(_o2[1] - _o2[0]) < 1e-12, '上界 < 下界时自动抬到下限（区间非空保护）')
+
+    # ---- curriculum 的收敛下限（地板）= 0（用户第六轮）----
+    check(H.HSRL_D_BLOCK_H_MIN == 0.0 and H.HSRL_D_BLOCK_L_MIN == 0.0,
+          '两层 curriculum 地板 = 0（H 此前 = 初值 15 ⇒ 减半被禁用；L 此前 0.05）')
+    _d = H.HSRL_D_BLOCK_L
+    _trace = []
+    for _ in range(6):                                          # 模拟"连续满足"时的减半
+        _trace.append(round(_d, 6))
+        _d = max(_d / 2.0, H.HSRL_D_BLOCK_L_MIN)
+    check(_trace[:4] == [0.1, 0.05, 0.025, 0.0125] and _trace[-1] < 0.01,
+          '地板 = 0 ⇒ 预算可持续减半（不受人为地板阻挡）: %s' % _trace[:4])
+    # 地板设 0 后 d 可极小 ⇒ 指数饱和必须既防溢出又保持乘法语义
+    _a2 = _A(0.0, _init1)
+    H.dual_update_H_hsrl(_a2, 15.0, q_rate=30.0)                  # ratio = 2，正常区间
+    check(abs(_a2.lam - min(_init1 * float(np.exp(0.02 * 1.0)), _hi1)) < 1e-12,
+          '指数饱和不影响正常区间（ratio=2 ⇒ λ1 × e^0.02）')
+    _a3 = _A(0.0, _init1)
+    _r = H.dual_update_H_hsrl(_a3, 1e-12, q_rate=1e3)            # ratio ~1e15 ⇒ 饱和
+    check(_r == _hi1 and np.isfinite(_r),
+          '极端 ratio（d→0）⇒ 饱和到上界且无 inf/nan（%s）' % _r)
     _a = _A(0.0, _init1)
     H.dual_update_H_hsrl(_a, 15.0, q_rate=None, src='q', ema=30.0)
     check(_a.lam > _init1, '分子为 None 时 H 对偶**自动回退 EMA**（λ1 仍会动）')

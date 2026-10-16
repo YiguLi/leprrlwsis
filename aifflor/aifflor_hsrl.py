@@ -126,7 +126,18 @@ HSRL_L_LAM_INIT = 10.0          # 初值 = sqrt(MIN·MAX) = 10（对数对称）
 HSRL_L_EMA_LAM_LR = 0.02        # 乘性对数步长（与 hc.ETA_LAM 同刻度）
 HSRL_D_BLOCK_L = 0.1            # 每块 sum_c_L 预算（Q 口径下不再为噪声付费 ⇒ 由 0.5 收紧到 0.1，
                                 #   即 ratio ×5 ⇒ λ2 升到 20~50，恢复"兑现计划"的紧度）
-HSRL_D_BLOCK_L_MIN = 0.05       # curriculum 地板
+#: curriculum 的**收敛下限**（地板）——**2026-10 用户第六轮：两层的下限都设为 0**
+#:   * 语义：预算可以一直减半（`d ← max(d/2, 地板)`），不设人为地板；减半会在
+#:     "连续 50 块不满足 `ema_cost ≤ d`"时**自行停止** ⇒ 地板实际由**可达性**决定（自适应标定到
+#:     策略当前能达到的水平），而不是由常数拍定。
+#:   * 用户理由："我们对 λ 的设计（物理价上界 50 = max(资源边际成本 20, 峰价降载 16.33) 的 2.5×）
+#:     确保其**就算钉在上限也不会在波动约束内影响盈利**" ⇒ 收紧预算不会把盈利目标压垮，
+#:     所以不需要用"地板 = 初值"来禁用 curriculum（此前 H 层正是这么禁用的）。
+#:   * ⚠ 后果（已知并接受）：预算一旦降到低于实际可达水平，`ratio = rate/d` 会持续 > 1
+#:     ⇒ λ 钉在上限并保持（这是设计允许的工作点）；`d_block_H/L` 会出现在 CSV/TB 里，
+#:     可直接观察减半停在哪一级。
+HSRL_D_BLOCK_L_MIN = 0.0        # L 层 curriculum 地板 = 0（此前 0.05）
+HSRL_D_BLOCK_H_MIN = 0.0        # H 层 curriculum 地板 = 0（此前 = 初值 15 ⇒ 减半被禁用）
 HSRL_L_COST_LIMIT = 0.25        # agent_L.cost_limit（仅 non-EMA 分支用）
 HSRL_L_CURRICULUM_BLOCKS = 50   # 预算减半所需连续满足块数（= EMA 时间常数 1/α）
 
@@ -536,7 +547,11 @@ def dual_update_L_hsrl(agent, d_block, q_rate=None, src=None, ema=None,
     if rate is None or agent is None:
         return None
     ratio = rate / max(float(d_block), 1e-9)
-    lam = float(agent.lam) * float(np.exp(float(eta) * (ratio - 1.0)))
+    # 指数饱和：curriculum 地板设 0 后 d 可一直减半 ⇒ ratio 可极大；这里把指数夹到 ±60
+    # （等价于 |ratio−1| ≤ 3000），只避免 `exp` 溢出告警；由于随后必然 clip 到 [lam_min, lam_max]，
+    # 饱和后与用 inf 的结果**逐位相同**（λ>0 ⇒ 单调），不改变任何正常区间的行为。
+    _e = float(np.clip(float(eta) * (ratio - 1.0), -60.0, 60.0))
+    lam = float(agent.lam) * float(np.exp(_e))
     agent.lam = float(np.clip(lam, float(lam_min), float(lam_max)))
     return agent.lam
 
@@ -761,7 +776,10 @@ def dual_update_H_hsrl(agent, d_block, q_rate=None, src=None, ema=None,
     hi = _hi if lam_max is None else float(lam_max)
     _eta = HSRL_LAM1_ETA if eta is None else float(eta)
     ratio = rate / max(float(d_block), 1e-9)
-    lam = float(agent.lam) * float(np.exp(_eta * (ratio - 1.0)))
+    # 指数饱和（同 L 版注释）：curriculum 地板设 0 后 d 可一直减半，避免 exp 溢出告警；
+    # 饱和后与用 inf 的结果逐位相同（随后 clip 到 [lo, hi]）。
+    _e = float(np.clip(_eta * (ratio - 1.0), -60.0, 60.0))
+    lam = float(agent.lam) * float(np.exp(_e))
     agent.lam = float(np.clip(lam, lo, hi))
     return agent.lam
 
