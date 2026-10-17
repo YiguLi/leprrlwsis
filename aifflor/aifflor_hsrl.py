@@ -75,8 +75,7 @@ HSRL 分支（aifflor 专用）——「块总放电量」语义下的上下层�
    Q 是 bootstrap 出来的**期望**成本 ⇒ λ 的波动显著小于"单块实现值"（实测块 sum_c1
    中位数 4.5、最大 305，重尾）。取值约定：状态 = **块首**观测、动作 = actor 的**确定性**
    动作、twin 取**均值**（回归目标已用 max，对偶再用 max 是双重高估）。Q 未建立时回退 EMA。
-   EMA 仍然维护（日志 / curriculum / 回退用）。λ1 的区间见 `HSRL_LAM1_MIN/MAX`
-   （**actor 空间**；"物理价"口径已按用户 2026-11 口径删除，理由见那里的注释）。
+   EMA 仍然维护（日志 / curriculum / 回退用）。λ1 的物理价区间见 `HSRL_LAM1_PHYS_*`。
 """
 import numpy as np
 
@@ -131,8 +130,8 @@ HSRL_D_BLOCK_L = 0.1            # 每块 sum_c_L 预算（Q 口径下不再为�
 #:   * 语义：预算可以一直减半（`d ← max(d/2, 地板)`），不设人为地板；减半会在
 #:     "连续 50 块不满足 `ema_cost ≤ d`"时**自行停止** ⇒ 地板实际由**可达性**决定（自适应标定到
 #:     策略当前能达到的水平），而不是由常数拍定。
-#:   * 用户理由："我们对 λ 的设计确保其**就算钉在上限也不会在波动约束内影响盈利**"
-#:     ⇒ 收紧预算不会把盈利目标压垮，
+#:   * 用户理由："我们对 λ 的设计（物理价上界 50 = max(资源边际成本 20, 峰价降载 16.33) 的 2.5×）
+#:     确保其**就算钉在上限也不会在波动约束内影响盈利**" ⇒ 收紧预算不会把盈利目标压垮，
 #:     所以不需要用"地板 = 初值"来禁用 curriculum（此前 H 层正是这么禁用的）。
 #:   * ⚠ 后果（已知并接受）：预算一旦降到低于实际可达水平，`ratio = rate/d` 会持续 > 1
 #:     ⇒ λ 钉在上限并保持（这是设计允许的工作点）；`d_block_H/L` 会出现在 CSV/TB 里，
@@ -166,50 +165,57 @@ HSRL_DUAL_SRC = 'q'             # 'q'（critic cost 的 Q）| 'ema'（实际块�
 HSRL_DUAL_Q_SRC = 'update_batch'
 HSRL_DUAL_RECENT_N = 256        # 近端批的条数（H 每块 1 条 ⇒ ≈256 块 ≈ 21 h，覆盖一天的风况）
 
-# ---- H 层 λ1：**actor 空间**的乘子（无量纲；作用在已除过 s_p/s_c 的两条通道上）----
-#: **为什么取消"物理价"口径（2026-11 用户口径）**：`c1` 内部含**两个**波动惩罚，斜率分别是
-#:   `1`（`P_F ≤ 3`）与 `1 + K_V = 101`（越限），二者**不可通约** ⇒ "每 MW·step 的波动值
-#:   多少元"没有唯一答案：取 1 就把越限低估 100 倍，取 101 就把界内高估 100 倍，任何单一
-#:   物理价都是对两条斜率的错误折中。故 `元/(MW·step)` 标定（`HSRL_LAM1_PHYS_*`）、
-#:   `lam1_phys_bounds()`、`lam1_phys` 日志列、以及把 `--hsrl_lam1_min/max` 解释成物理价的
-#:   通道**全部删除**；历史推导（上界 = 2.5× 资源边际成本、下界 = 名义边际收益 21% 等）随
-#:   物理价口径一起作废，可在 git 历史 `ab5731e` 查。
-#: 现在 λ1 只按它**真正被使用**的口径声明：actor 目标 `q_p − λ·q_c` 里的乘子
-#:   （`q_p = Q_p/s_p`、`q_c = Q_c/s_c` 已各自除过自己的尺度）。
-#:   * 数值（**2026-11 用户口径：按物理成本标定上界 40**）：上界 4.0 ⇔ 物理 40 元/(MW·step)
-#:     （= 4.0 × `s_p/s_c` = ×10，`s_p=1000 / s_c=100`）。标定理由（用户）：
-#:       块内 **1 MW·step** 的界内波动，在 λ1_phys = 50 时成本 50 元 ≈ 300 元/MWh 下
-#:       一整块的盈利（300 × 2.0~2.7 MW × 5 min → 50~67.5 元）⇒ 50 已把利润吃干净；
-#:       **40** 则留出 ~20~40% 的盈利空间，同时越限单价 `101 × 40 = 4040 元/(MW·step)`
-#:       （≈ 峰价边际收益 16.33 的 247×）⇒ "> 3 MW 的波动惩罚极大"。
-#:       下界 0.2 ⇔ 物理 2（= 300 元/MWh 边际收益 5.0 元/(MW·step) 的 40%）。
-#:   * 初值 = 下限 0.2；
-#:   * ⚠ 该数值**绑定当前 `s_p=1000 / s_c=100`**（`lam_scale = 0.1`）。改
-#:     `--value_scale/--cost_scale` 后 λ1 **不再自动重标**（旧实现乘 `lam_scale()` 正是
-#:     物理价口径的残留）⇒ 需按 `s_c/s_p` 同比例改；main 在 `lam_scale ≠ 0.1` 时打印告警；
-#:   * 上界只在**出现越限块**时起作用（实测最大块 sum_c1 = 305 ≫ 15，测于 K_V=20；K_V=100
-#:     下更大）⇒ 自适应仍是**对称**乘性步长 0.02（用户：不加非对称、不加专用测试段）。
-HSRL_LAM1_MIN = 0.2             # actor 空间下界（⇔ 物理 2 元/(MW·step)）
-HSRL_LAM1_MAX = 4.0             # actor 空间上界（⇔ 物理 40 元/(MW·step)，2026-11 用户标定）
-HSRL_LAM1_INIT = HSRL_LAM1_MIN  # 初值 = 下限（用户选择）
+# ---- H 层 λ1：**物理价**区间 [元/(MW·step)]（actor 空间 = 物理价 × hc.lam_scale()=s_c/s_p）----
+#: 已定稿（第三轮讨论，用户口径 D1 = 单通道只重标定区间）：
+#:   * **上界**：越限每多 1 MW·step，c1 增 21（含基础项）= `(1+K_V)·λ1`，要求最大罚 > 980×2 = 1960
+#:     ⇒ `λ1_max > 1960/21 ≈ 93.3` ⇒ 取 **100**（= 峰价边际收益 980/60 = 16.33 的 6.1×、
+#:     名义边际收益 9.67 的 10.3×、HSRL 下 BESS 退化边际价 20 元/MW·min 的 5×
+#:     ⇒ 满足仓库既有原则"λ_max 必须高于任何平抑资源的边际成本"）。
+#:   * **上界 = 50 元/(MW·step)**（**2026-10 用户第五轮**）：依据 = 仓库原则"λ_max 必须高于
+#:     **任何平抑资源的边际成本**"。本项目只有两种平抑资源的边际成本：
+#:       - BESS 放电退化：**20 元/(MW·step)**（= 20 元/MW·min）
+#:       - 风机降载（少卖电）：`pr·Δt` = **5.0 ~ 16.33 元/(MW·step)**（300~980 元/MWh）
+#:     ⇒ 需求 = `λ_max > max(20, 16.33) = 20`，取 **2.5×** ⇒ **50**
+#:     （= 退化价 2.5×、峰价边际收益 `980/60 = 16.33` 的 3.06×）。
+#:     界外波动的单价是 `20·λ1`（见下），故判据"980 电价下越限的净梯度必须为负"写作
+#:     `20·λ_max = 1000 > 16.33` ⇒ **余量 61×**（界内项再加 1 ⇒ 机械导数为 `21·λ1`，差 5%）。
+#:     ⚠ **记档：用户原写法 `50×20 = 1000 略大于 980` 是量纲混淆**（980 是 元/MWh，须先乘
+#:       `Δt = 1/60 h` 变成 16.33 元/(MW·step) 才能与 λ1 比）；仓库更早的
+#:       `(1+K_V)·λ_max > 980×2 = 1960 ⇒ λ_max > 93.3` 同样混淆量纲，**已废止**（它给出 100）。
+#:   * **下界 = 2 元/(MW·step)**（**用户第五轮第二次重标**；此前依次为 0.967 → 物理 50 → 现在 2）：
+#:       - `2/16.33 = 12%`（峰价边际收益）、`2/5.0 = 40%`（低电价边际收益）、`2/9.67 = 21%`（名义）；
+#:       - **关键性质：2 < BESS 退化边际价 20** ⇒ 界内波动**不值得为它动用 BESS**（不诱导无谓循环），
+#:         同时界内仍**非零价**（"不完全免费"）；
+#:       - 也高于量纲正确的要求 `16.33/21 = 0.78`（界内项口径 `16.33/20 = 0.82`）⇒ 判据仍成立。
+#:     用户口径的单位说明（原文）：λ1 是"界内波动"的单价 [元/(MW·step)]，界外波动的单价是 20 倍。
+#:   * 生产口径（`s_c=100, s_p=1000 ⇒ lam_scale=0.1`）：物理 `[2, 50]` ⇔ actor `[0.2, 5.0]`，
+#:     初值 = 下限。两个界都可用 `--hsrl_lam1_min/--hsrl_lam1_max`（物理价）临时覆盖。
+#:   * 上界只在**出现越限块**时起作用（实测最大块 sum_c1 = 305 ≫ 15）；本轮**不加**非对称步长、
+#:     不加含越限的专用测试段（用户选择"都不要"）⇒ 自适应仍是**对称**乘性步长 0.02。
+HSRL_LAM1_PHYS_MIN = 2.0        # 元/(MW·step)（用户第五轮：2）
+HSRL_LAM1_PHYS_MAX = 50.0       # 元/(MW·step)（用户第五轮：max(资源边际成本)=20 的 2.5×）
+HSRL_LAM1_PHYS_INIT = HSRL_LAM1_PHYS_MIN   # 初值 = 下限（用户选择）
 HSRL_LAM1_ETA = 0.02            # 乘性对数步长（= hc.ETA_LAM，对称；用户选择不改非对称）
 
 
-def lam1_bounds(lam_min=None, lam_max=None, lam_init=None):
-    """`(lo, hi, init)` 的 **actor 空间**值 —— 直接返回，**不再乘** `hc.lam_scale()`。
+def lam1_phys_bounds(lam_min=None, lam_max=None, lam_init=None):
+    """`(lam_min, lam_max, lam_init)` 的 **actor 空间**值 = 物理价 × `hc.lam_scale()`。
 
-    * 覆盖通道（`--hsrl_lam1_min/--hsrl_lam1_max`）与默认值**同口径**（actor 空间）；
-    * `hi < lo` ⇒ 抬到 `lo`（区间非空保护）；`init` 夹进 `[lo, hi]`；
-    * 与 `--value_scale/--cost_scale` **解耦**：改 scale 不会改这三个数（代价见上面的注释）。
-    * 物理价口径已删除：`c1` 内含 1 与 1+K_V 两条斜率，单一物理价不成立。
+    * **两个界都以物理价为准**（元/(MW·step)，与 c1 同量纲；用户第五轮口径）；
+      可用参数（对应 `--hsrl_lam1_min/--hsrl_lam1_max`）临时覆盖。
+    * 必须在**调用时**取 `hc.lam_scale()`：本模块在 `hc.set_cost_scale()` 之前被 import，
+      模块级常量会冻结成默认缩放（1.0）而不是生产值（0.1）。
+    * 初值默认 = 下限（用户选择）。
+    * 生产口径：物理 `[2.0, 50.0]` ⇔ actor `[0.2, 5.0]`，初值 0.2。
     """
-    lo = HSRL_LAM1_MIN if lam_min is None else float(lam_min)
-    hi = HSRL_LAM1_MAX if lam_max is None else float(lam_max)
-    if hi < lo:                     # 非空保护
-        hi = lo
-    init = lo if lam_init is None else float(lam_init)
-    init = min(max(init, lo), hi)
-    return (lo, hi, init)
+    kl = float(hc.lam_scale())
+    lo_p = HSRL_LAM1_PHYS_MIN if lam_min is None else float(lam_min)
+    hi_p = HSRL_LAM1_PHYS_MAX if lam_max is None else float(lam_max)
+    if hi_p < lo_p:                 # 非空保护
+        hi_p = lo_p
+    in_p = lo_p if lam_init is None else float(lam_init)
+    in_p = min(max(in_p, lo_p), hi_p)
+    return (lo_p * kl, hi_p * kl, in_p * kl)
 
 # ---- L 层：观测刻度 ----
 OBS_U_SCALE = 10.0              # 风速 u [m/s] → /10
@@ -231,16 +237,11 @@ HSRL_TEST_STEPS = 20            # 20 步 = 4 个块
 HSRL_TEST_PRICE = 300.0         # 固定电价（低谷）
 HSRL_TEST_SOC0 = 0.25           # 开局 SOC [MWh]（= 容量中点）
 #: **固定风速段**（`wind_pool = env_test.wind_noise.iloc[:, 1:]`，行=天内步、列=天）：
-#: ⚠ **选段与风速池绑定**（2026-10 起 `env.WIND_CSV` 默认 = 无噪声 `FFC_speed_1.csv`，
-#: `HSRL_WIND_CSV` 可切回）：同一窗口 `col=120/start=483` 在加噪池上 `Σ|Δu|=29.0`
-#: （"均值 8~11"窗口里的前 5%，u 均 10.35 / 7.70~12.86），在**无噪声池上只有 1.0**
-#: （u 均 10.30 / 10.05~10.86，近乎平坦 ⇒ 波动成本几乎无从优化）。
-#: 若要让 test20 重新"有波动可测"：用 `--hsrl_test_wind random`，或在当前池上重选段
-#: （无噪声池 Σ|Δu| 最大的窗口是 col=167/start=1029：14.45，但均值 13.25 偏高）。
-#: 原选段依据（加噪池，扫 194 列 × 1421 起点）：均值 8~11 m/s 的窗口中**逐步爬坡
-#: Σ|Δu| 位于前 5%**；按平坦地形 5 台机 dP/du ≈ 1.07 MW/(m/s) 估算，单步 |ΔP| ≈ 2 MW
-#: **< 3 MW 限幅** ⇒ 有可观的波动成本可优化、但基本不出现越限（越限部分 BESS 只有
-#: 0.5 MW，本来就大多不可避 ⇒ 测不出策略差异）。
+#: 选段依据（`agentutil` 扫描 194 列 × 1421 起点）—— 均值 8~11 m/s 的窗口中
+#: **逐步爬坡 Σ|Δu| 位于前 5%**：u 均值 10.35 m/s（全池均值 10.83，代表性好）、
+#: min 7.70 / max 12.86、Σ|Δu| = 29.0；按平坦地形 5 台机 dP/du ≈ 1.07 MW/(m/s) 估算，
+#: 单步 |ΔP| ≈ 2 MW **< 3 MW 限幅** ⇒ 有可观的波动成本可优化、但基本不出现越限
+#: （越限部分 BESS 只有 0.5 MW，本来就大多不可避 ⇒ 测不出策略差异）。
 #: 固定段的意义：**每次触发都是同一条场景** ⇒ test20 曲线是"配对"的，可直接看收敛。
 HSRL_TEST_WIND_COL = 120        # 列（天）
 HSRL_TEST_WIND_START = 483      # 起点（天内第几步）
@@ -609,7 +610,7 @@ def q_cost_rate(agent, s_t, a_t=None, horizon='infinite', agg=None, gamma=None,
         已接近 episode 终止，`Q_c` 会退化成"最后一步的成本"，严重低估整块成本）；
       * **动作** = 缺省 `actor(s_t)`（确定性）；**调用方应传本块第一步"实际执行"的动作**
         `a_t` —— critic 的 TD 目标是**带探索噪声的实际 cost**，用无噪动作评估会**系统性低估**
-        （`c_L = 1−exp(−|·|)`、`c1 = P_F + K_V(P_F−3)⁺` 都是凸的 ⇒ 噪声下 E[c] > c(E)）。
+        （`c_L = 1−exp(−|·|)`、`c1 = P_F + 20(P_F−3)⁺` 都是凸的 ⇒ 噪声下 E[c] > c(E)）。
         实测：L 层 rate 0.317（无噪）vs 1.79（实际 EMA，差 5.6×），改用实际动作后收敛到同量级。
         用 Q 而不是实际值的好处仍在：噪声的**单次实现**被 critic 的**期望**取代。
       * **critic** = 在线 `critic_c / critic_c2` 的 twin 聚合（默认 `mean`，见
@@ -759,8 +760,9 @@ def dual_update_H_hsrl(agent, d_block, q_rate=None, src=None, ema=None,
                        lam_min=None, lam_max=None, eta=None):
     """HSRL 版 H 对偶上升（乘性，分子默认 = critic cost 的 Q）—— 与 L 版同形。
 
-    λ1 的区间/初值由 `HSRL_LAM1_MIN/MAX/INIT` 给出，**直接是 actor 空间**（不再有物理价
-    换算：`c1` 内含 `1` 与 `1+K_V` 两条斜率，单一物理价不成立 —— 见常量区注释）。
+    ⚠ λ1 的**区间**必须与物理价口径一致（`λ_phys = λ_actor/lam_scale = λ_actor·s_p/s_c`）：
+    区间/初值由 `HSRL_LAM1_PHYS_*` 给出，见那里的推导（用户口径：越限多出的 1 MW 的
+    最大惩罚要 > 980×2 元）。
     """
     _src = HSRL_DUAL_SRC if src is None else str(src)
     if _src == 'q' and q_rate is not None:
@@ -769,7 +771,7 @@ def dual_update_H_hsrl(agent, d_block, q_rate=None, src=None, ema=None,
         rate = None if ema is None else float(ema)
     if rate is None or agent is None:
         return None
-    _lo, _hi, _ = lam1_bounds()
+    _lo, _hi, _ = lam1_phys_bounds()
     lo = _lo if lam_min is None else float(lam_min)
     hi = _hi if lam_max is None else float(lam_max)
     _eta = HSRL_LAM1_ETA if eta is None else float(eta)

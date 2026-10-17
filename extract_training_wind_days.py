@@ -22,8 +22,7 @@ from torch.utils.tensorboard import SummaryWriter
 # ---- Paths ----
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 FIXED_DAY_SEQ_PATH = os.path.join(_SCRIPT_DIR, 'fixed_day_sequence.csv')
-WIND_CSV_PATH = os.path.join(_SCRIPT_DIR,
-                             os.environ.get('HSRL_WIND_CSV', 'FFC_speed_1.csv'))
+WIND_CSV_PATH = os.path.join(_SCRIPT_DIR, 'FFC_speed_noise_1.csv')
 
 
 def main():

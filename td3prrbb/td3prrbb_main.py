@@ -20,7 +20,7 @@ Reward structure (td3prrbb_myfunc.Cal_Rew_PRRBB):
   Upper (H): r1 = wT*(pr*ptur*time) + wB*(-pr*pbrule*time)
                   - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                   wT = wT_u(u)×wT_p(pr), wB ≡ 1.0 (【本轮变更】BESS 分段系数已去掉)
-             c1: uniform(默认 --c1-mode) = P_F + K_V*(P_F-3)+   [MW·step]  (K_V=100, hsrl_cost.fluct_cost)
+             c1: uniform(默认 --c1-mode) = P_F + 20*(P_F-3)+   [MW·step]  (hsrl_cost.fluct_cost)
                  legacy  = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + W_GAP(50)*unfeasible_gap
   Lower (L) —— 两区间分治 (hsrl_soctarget):
              r2 = −1·min(clip_amount, 20)      [MW] 命令与实际之差 (两段 clip 合计)

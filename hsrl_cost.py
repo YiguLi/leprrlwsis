@@ -10,9 +10,7 @@ HSRL 统一 H 层约束口径 —— 波动当量（单一真源）
 1. **c1 统一为"波动当量" [MW·step]**
        c1 = P_F + K_V · max(0, P_F − 3)
    * 平滑项斜率 1（不再被 0.1 的斜率淹没 ⇒ λ_min 能真正承载"平抑"偏好）
-   * 越限项额外 K_V 倍。**K_V = 100（2026-11 用户口径）**，原值 20（由"单次典型事件
-     0.85 MW 吃掉整块额度"反推）已被取代：20 只让单次 0.85 MW 越限吃 17 MW·step ≈ 1.1 块
-     额度，不足以把越限压成"近硬约束"；100 ⇒ 单次 0.85 MW 事件吃 85 MW·step = 5.7 块额度。
+   * 越限项额外 K_V 倍（K_V = 20 由"单次典型事件 0.85 MW 吃掉整块额度"反推）
    * `unfeasible_gap` 不再单列：它与"越限"是同一事件（实测触发率逐位相同 0.056%）
 2. **预算 d_block ≡ D_BLOCK = 3 MW × 5 步 = 15**
    * 语义 = 硬约束允许的最大消耗（"贴着 3 MW 上限跑满整块"）
@@ -41,7 +39,7 @@ MODE = 'uniform'          # 'uniform' | 'legacy'（由 main 的 --c1-mode 设定
 
 DT = 1.0 / 60.0           # 步长 (h)
 P_F_LIMIT = 3.0           # 波动硬限 (MW)
-K_V = 100.0               # 越限额外倍率（越限边际斜率 = 1 + K_V = 101）
+K_V = 20.0                # 越限额外倍率（越限边际斜率 = 1 + K_V = 21）
 D_BLOCK = 15.0            # = 3 MW × 5 步 = 硬约束允许的最大块消耗 [MW·step]
 
 RHO_S = 0.10              # λ_min / (pr_ref·dt)：平抑支付意愿（边际收益的 10%）
@@ -223,8 +221,8 @@ def summary(pr=None):
             '越限 {:.1f}元/MW·step={:.1f}× 边际收益); '
             'actor 用 λ=λ_raw×(s_c/s_p)∈[{:.4f},{:.4f}] 初值 {:.4f}; '
             '归一化 s_p={:g} (r1) / s_c={:g} (c1) — 入 critic 前各除一次, 对偶/日志/CSV 仍为原始口径'
-            .format(MODE, K_V, D_BLOCK, LAM_MIN, LAM_MAX, LAM_MIN, smooth_mul,
-                    (1.0 + K_V) * LAM_MIN, viol_mul,
+            .format(MODE, K_V, D_BLOCK, LAM_MIN, LAM_MAX, smooth_mul, viol_mul,
+                    LAM_MIN, (1.0 + K_V) * LAM_MIN, viol_mul,
                     LAM_MIN * _kl, LAM_MAX * _kl, LAM_INIT * _kl,
                     VALUE_SCALE, COST_SCALE))
 

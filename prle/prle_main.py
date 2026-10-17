@@ -82,7 +82,7 @@ def train_prle(num_iterations_H,
       Upper (H): r1 = w_wind*pr*ptur*time + w_bess*(-pr*pbrule*time)
                       - BESS_DEG_RMB_PER_MWH*max(-pbrule,0)*time - penalty_NN_H
                       - [块末] W_GAP*max(0, |soc_target − SOC_末| − SOC_TOL)  (uniform: 进 r1)
-                 c1: uniform(默认 --c1-mode) = P_F + K_V*(P_F-3)+  [MW·step]  (K_V=100)
+                 c1: uniform(默认 --c1-mode) = P_F + 20*(P_F-3)+  [MW·step]
                      legacy = C1_RISK*(10*max(0,P_F-3) + 0.1*P_F) + W_GAP(50)*unfeasible_gap
       Lower (L, SOC 目标语义): r2 = −1·min(clip_amount, 20) [MW] (影子套利项已删除)
                  c2 = +1·trackerr [MW] = 实际施加 pb 到参考集合的距离

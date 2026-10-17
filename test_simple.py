@@ -62,9 +62,8 @@ def main():
         output_dir = f'output/{label}-run-{run_number}'
     os.makedirs(output_dir, exist_ok=True)
 
-    # ---- 随机风速日（默认无噪声池；HSRL_WIND_CSV 可切回加噪版）----
-    wind_df = pd.read_csv(os.path.join(_SCRIPT_DIR,
-                                       os.environ.get('HSRL_WIND_CSV', 'FFC_speed_1.csv')))
+    # ---- 随机风速日 ----
+    wind_df = pd.read_csv(os.path.join(_SCRIPT_DIR, 'FFC_speed_noise_1.csv'))
     n_cols = wind_df.shape[1]
     rng = np.random.RandomState(seed)
     day_positions = rng.choice(range(1, n_cols), size=n_days, replace=False)

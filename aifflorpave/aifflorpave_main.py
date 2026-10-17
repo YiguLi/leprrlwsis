@@ -31,7 +31,7 @@ AIFFLOR — **td3per 的 FLORIS 引擎版**：上层 TD3PERRB 口径, 下层 RL 
 ----------------
 H: r1 = pr·P_G·dt − 490·max(−pbrule,0)·dt − penalty_NN_H          (P_G = ptur − pbrule)
     − [块末] W_GAP(10)·max(0, |soc_target − SOC_末| − SOC_TOL(0.1))   (uniform: 进 r1; legacy: 进 c1)
-    c1: uniform(默认 --c1-mode) = P_F + K_V·(P_F−3)⁺  [MW·step]   (K_V=100, hsrl_cost.fluct_cost)
+    c1: uniform(默认 --c1-mode) = P_F + 20·(P_F−3)⁺  [MW·step]       (hsrl_cost.fluct_cost)
         legacy = 1.0·[10·(P_F−3)⁺ + 0.1·P_F] + W_GAP(10)·unfeasible_gap
 L: r2 = −1·min(clip_amount, 20)   [MW] 命令与实际之差 (两段 clip 合计)
     c2 = +1·trackerr [MW] = 实际施加 pb（由 SOC 变化反解）到**参考集合**的距离

@@ -32,18 +32,6 @@ _DAY_SEQ_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               'fixed_day_sequence.csv')
 FIXED_DAY_SEQUENCE = pd.read_csv(_DAY_SEQ_PATH, header=None).values.flatten().tolist()
 
-# ---------------------------------------------------------------------------
-# 训练风速池文件（**唯一入口**）
-# ---------------------------------------------------------------------------
-#: 默认用**无噪声**的 `FFC_speed_1.csv`（2026-10 用户口径）。理由：`_noise_` 版本是
-#: 在干净序列上叠加了 **N(0, 1.0) m/s 的加性白噪声**（逐分钟 i.i.d.、每天独立重抽），
-#: 其幅度是干净序列**自身分钟级变化**（σ(Δu)≈0.05~0.13 m/s）的 ~20 倍 ⇒ 训练环境里
-#: `|ΔP_G|` 的绝大部分"波动"其实是这份人工噪声。想切回加噪版本**不必改代码**：
-#:     HSRL_WIND_CSV=FFC_speed_noise_1.csv python aifflor\aifflor_main.py ...
-#: 两份文件形状相同（1440 行 × 195 列，第 0 列为行号，列 1..194 = 天），
-#: `fixed_day_sequence.csv` 的天号对两者通用。
-WIND_CSV = os.environ.get('HSRL_WIND_CSV', 'FFC_speed_1.csv')
-
 class WindBattery:
     # ------------------------------------------------------------------
     # 标称动作（yawflor/README.md §5 的最小改动③）：**类属性单一真源**
@@ -87,10 +75,7 @@ class WindBattery:
         self.pr = self.price_list[0]
         
         # wind_speed_2 (Sequence)
-        # 训练风速池：WIND_CSV（默认 FFC_speed_1.csv = 无噪声；HSRL_WIND_CSV 可覆盖）。
-        # 属性名沿用 `wind_noise`（下游 env/aifflor_env/yawflor_env 全用它取 `wind_day`），
-        # 现在装的**不再一定是加噪版本**，别被名字误导。
-        self.wind_noise = pd.read_csv(WIND_CSV)
+        self.wind_noise = pd.read_csv("FFC_speed_noise_1.csv")
         self.wind_test_scenarios = pd.read_csv("test_scenarios.csv")
         self.count_wind = 0
 

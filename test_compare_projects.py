@@ -361,8 +361,7 @@ def main():
 
     # ---- 4. Generate shared random wind days ----
     # Read EXACTLY as env.py does: no index_col=0, so iloc[:,0]=Unnamed, iloc[:,1..]=wind data
-    wind_df = pd.read_csv(os.path.join(_SCRIPT_DIR,
-                                      os.environ.get('HSRL_WIND_CSV', 'FFC_speed_1.csv')))
+    wind_df = pd.read_csv(os.path.join(_SCRIPT_DIR, 'FFC_speed_noise_1.csv'))
     n_cols = wind_df.shape[1]
     print(f"\n风速 CSV: {n_cols} 列 "
           f"(iloc[:,0]='Unnamed:0', iloc[:,1..{n_cols-1}]=风速数据)")
