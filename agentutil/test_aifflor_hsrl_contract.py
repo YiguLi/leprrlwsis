@@ -552,21 +552,30 @@ def main():
     _re, _ie = H.update_batch_cost_rate(_AUpd([]), horizon='infinite', return_info=True)
     check(_re is None and _ie['empty'] and _ie['n_update'] == 0,
           '统计为空（warmup / 未开 record_update_stats）⇒ 返回 None，由调用方回退 EMA')
-    # ---- λ1：物理价区间 [2, 50] ↔ actor 空间、单调与封顶 ----
+    # ---- λ1：actor 空间区间（物理价口径已删除）、覆盖通道、与 scale 解耦、非空保护 ----
     _kl = float(hc.lam_scale())
-    _lo1, _hi1, _init1 = H.lam1_phys_bounds()
-    check(abs(H.HSRL_LAM1_PHYS_MIN - 2.0) < 1e-12 and abs(H.HSRL_LAM1_PHYS_MAX - 50.0) < 1e-12,
-          'λ1 物理价 = [%.1f, %.1f] 元/(MW·step)（用户第五轮：上界 = max(资源边际成本 20, 峰价 16.33) '
-          '的 2.5×；下界 = 名义边际收益的 21%%、且 < 退化价 20）'
-          % (H.HSRL_LAM1_PHYS_MIN, H.HSRL_LAM1_PHYS_MAX))
-    check(abs(_lo1 - 2.0 * _kl) < 1e-12 and abs(_hi1 - 50.0 * _kl) < 1e-12
+    _lo1, _hi1, _init1 = H.lam1_bounds()
+    check(abs(H.HSRL_LAM1_MIN - 0.2) < 1e-12 and abs(H.HSRL_LAM1_MAX - 5.0) < 1e-12,
+          'λ1 区间 = actor 空间 [%.2f, %.2f]（= 旧"物理 [2, 50]" × lam_scale 0.1；'
+          '物理价口径已删除：c1 内含 1 与 1+K_V 两条斜率，单一物理价不成立）'
+          % (H.HSRL_LAM1_MIN, H.HSRL_LAM1_MAX))
+    check(abs(_lo1 - H.HSRL_LAM1_MIN) < 1e-12 and abs(_hi1 - H.HSRL_LAM1_MAX) < 1e-12
           and abs(_init1 - _lo1) < 1e-12,
-          'λ1 区间（actor）= 物理 × lam_scale(%.3g) = [%.4f, %.4f]，初值 = 下限 %.4f'
+          'λ1 区间**不再乘 lam_scale**（lam_scale=%.3g 时仍返回 [%.4f, %.4f]，初值 = 下限 %.4f）'
           % (_kl, _lo1, _hi1, _init1))
-    _o = H.lam1_phys_bounds(lam_min=10.0, lam_max=40.0)          # 命令行覆盖通道
-    check(abs(_o[0] - 10.0 * _kl) < 1e-12 and abs(_o[1] - 40.0 * _kl) < 1e-12,
-          '--hsrl_lam1_min/--hsrl_lam1_max 可覆盖（[10, 40] 物理），且仍走 ×lam_scale')
-    _o2 = H.lam1_phys_bounds(lam_min=60.0, lam_max=40.0)         # 非空保护
+    _sp_bak, _sc_bak = hc.value_scale(), hc.cost_scale()
+    hc.set_cost_scale(1000.0)                                    # 换 scale ⇒ 区间不得变
+    _lo_1k, _hi_1k, _ = H.lam1_bounds()
+    hc.set_cost_scale(_sc_bak)
+    hc.set_value_scale(_sp_bak)
+    check(abs(_lo_1k - _lo1) < 1e-12 and abs(_hi_1k - _hi1) < 1e-12,
+          'λ1 区间与 --value_scale/--cost_scale **解耦**（两者只在 λ1 之外起作用）')
+    check(not hasattr(H, 'HSRL_LAM1_PHYS_MIN') and not hasattr(H, 'lam1_phys_bounds'),
+          '物理价组件已删除（HSRL_LAM1_PHYS_* / lam1_phys_bounds 不再存在）')
+    _o = H.lam1_bounds(lam_min=1.0, lam_max=4.0)                 # 命令行覆盖通道
+    check(abs(_o[0] - 1.0) < 1e-12 and abs(_o[1] - 4.0) < 1e-12,
+          '--hsrl_lam1_min/--hsrl_lam1_max 可覆盖（actor 空间，直接生效）')
+    _o2 = H.lam1_bounds(lam_min=60.0, lam_max=40.0)              # 非空保护
     check(abs(_o2[1] - _o2[0]) < 1e-12, '上界 < 下界时自动抬到下限（区间非空保护）')
 
     # ---- curriculum 的收敛下限（地板）= 0（用户第六轮）----

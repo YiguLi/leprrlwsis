@@ -44,11 +44,12 @@ L: r2 = −1·min(clip_amount, 20)   [MW] 命令与实际之差 (两段 clip 合
 ----------------------------------
     H: EMA ← 0.98·EMA + 0.02·sum_c1
        uniform: 乘性 lam1 ← lam1·exp(0.02·(rate/d_block_H − 1)), rate = critic cost 的 Q
-                lam1 ∈ 物理 [2.0, 50.0] 元/(MW·step)（= actor [0.2, 5.0]），初值 = 下限 2.0
-                依据: 上界 = max(平抑资源边际成本 20, 峰价降载 16.33) 的 2.5×；界外波动单价 100·λ1
+                lam1 ∈ **actor 空间** [0.2, 5.0]，初值 = 下限 0.2
+                  （= 旧"物理 [2, 50] 元/(MW·step)" × lam_scale 0.1 ⇒ 行为逐位相同；
+                   物理价口径已取消：c1 内含 1 与 1+K_V 两条斜率，单一物理价不成立）
                 d_block_H = 15.0 (= 3 MW × 5 步)
                 curriculum 地板 = 0（用户第六轮）：d_block_H 可一直减半，连续 50 块不满足即自行停止
-                ⚠ 历史口径 [0.967, 100] / [50, 100] 已被取代（见 hsrl.HSRL_LAM1_PHYS_MIN 的注释）
+                ⚠ 历史口径 [0.967, 100] / [50, 100] 已被取代（见 hsrl.HSRL_LAM1_MIN 的注释）
        legacy : 加性 lam1（本项目原式）
     L: EMA ← 0.98·EMA + 0.02·sum_c2;  lam2 ← clip(lam2·exp(0.02·(EMA/d_block_L − 1)), 0.5, 2), 初值 1.0 (无量纲兑换率)
        d_block_L = 1.2 (⇔ 允许搁置 0.02 MWh/块), curriculum 减半地板 0.15
@@ -1401,7 +1402,6 @@ def train_hsrl(num_iterations_H,
                 'r2': r2, 'c2': c2, 'deg_L': deg_step,
                 'gap_pen': gap_pen, 'gap_raw': gap_raw,
                 'lam1': agent_H.lam, 'lam2': agent_L.lam,
-                'lam1_phys': agent_H.lam / max(hc.lam_scale(), 1e-12),
                 'dual_src': dual_src,
                 'dual_q_src': dual_q_src,
                 'q_cost_H': q_info_H['q_agg'], 'rate_c_H': q_rate_H,
@@ -1472,7 +1472,6 @@ def train_hsrl(num_iterations_H,
             writer.add_scalar('wind_speed', env.u, step)
             writer.add_scalar('lam1', agent_H.lam, step)
             writer.add_scalar('lam2', agent_L.lam, step)
-            writer.add_scalar('lam1_phys', agent_H.lam / max(hc.lam_scale(), 1e-12), step)
             writer.add_scalar('dual/q_cost_H', q_info_H['q_agg'], step)
             writer.add_scalar('dual/rate_c_H', q_rate_H, step)
             writer.add_scalar('dual/ratio_c_H', q_rate_H / max(d_block_H, 1e-9), step)
@@ -1821,8 +1820,9 @@ if __name__ == "__main__":
                              '1 = 关闭归一化, 只影响 critic 回归空间)')
     parser.add_argument('--cost_scale', default=hc.COST_SCALE_TD3, type=float,
                         help='H 层 c1 进入值函数回归空间的缩放 s_c（与 s_p 组成双尺度; '
-                             'λ 由 hsrl_cost.lam_scale()=s_c/s_p 自动重标 ⇒ 物理价不变; '
-                             '<=0 ⇒ 与 s_p 相同 = 旧行为）')
+                             '<=0 ⇒ 与 s_p 相同 = 旧行为）。hsrl_cost 的 λ 由 lam_scale()=s_c/s_p '
+                             '自动重标; ⚠ HSRL 分支的 λ1 例外——它在 actor 空间硬编码 [0.2, 5.0]，'
+                             '**不随 scale 重标**（改本参数需同步改 --hsrl_lam1_min/max）')
     parser.add_argument('--c1-mode', default='uniform',
                         choices=['uniform', 'legacy'],
                         help='H 层 c1 口径: uniform=波动当量(默认, hsrl_cost 单一真源); '
@@ -1889,14 +1889,14 @@ if __name__ == "__main__":
     parser.add_argument('--hsrl_dual_recent_n', default=hsrl.HSRL_DUAL_RECENT_N, type=int,
                         help='HSRL: recent_batch（λ2，以及 λ1 选 recent_batch 时）的近端条数'
                              '（默认 %d: H 每块 1 条 ⇒ ≈1 天）' % hsrl.HSRL_DUAL_RECENT_N)
-    parser.add_argument('--hsrl_lam1_min', default=hsrl.HSRL_LAM1_PHYS_MIN, type=float,
-                        help='HSRL: λ1 的**物理价下限** [元/(MW·step)]（默认 %.1f；= 名义边际收益 9.67 的 '
-                             '21%%、低电价边际收益 5.0 的 40%%，且 < BESS 退化边际价 20 ⇒ 界内波动不值得'
-                             '动用 BESS）。当前实现把上界设为 20 的 2.5× = 50' % hsrl.HSRL_LAM1_PHYS_MIN)
-    parser.add_argument('--hsrl_lam1_max', default=hsrl.HSRL_LAM1_PHYS_MAX, type=float,
-                        help='HSRL: λ1 的**物理价上限** [元/(MW·step)]（默认 %.1f = max(平抑资源边际成本: '
-                             'BESS 退化 20, 峰价降载 16.33) 的 2.5×；界外波动单价是 100·λ1 ⇒ '
-                             '100×50 = 5000 远大于峰价 16.33）。⚠ 上界必须 > 下界' % hsrl.HSRL_LAM1_PHYS_MAX)
+    parser.add_argument('--hsrl_lam1_min', default=hsrl.HSRL_LAM1_MIN, type=float,
+                        help='HSRL: λ1 的**下界（actor 空间，无量纲）**（默认 %.2f = 旧物理 2 × '
+                             'lam_scale 0.1）。⚠ c1 内含 1 与 1+K_V 两条斜率 ⇒ **不再提供**'
+                             '“物理价”口径（元/(MW·step) 无唯一答案）' % hsrl.HSRL_LAM1_MIN)
+    parser.add_argument('--hsrl_lam1_max', default=hsrl.HSRL_LAM1_MAX, type=float,
+                        help='HSRL: λ1 的**上界（actor 空间）**（默认 %.1f = 旧物理 50 × lam_scale 0.1）。'
+                             '⚠ 上界必须 ≥ 下界；该数值绑定 s_p/s_c=1000/100，'
+                             '改 --value_scale/--cost_scale 时需同比例重标' % hsrl.HSRL_LAM1_MAX)
     parser.add_argument('--hsrl_d_block_h_min', default=hsrl.HSRL_D_BLOCK_H_MIN, type=float,
                         help='HSRL: H 层 curriculum 的**收敛下限**（地板，默认 %.1f ⇒ 可一直减半，'
                              '由"连续 50 块不满足 ema ≤ d"自行停止）。此前沿用 hc.h_settings 的 '
@@ -2015,17 +2015,21 @@ if __name__ == "__main__":
         hsrl.HSRL_DUAL_Q_AGG = str(args.hsrl_dual_q_agg)
         hsrl.HSRL_DUAL_Q_SRC = str(args.hsrl_dual_q_src)
         prCyan(hsrl.summary())
-        _lo1, _hi1, _init1 = hsrl.lam1_phys_bounds(args.hsrl_lam1_min, args.hsrl_lam1_max)
-        prCyan('[HSRL] 对偶: 分子 = {} | twin 聚合 = {} | λ1 物理价 ∈ [{:.3f}, {:.3f}] '
-               '元/(MW·step) (actor 空间 ×{:.3g} = [{:.4f}, {:.4f}], 初值 {:.4f})'.format(
+        _lo1, _hi1, _init1 = hsrl.lam1_bounds(args.hsrl_lam1_min, args.hsrl_lam1_max)
+        prCyan('[HSRL] 对偶: 分子 = {} | twin 聚合 = {} | λ1(actor 空间) ∈ [{:.4f}, {:.4f}] '
+               '初值 {:.4f} | lam_scale = s_c/s_p = {:.3g}（λ1 不随 scale 重标）'.format(
                    ('critic cost 的 Q（{}）'.format(
                        {'update_batch': '本块 update 的 Qc 批均值（靠缓冲自然淘汰跟随策略）',
                         'recent_batch': '近端 %d 条批均值 × 当前策略动作' % args.hsrl_dual_recent_n,
                         'point': '块首单点 Q(s0,a0)'}.get(args.hsrl_dual_q_src, args.hsrl_dual_q_src))
                     if args.hsrl_dual_src == 'q' else '实际块成本 EMA'),
                    args.hsrl_dual_q_agg,
-                   _lo1 / max(1e-12, hc.lam_scale()), _hi1 / max(1e-12, hc.lam_scale()),
-                   hc.lam_scale(), _lo1, _hi1, _init1))
+                   _lo1, _hi1, _init1, hc.lam_scale()))
+        if abs(float(hc.lam_scale()) - 0.1) > 1e-9:
+            prYellow('[HSRL] ⚠ lam_scale = {:.3g} ≠ 0.1：λ1 的 [0.2, 5.0] 是按 s_p=1000/s_c=100 '
+                     '标定的 ⇒ 请把 --hsrl_lam1_min/--hsrl_lam1_max 同比例乘 {:.3g}，'
+                     '否则约束松紧会随 --cost_scale 静默变化'
+                     .format(float(hc.lam_scale()), float(hc.lam_scale()) / 0.1))
 
     # 上层 H: TD3 + EMA 实际成本对偶 (lam1 ∈ [3, 100], 初始 5.0) —— 与 td3perrb 一致
     nb_states_H = 4 + PHASE_DIM[int(getattr(args, 'phase_feat', 0))]
@@ -2055,8 +2059,8 @@ if __name__ == "__main__":
         print('[H] 越界乘性惩罚已关闭 (--viol_derate 0): 与历史 run 逐位一致')
     agent_H.lam = _HCFG['lam_init'] if _HCFG else 5.0
     if args.hsrl:
-        # λ1 的**物理价**区间/初值（见 aifflor_hsrl.HSRL_LAM1_PHYS_* 与 README §3.8）
-        _lo1, _hi1, _init1 = hsrl.lam1_phys_bounds(args.hsrl_lam1_min, args.hsrl_lam1_max)
+        # λ1 的区间/初值（**actor 空间**；物理价口径已取消，见 aifflor_hsrl.HSRL_LAM1_MIN 注释）
+        _lo1, _hi1, _init1 = hsrl.lam1_bounds(args.hsrl_lam1_min, args.hsrl_lam1_max)
         agent_H.lam_min, agent_H.lam_max, agent_H.lam = _lo1, _hi1, _init1
     # 值函数回归空间归一化 (s = hc.value_scale()): 只作用于 H 层 r1/c1 进入
     # critic 之前; buffer/对偶/日志/CSV 仍是原始口径 (见 hsrl_cost 末尾小节)。
