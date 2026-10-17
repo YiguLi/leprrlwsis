@@ -191,7 +191,7 @@ SOC_RAND_RANGE = (0.5, 5.5)     # td3 系训练时的随机 SOC 起点
 
 DEFAULT_SEED = 42
 DEFAULT_DAYS = 5
-WIND_CSV = 'FFC_speed_noise_1.csv'
+WIND_CSV = os.environ.get('HSRL_WIND_CSV', 'FFC_speed_1.csv')   # 与 env.WIND_CSV 同口径
 
 PROJECT_ORDER = ['per', 'prrbb', 'prle',
                  'td3per', 'td3perseg', 'td3prrbb', 'td3prle',
