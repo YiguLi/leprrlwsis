@@ -44,9 +44,11 @@ L: r2 = −1·min(clip_amount, 20)   [MW] 命令与实际之差 (两段 clip 合
 ----------------------------------
     H: EMA ← 0.98·EMA + 0.02·sum_c1
        uniform: 乘性 lam1 ← lam1·exp(0.02·(rate/d_block_H − 1)), rate = critic cost 的 Q
-                lam1 ∈ **actor 空间** [0.2, 5.0]，初值 = 下限 0.2
-                  （= 旧"物理 [2, 50] 元/(MW·step)" × lam_scale 0.1 ⇒ 行为逐位相同；
-                   物理价口径已取消：c1 内含 1 与 1+K_V 两条斜率，单一物理价不成立）
+                lam1 ∈ **actor 空间** [0.2, 4.0]，初值 = 下限 0.2
+                  （⇔ 物理 [2, 40] 元/(MW·step) × lam_scale 0.1：上界 40 由用户按物理成本
+                   标定 —— 300 元/MWh 下一整块盈利约 50~67.5 元，块内 1 MW·step 的界内波动
+                   在 λ1_phys=50 时已吃掉全部利润，取 40 留出 ~20~40% 空间；越限单价
+                   101×40 = 4040 元/(MW·step) ⇒ 越限惩罚极大）
                 d_block_H = 15.0 (= 3 MW × 5 步)
                 curriculum 地板 = 0（用户第六轮）：d_block_H 可一直减半，连续 50 块不满足即自行停止
                 ⚠ 历史口径 [0.967, 100] / [50, 100] 已被取代（见 hsrl.HSRL_LAM1_MIN 的注释）
@@ -1821,7 +1823,7 @@ if __name__ == "__main__":
     parser.add_argument('--cost_scale', default=hc.COST_SCALE_TD3, type=float,
                         help='H 层 c1 进入值函数回归空间的缩放 s_c（与 s_p 组成双尺度; '
                              '<=0 ⇒ 与 s_p 相同 = 旧行为）。hsrl_cost 的 λ 由 lam_scale()=s_c/s_p '
-                             '自动重标; ⚠ HSRL 分支的 λ1 例外——它在 actor 空间硬编码 [0.2, 5.0]，'
+                             '自动重标; ⚠ HSRL 分支的 λ1 例外——它在 actor 空间硬编码 [0.2, 4.0]，'
                              '**不随 scale 重标**（改本参数需同步改 --hsrl_lam1_min/max）')
     parser.add_argument('--c1-mode', default='uniform',
                         choices=['uniform', 'legacy'],
@@ -1894,7 +1896,9 @@ if __name__ == "__main__":
                              'lam_scale 0.1）。⚠ c1 内含 1 与 1+K_V 两条斜率 ⇒ **不再提供**'
                              '“物理价”口径（元/(MW·step) 无唯一答案）' % hsrl.HSRL_LAM1_MIN)
     parser.add_argument('--hsrl_lam1_max', default=hsrl.HSRL_LAM1_MAX, type=float,
-                        help='HSRL: λ1 的**上界（actor 空间）**（默认 %.1f = 旧物理 50 × lam_scale 0.1）。'
+                        help='HSRL: λ1 的**上界（actor 空间）**（默认 %.1f ⇔ 物理 40 元/(MW·step) × '
+                             'lam_scale 0.1 = 4.0）。标定：300 元/MWh 下整块盈利 ~50~67.5 元，'
+                             'λ1_phys=50 时"块内 1 MW·step 界内波动"已吃掉全部利润 ⇒ 取 40 留余量。'
                              '⚠ 上界必须 ≥ 下界；该数值绑定 s_p/s_c=1000/100，'
                              '改 --value_scale/--cost_scale 时需同比例重标' % hsrl.HSRL_LAM1_MAX)
     parser.add_argument('--hsrl_d_block_h_min', default=hsrl.HSRL_D_BLOCK_H_MIN, type=float,
@@ -2026,7 +2030,7 @@ if __name__ == "__main__":
                    args.hsrl_dual_q_agg,
                    _lo1, _hi1, _init1, hc.lam_scale()))
         if abs(float(hc.lam_scale()) - 0.1) > 1e-9:
-            prYellow('[HSRL] ⚠ lam_scale = {:.3g} ≠ 0.1：λ1 的 [0.2, 5.0] 是按 s_p=1000/s_c=100 '
+            prYellow('[HSRL] ⚠ lam_scale = {:.3g} ≠ 0.1：λ1 的 [0.2, 4.0] 是按 s_p=1000/s_c=100 '
                      '标定的 ⇒ 请把 --hsrl_lam1_min/--hsrl_lam1_max 同比例乘 {:.3g}，'
                      '否则约束松紧会随 --cost_scale 静默变化'
                      .format(float(hc.lam_scale()), float(hc.lam_scale()) / 0.1))

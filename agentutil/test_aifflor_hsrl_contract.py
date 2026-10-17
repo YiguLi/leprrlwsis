@@ -555,9 +555,10 @@ def main():
     # ---- λ1：actor 空间区间（物理价口径已删除）、覆盖通道、与 scale 解耦、非空保护 ----
     _kl = float(hc.lam_scale())
     _lo1, _hi1, _init1 = H.lam1_bounds()
-    check(abs(H.HSRL_LAM1_MIN - 0.2) < 1e-12 and abs(H.HSRL_LAM1_MAX - 5.0) < 1e-12,
-          'λ1 区间 = actor 空间 [%.2f, %.2f]（= 旧"物理 [2, 50]" × lam_scale 0.1；'
-          '物理价口径已删除：c1 内含 1 与 1+K_V 两条斜率，单一物理价不成立）'
+    check(abs(H.HSRL_LAM1_MIN - 0.2) < 1e-12 and abs(H.HSRL_LAM1_MAX - 4.0) < 1e-12,
+          'λ1 区间 = actor 空间 [%.2f, %.2f]（⇔ 物理 [2, 40] 元/(MW·step) × lam_scale 0.1；'
+          '上界 40 为用户按物理成本标定：300 元/MWh 下整块盈利 50~67.5 元，'
+          'λ1_phys=50 已吃掉全部利润 ⇒ 取 40 留余量）'
           % (H.HSRL_LAM1_MIN, H.HSRL_LAM1_MAX))
     check(abs(_lo1 - H.HSRL_LAM1_MIN) < 1e-12 and abs(_hi1 - H.HSRL_LAM1_MAX) < 1e-12
           and abs(_init1 - _lo1) < 1e-12,
