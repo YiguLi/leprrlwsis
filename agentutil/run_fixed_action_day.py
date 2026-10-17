@@ -105,7 +105,7 @@ print('  收入       : %.2f 元/天（=Σ pr·P_G·dt；BESS 不动）' % float
 print('  SOC        : %.3f → %.3f（应为常数：BESS 不动）' % (D.SOC.iloc[0], D.soc_next.iloc[-1]))
 
 pool_tag = 'noise' if 'noise' in os.path.basename(a.csv) else 'clean'
-tag = a.tag or ('%s_day%d_act%s' % (pool_tag, env.j, '_'.join('%.1f' % v for v in ACT)))
+tag = a.tag or ('%s_day%d_act%s' % (pool_tag, env.j, '_'.join('%.2f' % v for v in ACT)))
 os.makedirs('output/fixed_action', exist_ok=True)
 csv_out = 'output/fixed_action/%s.csv' % tag
 D.to_csv(csv_out, index=False)
