@@ -322,7 +322,7 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
     Upper r1 = wT*pr*ptur*dt + wB*(-pr*pbrule*dt) - 退化 - penalty_NN_H
              （wT = wT_u×wT_p; wB ≡ 1.0 —— 【本轮变更】BESS 分段系数已去掉）
     Upper c1 = r_u(u)*[10*(P_F-3)+ + 0.1*P_F] + W_GAP*unfeasible_gap
-               (legacy 原式; uniform 默认走 hc.c1_apply ⇒ P_F + 20*(P_F-3)+)
+               (legacy 原式; uniform 默认走 hc.c1_apply ⇒ P_F + K_V*(P_F-3)+, K_V=100)
     Lower r2 = −1·min(clip_amount, 20) [MW]  (SOC 目标语义; 影子套利项已删除)
     Lower c2 = +1·trackerr    [MW]  参考集合 = Soctrack范围 ∩ 平抑窗口;
               空交集 ⇒ **无范围, 只有纯粹一个竭力值 r*** (顶到才不罚)

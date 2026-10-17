@@ -428,7 +428,7 @@ hc.set_value_scale(1000.0)
 mid = hc.h_settings()
 assert sum5 == hc.D_BLOCK == 15.0, sum5
 assert before == mid, (before, mid)
-assert hc.fluct_cost(3.0) == 3.0 and hc.fluct_cost(4.0) == 4.0 + 20.0
+assert hc.fluct_cost(3.0) == 3.0 and hc.fluct_cost(4.0) == 4.0 + hc.K_V
 assert hc.value_scale() == 1000.0
 assert hc.v_scale(20000.0) == 20.0 and hc.v_unscale(20.0) == 20000.0
 hc.set_value_scale(0)                                  # <=0 ⇒ 关闭

@@ -31,7 +31,7 @@ AIFFLOR — **td3per 的 FLORIS 引擎版**：上层 TD3PERRB 口径, 下层 RL 
 ----------------
 H: r1 = pr·P_G·dt − 490·max(−pbrule,0)·dt − penalty_NN_H          (P_G = ptur − pbrule)
     − [块末] W_GAP(10)·max(0, |soc_target − SOC_末| − SOC_TOL(0.1))   (uniform: 进 r1; legacy: 进 c1)
-    c1: uniform(默认 --c1-mode) = P_F + 20·(P_F−3)⁺  [MW·step]       (hsrl_cost.fluct_cost)
+    c1: uniform(默认 --c1-mode) = P_F + K_V·(P_F−3)⁺  [MW·step]   (K_V=100, hsrl_cost.fluct_cost)
         legacy = 1.0·[10·(P_F−3)⁺ + 0.1·P_F] + W_GAP(10)·unfeasible_gap
 L: r2 = −1·min(clip_amount, 20)   [MW] 命令与实际之差 (两段 clip 合计)
     c2 = +1·trackerr [MW] = 实际施加 pb（由 SOC 变化反解）到**参考集合**的距离
@@ -45,7 +45,7 @@ L: r2 = −1·min(clip_amount, 20)   [MW] 命令与实际之差 (两段 clip 合
     H: EMA ← 0.98·EMA + 0.02·sum_c1
        uniform: 乘性 lam1 ← lam1·exp(0.02·(rate/d_block_H − 1)), rate = critic cost 的 Q
                 lam1 ∈ 物理 [2.0, 50.0] 元/(MW·step)（= actor [0.2, 5.0]），初值 = 下限 2.0
-                依据: 上界 = max(平抑资源边际成本 20, 峰价降载 16.33) 的 2.5×；界外波动单价 20·λ1
+                依据: 上界 = max(平抑资源边际成本 20, 峰价降载 16.33) 的 2.5×；界外波动单价 100·λ1
                 d_block_H = 15.0 (= 3 MW × 5 步)
                 curriculum 地板 = 0（用户第六轮）：d_block_H 可一直减半，连续 50 块不满足即自行停止
                 ⚠ 历史口径 [0.967, 100] / [50, 100] 已被取代（见 hsrl.HSRL_LAM1_PHYS_MIN 的注释）
@@ -1895,8 +1895,8 @@ if __name__ == "__main__":
                              '动用 BESS）。当前实现把上界设为 20 的 2.5× = 50' % hsrl.HSRL_LAM1_PHYS_MIN)
     parser.add_argument('--hsrl_lam1_max', default=hsrl.HSRL_LAM1_PHYS_MAX, type=float,
                         help='HSRL: λ1 的**物理价上限** [元/(MW·step)]（默认 %.1f = max(平抑资源边际成本: '
-                             'BESS 退化 20, 峰价降载 16.33) 的 2.5×；界外波动单价是 20·λ1 ⇒ '
-                             '20×50 = 1000 远大于峰价 16.33）。⚠ 上界必须 > 下界' % hsrl.HSRL_LAM1_PHYS_MAX)
+                             'BESS 退化 20, 峰价降载 16.33) 的 2.5×；界外波动单价是 100·λ1 ⇒ '
+                             '100×50 = 5000 远大于峰价 16.33）。⚠ 上界必须 > 下界' % hsrl.HSRL_LAM1_PHYS_MAX)
     parser.add_argument('--hsrl_d_block_h_min', default=hsrl.HSRL_D_BLOCK_H_MIN, type=float,
                         help='HSRL: H 层 curriculum 的**收敛下限**（地板，默认 %.1f ⇒ 可一直减半，'
                              '由"连续 50 块不满足 ema ≤ d"自行停止）。此前沿用 hc.h_settings 的 '

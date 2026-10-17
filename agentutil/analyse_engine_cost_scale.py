@@ -4,7 +4,7 @@
 背景（`hsrl_cost.py` 的口径，逐字复刻）
 ----------------------------------------
     P_F = |P_G(t) − P_G(t−1)|                    [MW]        ← 用**绝对**功率，与引擎无关地计算
-    c1  = P_F + K_V·(P_F − 3)⁺ ,  K_V = 20       [MW·step]
+    c1  = P_F + K_V·(P_F − 3)⁺ ,  K_V = 100      [MW·step]
     d_block = D_BLOCK = 3 MW × 5 步 = 15         [MW·step]   ← 块预算
     r1  = 售电收益 + W_GAP·追踪罚                 [元]
     VALUE_SCALE = 1000 (r1) , COST_SCALE_TD3 = 100 (c1)      ← 两通道进 critic 前各除一次
@@ -50,7 +50,7 @@ def report(tag, P):
           % (P.mean(), pf.mean(), np.percentile(pf, 95), pf.max()))
     print('  越限 P_F>3 的步数占比  %.4f%%   (%d/%d)'
           % (100 * viol.mean(), viol.sum(), len(pf)))
-    print('  c1 = P_F + 20(P_F−3)⁺ : 均值 %.4f | p95 %.4f | max %.4f  [MW·step]'
+    print('  c1 = P_F + K_V(P_F−3)⁺ : 均值 %.4f | p95 %.4f | max %.4f  [MW·step]'
           % (c1.mean(), np.percentile(c1, 95), c1.max()))
     print('  块和 Σ₅c1              : 均值 %.4f | p95 %.4f | max %.4f   (预算 d_block=%.0f)'
           % (blocks.mean(), np.percentile(blocks, 95), blocks.max(), hc.D_BLOCK))

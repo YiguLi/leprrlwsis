@@ -34,7 +34,8 @@
 ## 1. 决定性实测：同一套 `td3per` 口径放在两个引擎上，约束松紧差了 **3.31×**
 
 `hsrl_cost.py` 的 H 层口径（逐字）：
-`P_F = |P_G(t) − P_G(t−1)|` [MW]，`c1 = P_F + K_V·(P_F−3)⁺`（`K_V=20`）[MW·step]，
+`P_F = |P_G(t) − P_G(t−1)|` [MW]，`c1 = P_F + K_V·(P_F−3)⁺`（`K_V=100`；本节能耗实测于
+`K_V=20` 的旧口径，但两引擎的 `P_F` 电平比与 `K_V` 无关）[MW·step]，
 块预算 `d_block = D_BLOCK = 3 MW × 5 步 = 15` [MW·step]。
 
 | 指标 | WFSim | FLORIS | 比 |

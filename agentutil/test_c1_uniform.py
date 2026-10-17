@@ -55,7 +55,7 @@ for mod, name in CANDS:
     fns.append((mod.split('.')[0], getattr(m, name)))
 
 print('=' * 100)
-print('A) uniform 模式：c1 必须 = P_F + 20·(P_F−3)⁺，且 8 个项目逐位相同')
+print('A) uniform 模式：c1 必须 = P_F + K_V·(P_F−3)⁺（K_V=100），且 8 个项目逐位相同')
 print('=' * 100)
 hc.set_mode('uniform')
 print('  {}'.format(hc.summary()))

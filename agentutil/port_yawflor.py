@@ -58,7 +58,7 @@ MYFUNC_EDITS = [
         '#   规则: ">3 MW 波动绝对不允许" + "<3 MW 原则上不管、可为 Q 平缓适当妥协"\n'
         '#   硬通道: C1_TAIL_ONLY=True ⇒ c1 := max(0, P_F−3) − W_INEV·exc_inev（只装越限）\n'
         '#   软通道: r1 -= KAPPA_SOFT·P_F（固定小价，进 r1 而非 c1 ⇒ 不与自适应 λ 混通道）\n'
-        'C1_TAIL_ONLY = False       # False ⇒ c1 保持历史口径 (P_F + 20(P_F−3)⁺)\n'
+        'C1_TAIL_ONLY = False       # False ⇒ c1 保持历史口径 (P_F + K_V(P_F−3)⁺, K_V=100)\n'
         'KAPPA_SOFT = 0.0           # 软通道固定价 [元/(MW·step)]（0 = 关）\n'
         'W_INEV = 0.0               # 越限中"电池侧不可避"部分的排除权重（0 = 全算）',
         1, '双通道开关常量（默认关）'),
