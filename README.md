@@ -109,8 +109,8 @@ PRRBB ──(加 LLM)──→ PRLE          TD3PRRBB ──(加 LLM)──→ T
   `F ≠ ∅` 时零成本集合是该区间；`F = ∅` 时**不存在范围, 只有纯粹一个竭力值 `r*`**
   （窗口里离 Soctrack 范围最近的端点）, 顶到它才不罚；
   块首够不着的目标跳变由 r1 块末 gap 罚承接）。
-  H 层动作越界罚（`penalty_NN_H`）现为 **400 元/单位**（`PENALTY_NN_H_COEF`，本轮由 200 加倍；
-  下层 `PENALTY_NN_L_COEF = 200` 不变；⚠ `s_p=1000` ⇒ critic 空间 0.4/单位，与经济斜率仍同量级）。
+  H 层动作越界罚（`penalty_NN_H`）现为 **10 元/单位**（`PENALTY_NN_H_COEF`，2026-10 用户口径：400→10，只作"可区分越界"的信号；
+  下层 `PENALTY_NN_L_COEF = 200` 不变；⚠ `s_p=1000` ⇒ critic 空间 **0.01/单位**（原 400 时是 0.4）。）
   ⚠️ 改造前的 `output/TD3PER-run*` 权重（4 维 H 观测 + 影子电价下层）与新代码不兼容。
 - `td3leprrlrb` ← `td3prrlrb`：增加 **LLM 在线微调风速分段阈值**（±1 m/s 硬约束）+ 回放池 relabel
 - `td3prle` ← `td3prrbb`：增加 LLM 元控制器；`prle` ← `prrbb` 同理

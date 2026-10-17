@@ -21,7 +21,7 @@
 ----------------------------------------------------------------
 网络动作 = 6 维 `[a₁…a₅, signal]`，`a ∈ [0, 0.5]`（轴向因子）、`signal ∈ [−0.5,0.5]`；
 航向恒为 0（FLORIS 的 `yaw_angles ≡ 0`，相当于 WFSim 的 `Control.phi = 0`）。
-⇒ `td3per/td3per_myfunc.py` 的 `CheckAction` / `PENALTY_NN_H_COEF=400` /
+⇒ `td3per/td3per_myfunc.py` 的 `CheckAction` / `PENALTY_NN_H_COEF=10` /
 `violation_amount` 边界**全部无需修改**（这是与 `yawflor` 最大的不同：
 yawflor 把动作带换成了 `[−1,+1]`，所以必须改 myfunc；aifflor 不用）。
 """

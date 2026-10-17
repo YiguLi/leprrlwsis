@@ -109,7 +109,7 @@ E_MIN = 0.0                     # SOC 下界 [MWh]
 E_MAX = 0.5                     # SOC 上界 [MWh]
 
 # ---- H 层：第 6 维（块总放电量）----
-HSRL_PEN6_COEF = PENALTY_NN_H_COEF      # 400.0 [元/MW·min] 第 6 维越界线性罚（不封顶）
+HSRL_PEN6_COEF = PENALTY_NN_H_COEF      # 10.0 [元/MW·min] 第 6 维越界线性罚（不封顶）
 HSRL_G_FULL = HSRL_BLOCK * P_RATED      # 2.5 [MW·min] 满量程（观测刻度/噪声/warmup 定标）
 
 # ---- L 层：reward ----
@@ -302,10 +302,10 @@ def check_action_H_hsrl(action, E, pen_coef=None, pen6_coef=None):
     """HSRL 版 H 动作检查。
 
     * 前 5 维（机组轴向因子）：与旧口径**逐位相同** —— clip 到 [0, 0.5]，
-      越界线性罚 `PENALTY_NN_H_COEF`(=400) [元/单位]，不封顶；
+      越界线性罚 `PENALTY_NN_H_COEF`(=10) [元/单位]，不封顶；
     * 第 6 维（块总放电量 g [MW·min]）：clip 到**块级可行域** `[−C_max, +D_max]`，
-      越界线性罚 `HSRL_PEN6_COEF`(=400) [元/MW·min]，**不封顶**
-      （与旧口径"信号 clip 到 [−0.5, 0.5] 并按 400/单位罚"在形式上同构，
+      越界线性罚 `HSRL_PEN6_COEF`(=10) [元/MW·min]，**不封顶**
+      （与旧口径"信号 clip 到 [−0.5, 0.5] 并按 10/单位罚"在形式上同构，
         只是把边界从"人为的信号带"换成"SOC + 额定功率推出来的可行域"）。
 
     Returns

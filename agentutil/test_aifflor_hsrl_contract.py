@@ -267,16 +267,16 @@ def main():
     print('=' * 90)
     # =====================================================================
     c_max, d_max = H.feasible_total(E_MID)
-    # 第 6 维: 放电为正, 越界线性罚 400/MW·min, 不封顶
+    # 第 6 维: 放电为正, 越界线性罚 10/MW·min, 不封顶
     a_in = np.array([0.2, 0.2, 0.2, 0.2, 0.2, d_max - 0.1])
     ap, p5, p6 = H.check_action_H_hsrl(a_in, E_MID)
     check(p5 == 0.0 and p6 == 0.0 and np.allclose(ap, a_in) and ap[5] == a_in[5],
           '域内动作 ⇒ 零罚且逐位不变（含 g 不夹）')
     ap, p5, p6 = H.check_action_H_hsrl(np.array([0.6, -0.1, 0.2, 0.2, 0.2, d_max + 0.4]), E_MID)
     check(abs(p5 - AMF.PENALTY_NN_H_COEF * (0.1 + 0.1)) < 1e-12 and ap[0] == 0.5 and ap[1] == 0.0,
-          '前 5 维沿用旧口径（clip [0,0.5] + 400/单位）')
+          '前 5 维沿用旧口径（clip [0,0.5] + 10/单位）')
     check(abs(p6 - H.HSRL_PEN6_COEF * 0.4) < 1e-12 and ap[5] == d_max,
-          'g 越上界 0.4 ⇒ 罚 %.1f（400/MW·min）且夹到 D_max' % (H.HSRL_PEN6_COEF * 0.4))
+          'g 越上界 0.4 ⇒ 罚 %.1f（10/MW·min）且夹到 D_max' % (H.HSRL_PEN6_COEF * 0.4))
     ap, p5, p6 = H.check_action_H_hsrl(np.array([0.2] * 5 + [-c_max - 0.3]), E_MID)
     check(abs(p6 - H.HSRL_PEN6_COEF * 0.3) < 1e-12 and ap[5] == -c_max,
           'g 越下界 0.3 ⇒ 罚 %.1f 且夹到 −C_max' % (H.HSRL_PEN6_COEF * 0.3))
