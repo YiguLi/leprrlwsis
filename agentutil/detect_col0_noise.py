@@ -110,3 +110,62 @@ for nm, df in (('clean', clean), ('noisy', noisy)):
           % (nm, m1, m2, m3, min(e['s1'] for e in per), max(e['s1'] for e in per)))
 print('   直接残差（逐点 noisy−clean）σ = %.4f'
       % (noisy.to_numpy(float) - clean.to_numpy(float)).std())
+
+# ============================================================================
+# 6) 出图（与 check_ffc_noise.py 的 day162 图同一版式）：clean/noisy + 残差 + Δu 分布
+# ============================================================================
+os.environ.setdefault('MPLCONFIGDIR', os.path.join(os.environ.get('TEMP', '/tmp'), 'mplcache'))
+import matplotlib                     # noqa: E402
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt       # noqa: E402
+
+e_c = noise_estimates(c)
+e_n = noise_estimates(n)
+x = np.arange(len(c))
+fig, ax = plt.subplots(4, 1, figsize=(11, 10.5), dpi=140)
+
+ax[0].plot(x, c, lw=1.2, color='#1f77b4', label='clean (FFC_speed_1)')
+ax[0].plot(x, n, lw=0.8, alpha=0.75, color='#ff7f0e', label='noisy (FFC_speed_noise_1)')
+ax[0].set_ylabel('$u$ [m/s]')
+ax[0].set_title('FFC column "0" (first day) | clean vs noisy | residual σ = %.3f m/s '
+                '| single-file noise σ̂: clean %.3f / noisy %.3f m/s'
+                % (r.std(), e_c['s1'], e_n['s1']), fontsize=10)
+ax[0].legend(fontsize=8, loc='upper left')
+ax[0].grid(alpha=0.3, lw=0.5)
+
+ax[1].plot(x, r, lw=0.8, color='#d62728')
+ax[1].axhline(0, color='k', lw=0.6)
+for s, ls in ((1, '--'), (2, ':')):
+    ax[1].axhline(+s * r.std(), color='#d62728', ls=ls, lw=0.8)
+    ax[1].axhline(-s * r.std(), color='#d62728', ls=ls, lw=0.8)
+ax[1].set_ylabel('noise $r$ [m/s]')
+ax[1].set_title('residual = noisy − clean | σ = %.3f | MAD-σ = %.3f | ACF1 = %.3f '
+                '(dashed: ±1σ / ±2σ)' % (r.std(), mad_sigma(r), lag1_acf(r)), fontsize=9)
+ax[1].grid(alpha=0.3, lw=0.5)
+
+ax[2].hist(np.diff(c), bins=80, alpha=0.65, density=True, color='#1f77b4', label='clean Δu')
+ax[2].hist(np.diff(n), bins=80, alpha=0.65, density=True, color='#ff7f0e', label='noisy Δu')
+ax[2].set_xlabel('Δu over 1 min [m/s]')
+ax[2].set_ylabel('density')
+ax[2].set_title('Δu: clean σ = %.4f → noisy σ = %.4f m/s (×%.1f)'
+                % (np.diff(c).std(), np.diff(n).std(), np.diff(n).std() / np.diff(c).std()),
+                fontsize=9)
+ax[2].legend(fontsize=8)
+ax[2].grid(alpha=0.3, lw=0.5)
+
+ax[3].plot(np.arange(len(c)), c.std() * 0 + np.abs(r), lw=0.6, color='#7f7f7f', alpha=0.7)
+for k, v in (('|r| p50', np.percentile(np.abs(r), 50)), ('p95', np.percentile(np.abs(r), 95)),
+             ('p99', np.percentile(np.abs(r), 99)), ('max', np.abs(r).max())):
+    ax[3].axhline(v, lw=0.9, label='%s = %.3f' % (k, v))
+ax[3].set_xlabel('minute of day')
+ax[3].set_ylabel('|r| [m/s]')
+ax[3].set_title('|residual| time series and its quantiles (noise amplitude bound)', fontsize=9)
+ax[3].legend(fontsize=7, ncol=4)
+ax[3].grid(alpha=0.3, lw=0.5)
+
+fig.tight_layout()
+out = os.path.join('output', 'wind_days', 'ffc_noise_col0.png')
+os.makedirs(os.path.dirname(out), exist_ok=True)
+fig.savefig(out)
+plt.close(fig)
+print('\n6) 图已保存: %s' % out)
