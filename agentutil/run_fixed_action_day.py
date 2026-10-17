@@ -104,7 +104,8 @@ print('  c1 (K_V=%.0f): 和 %.1f MW·step | 块和 均值 %.2f | 最大 %.2f'
 print('  收入       : %.2f 元/天（=Σ pr·P_G·dt；BESS 不动）' % float((D.pr * D.P_G / 60).sum()))
 print('  SOC        : %.3f → %.3f（应为常数：BESS 不动）' % (D.SOC.iloc[0], D.soc_next.iloc[-1]))
 
-tag = a.tag or ('day%d_act%s' % (env.j, '_'.join('%.1f' % v for v in ACT)))
+pool_tag = 'noise' if 'noise' in os.path.basename(a.csv) else 'clean'
+tag = a.tag or ('%s_day%d_act%s' % (pool_tag, env.j, '_'.join('%.1f' % v for v in ACT)))
 os.makedirs('output/fixed_action', exist_ok=True)
 csv_out = 'output/fixed_action/%s.csv' % tag
 D.to_csv(csv_out, index=False)
