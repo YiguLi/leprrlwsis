@@ -66,6 +66,7 @@ ap.add_argument('--smoke', action='store_true', help='每段只跑 400 步')
 ap.add_argument('--no-resume', action='store_true', help='忽略 summary.csv 里已有记录')
 ap.add_argument('--step-cap', type=int, default=STEP)
 ap.add_argument('--prod-arch', action='store_true', help='用旧 critic 结构（动作在 fc2 拼入）')
+ap.add_argument('--no-bias', action='store_true', help='去掉 critic 输出层 bias 初始化（--critic_bias_init none）')
 a = ap.parse_args()
 steps = 400 if a.smoke else a.step_cap
 summary = os.path.join('output', 'diag', 'summary.csv')
@@ -119,7 +120,7 @@ save_status()
 t_all = time.time()
 for name in a.stages:
     cfg = STAGES[name]
-    tag = name + ('' if a.prod_arch else '-af') + ('-smoke' if a.smoke else '')
+    tag = name + ('' if a.prod_arch else '-af') + ('-nb' if a.no_bias else '') + ('-smoke' if a.smoke else '')
     log = os.path.join('output', 'diag', 'logs', '%s.log' % tag)
     run_dir = cfg['argv'][cfg['argv'].index('--output') + 1]
     if a.smoke:
@@ -136,6 +137,8 @@ for name in a.stages:
     _argv = [x for x in cfg['argv'] if x != '--critic_action_first'] if a.prod_arch else list(cfg['argv'])
     cmd = [PY, os.path.join('aifflor', 'aifflor_main.py')] + _argv
     cmd[cmd.index('--output') + 1] = out_arg
+    if a.no_bias:
+        cmd += ['--critic_bias_init', 'none']
     cmd += ['--max_steps', str(steps)]
     # ⚠ main 会**追加**写入已有的 df_hsrl.csv（不自动换 run 号）⇒ 每段开跑前必须清空旧产物，
     #   否则续跑/重跑会把两段数据混在同一个 csv 里（心跳行数>100% 就是这个症状）。
