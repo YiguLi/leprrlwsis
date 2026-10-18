@@ -31,8 +31,7 @@ sys.path.insert(0, _HERE)
 
 PY = sys.executable
 STEP = 70000
-COMMON = ['--hsrl', '--max_episode_length', '1440', '--seed', '0',
-          '--critic_action_first', '1']   # 新结构：动作首层进网 + fc1 10->64（--prod-arch 可退回）
+COMMON = ['--hsrl', '--max_episode_length', '1440', '--seed', '0']   # 结构由 --arch/--leaky/--outinit 决定
 
 STAGES = {
     # 实验 1-S1：固定风速 u=10 + 固定电价 580；无波动成本（λ≡0）；BESS 不参与；界罚 400
@@ -65,7 +64,10 @@ ap.add_argument('--stages', nargs='+', default=['S1', 'S2', 'S3', 'E2'])
 ap.add_argument('--smoke', action='store_true', help='每段只跑 400 步')
 ap.add_argument('--no-resume', action='store_true', help='忽略 summary.csv 里已有记录')
 ap.add_argument('--step-cap', type=int, default=STEP)
-ap.add_argument('--prod-arch', action='store_true', help='用旧 critic 结构（动作在 fc2 拼入）')
+ap.add_argument('--prod-arch', action='store_true', help='同 --arch v1（历史结构）')
+ap.add_argument('--arch', default='v1af', choices=['v1', 'v1af', 'v2'], help='critic 结构')
+ap.add_argument('--leaky', action='store_true', help='critic 用 LeakyReLU(0.01)')
+ap.add_argument('--outinit', default='3e3', choices=['3e3', 'fanin'], help='输出层权重初始化')
 ap.add_argument('--no-bias', action='store_true', help='去掉 critic 输出层 bias 初始化（--critic_bias_init none）')
 a = ap.parse_args()
 steps = 400 if a.smoke else a.step_cap
@@ -120,7 +122,12 @@ save_status()
 t_all = time.time()
 for name in a.stages:
     cfg = STAGES[name]
-    tag = name + ('' if a.prod_arch else '-af') + ('-nb' if a.no_bias else '') + ('-smoke' if a.smoke else '')
+    arch = 'v1' if a.prod_arch else a.arch
+    suf = {'v1': '', 'v1af': '-af', 'v2': '-v2'}[arch]
+    suf += '-lk' if a.leaky else ''
+    suf += '-fi' if a.outinit == 'fanin' else ''
+    suf += '-nb' if a.no_bias else ''
+    tag = name + suf + ('-smoke' if a.smoke else '')
     log = os.path.join('output', 'diag', 'logs', '%s.log' % tag)
     run_dir = cfg['argv'][cfg['argv'].index('--output') + 1]
     if a.smoke:
@@ -134,7 +141,10 @@ for name in a.stages:
     env.update(cfg['env'])
     env['PYTHONIOENCODING'] = 'utf-8'
     out_arg = run_dir if a.smoke else cfg['argv'][cfg['argv'].index('--output') + 1]
-    _argv = [x for x in cfg['argv'] if x != '--critic_action_first'] if a.prod_arch else list(cfg['argv'])
+    _argv = list(cfg['argv'])
+    _argv += ['--critic_arch', arch]
+    _argv += ['--critic_act', 'leaky' if a.leaky else 'relu']
+    _argv += ['--critic_out_init', a.outinit]
     cmd = [PY, os.path.join('aifflor', 'aifflor_main.py')] + _argv
     cmd[cmd.index('--output') + 1] = out_arg
     if a.no_bias:

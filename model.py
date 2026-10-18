@@ -95,43 +95,72 @@ class Actor(nn.Module):
 
 class Critic(nn.Module):
     def __init__(self, nb_states, nb_actions, hidden1=400, hidden2=300, init_w=3e-3,
-                 action_first=False):
+                 action_first=False, arch=None, act='relu', out_init='3e3'):
         super(Critic, self).__init__()
-        # action_first: 动作**与状态一起**从第一层进网（默认 False = 旧口径：动作在 fc2 拼入）。
-        # 动机：物理是 P ≈ c·u³·g(a) —— u 与 a 的**乘积**。旧口径先把状态压到 hidden1(=16)
-        # 维瓶颈，再在 fc2 拼动作，u×a 的交互只能由 16 个状态特征去合成（实测 S1 上
-        # ∂Q/∂a ≈ 7e-6、fc1 16/16 全死）。首层拼接 + 加宽到 4·hidden1(=64) 让交互在首层即可形成。
-        self.action_first = bool(action_first)
-        if self.action_first:
+        # 三种结构（默认 v1 = 历史口径，逐位不变）：
+        #   v1    : fc1(x)→fc4→cat(a)→fc2→fc5→fc3
+        #   v1af  : cat(x,a)→fc1(4·hidden1)→fc4→fc2→fc5→fc3        （动作首层进网）
+        #   v2    : s: ns→hidden1→hidden2  ∥  a: na→32→64
+        #           合并 [hidden2+64] →(square, 带残差)→128→64→1   （双流 + 慢压缩）
+        # 动机：物理是 P ≈ c·u³·g(a) —— u 与 a 的**乘积**；且 6 维动作是非单调
+        # （单机 Cp 在 1/3 取峰）、逐台不对称的。让动作先独立成型，再与状态融合。
+        if arch is None:
+            arch = 'v1af' if action_first else 'v1'
+        self.arch = str(arch)
+        self.nb_actions = int(nb_actions)
+        self.action_first = (self.arch == 'v1af')
+        self.act_kind = str(act)
+        self.out_init = str(out_init)
+        self.relu = nn.LeakyReLU(0.01) if self.act_kind == 'leaky' else nn.ReLU()
+        if self.arch == 'v2':
+            self.s1 = nn.Linear(nb_states, hidden1)
+            self.s2 = nn.Linear(hidden1, hidden2)
+            self.a1 = nn.Linear(nb_actions, 32)
+            self.a2 = nn.Linear(32, 64)
+            w = hidden2 + 64
+            self.m1 = nn.Linear(w, w)          # square 层（带残差 ⇒ 等效加深、不靠"保维"硬压）
+            self.m2 = nn.Linear(w, 128)
+            self.m3 = nn.Linear(128, 64)
+            self.out = nn.Linear(64, 1)
+        elif self.arch == 'v1af':
             self.fc1 = nn.Linear(nb_states + nb_actions, 4 * hidden1)
             self.fc4 = nn.Linear(4 * hidden1, hidden2)
             self.fc2 = nn.Linear(hidden2, 80)
+            self.fc5 = nn.Linear(80, 50)
+            self.fc3 = nn.Linear(50, 1)
         else:
             self.fc1 = nn.Linear(nb_states, hidden1)
             self.fc4 = nn.Linear(hidden1, hidden2)
             self.fc2 = nn.Linear(hidden2 + nb_actions, 80)
-        self.fc5 = nn.Linear(80, 50)
-        self.fc3 = nn.Linear(50, 1)
-        self.relu = nn.ReLU()
+            self.fc5 = nn.Linear(80, 50)
+            self.fc3 = nn.Linear(50, 1)
         self.init_weights(init_w)
-    
+
     def init_weights(self, init_w):
-        # 本方法只写 3 个权重: fc1/fc2 用 fan_out (fanout_init), fc3(输出层, 50→1) 用
-        # ±init_w=±3e-3。**fc4/fc5 的权重完全没有被覆写**, 保留 PyTorch 默认
-        # U(±1/sqrt(fan_in)) —— 即教科书口径, 是"正确"的那个。生产维度
-        # (--hidden1 16 / --hidden2 100) 下实测上界:
-        #   fc1 0.248 (fan_in 口径应 0.5)  fc4 0.250 (=1/sqrt(16) ✓)
-        #   fc2 0.112 (fan_in 口径应 0.097) fc5 0.112 (=1/sqrt(80) ✓)  fc3 0.003
-        # bias 一律不碰 ⇒ 全部保持 ±1/sqrt(fan_in); 输出层 bias 的真正修正是
-        # hsrl_agent_init.BiasInitTracker (把 Q 基线搬到 r̄/(1-γ))。
-        # ⚠ "补齐" fc4/fc5 会改变数值且实测无收益 (agentutil/probe_init_convention.py),
-        #   数值请勿改动 —— 只纠正命名与文档。
-        self.fc1.weight.data = fanout_init(self.fc1.weight.data.size())
-        self.fc2.weight.data = fanout_init(self.fc2.weight.data.size())
-        self.fc3.weight.data.uniform_(-init_w, init_w)
-    
+        # 口径：隐藏层权重用 fan_out (fanout_init)；**输出层**用 ±init_w=±3e-3
+        # （历史约定，见 Agent 文档；--critic_out_init fanin 可改成 PyTorch 的 fan_in 默认）。
+        # bias 一律不碰（生产路径的 baseline 由 hsrl_agent_init.BiasInitTracker 负责）。
+        if self.arch == 'v2':
+            for m in (self.s1, self.s2, self.a1, self.a2, self.m1, self.m2, self.m3):
+                m.weight.data = fanout_init(m.weight.data.size())
+            if self.out_init != 'fanin':
+                self.out.weight.data.uniform_(-init_w, init_w)
+        else:
+            self.fc1.weight.data = fanout_init(self.fc1.weight.data.size())
+            self.fc2.weight.data = fanout_init(self.fc2.weight.data.size())
+            if self.out_init != 'fanin':
+                self.fc3.weight.data.uniform_(-init_w, init_w)
+
     def forward(self, xs):
         x, a = xs
+        if self.arch == 'v2':
+            hs = self.relu(self.s2(self.relu(self.s1(x))))
+            ha = self.relu(self.a2(self.relu(self.a1(a))))
+            z = torch.cat([hs, ha], 1)
+            m = self.relu(self.m1(z)) + z            # 残差：多一层深，但不靠"保维"硬压
+            m = self.relu(self.m2(m))
+            m = self.relu(self.m3(m))
+            return self.out(m)
         if self.action_first:
             out = self.relu(self.fc1(torch.cat([x, a], 1)))
             out = self.fc4(out)

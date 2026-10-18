@@ -66,7 +66,10 @@ class SP_TD3(object):
         }
         # critic 专用：--critic_action_first ⇒ 动作从第一层进网（fc1 = ns+na → 4·hidden1）
         critic_cfg = dict(net_cfg)
-        critic_cfg['action_first'] = bool(int(getattr(args, 'critic_action_first', 0) or 0))
+        critic_cfg['arch'] = ('v1af' if int(getattr(args, 'critic_action_first', 0) or 0)
+                              else str(getattr(args, 'critic_arch', 'v1') or 'v1'))
+        critic_cfg['act'] = str(getattr(args, 'critic_act', 'relu') or 'relu')
+        critic_cfg['out_init'] = str(getattr(args, 'critic_out_init', '3e3') or '3e3')
         self.actor = Actor(self.nb_states, self.nb_actions, **net_cfg)
         self.actor_target = Actor(self.nb_states, self.nb_actions, **net_cfg)
         self.actor_optim = Adam(self.actor.parameters(), lr=args.prate)
