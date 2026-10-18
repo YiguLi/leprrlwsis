@@ -181,7 +181,13 @@ class WindBattery:
             float: 当前时间点的电价 (RMB/MWh)
         """
         self.count_price += 1  # 时间计数器加1（每分钟计数一次）
-        
+
+        # --- 诊断开关：恒定电价（实验 1 的"固定电价"段；默认 None ⇒ 生产路径不变）---
+        _cpr = getattr(self, 'diag_const_pr', None)
+        if _cpr is not None:
+            self.pr = float(_cpr)
+            return self.pr
+
         # 判断当前时间点属于哪个时段
         if self.count_price in range(7 * 60) or self.count_price in range(23 * 60, 24 * 60):
             # 低谷时段：0:00-7:00 和 23:00-24:00

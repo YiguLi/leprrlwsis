@@ -895,6 +895,29 @@ def train(num_iterations_H,
 
 
 # =============================================================================
+# 诊断开关（默认全关 ⇒ 生产路径逐位不变）
+#   S1 固定风速+固定电价 / S2 变风速+固定电价 / S3 变风速+变电价 / E2 一维统一降载
+# =============================================================================
+DIAG = {'u': -1.0, 'pr': -1.0, 'scalar': 0, 'freeze_g': 0, 'lam_fixed': -1.0, 'pen_h': -1.0}
+
+
+def _diag_fix_action(a):
+    """把 actor 的 6 维原始动作改写成受约束的形式（诊断用）。
+
+    * `scalar=1`：只保留第 1 位，`s = sigmoid(a[0]) ∈ (0,1)`，前 5 维统一取
+      `0.33·s` ⇒ 1 维"统一降载"参数化（实验 2）；`s` 可由 `a[0]/0.33` 还原。
+    * `freeze_g=1`：第 6 维（块总放电量 g）恒 0 ⇒ BESS 不参与（实验 1）。
+    """
+    a = np.asarray(a, dtype=float).reshape(-1).copy()
+    if DIAG['scalar']:
+        s = 1.0 / (1.0 + np.exp(-float(np.clip(a[0], -30.0, 30.0))))
+        a[:5] = 0.33 * s
+    if DIAG['freeze_g']:
+        a[5] = 0.0
+    return a
+
+
+# =============================================================================
 # HSRL 分支的训练主循环（--hsrl；口径总表见 aifflor/aifflor_hsrl.py）
 # =============================================================================
 def train_hsrl(num_iterations_H,
@@ -1054,14 +1077,20 @@ def train_hsrl(num_iterations_H,
                     original_action_H = np.asarray(_wa, dtype=float).copy()
                     # 价格游走 sig → g: **反号 + ×5**（低谷充电 ⇒ g<0；见 hsrl 常量区）
                     original_action_H[5] = hsrl.g_from_warmup_signal(original_action_H[5])
+                original_action_H = _diag_fix_action(original_action_H)
                 applied_action_H, _pen5_w, _pen6_w = hsrl.check_action_H_hsrl(
-                    original_action_H, E_block_start, pen6_coef=pen6_coef)
+                    original_action_H, E_block_start,
+                    pen_coef=(DIAG['pen_h'] if DIAG['pen_h'] > 0 else None),
+                    pen6_coef=pen6_coef)
                 penalty_NN_H = 0.0          # warmup 期不计越界罚（与旧口径一致）
                 pen6_H = 0.0
             else:
                 original_action_H = agent_H.select_action(norm_observation)
+                original_action_H = _diag_fix_action(original_action_H)
                 applied_action_H, penalty_NN_H, pen6_H = hsrl.check_action_H_hsrl(
-                    original_action_H, E_block_start, pen6_coef=pen6_coef)
+                    original_action_H, E_block_start,
+                    pen_coef=(DIAG['pen_h'] if DIAG['pen_h'] > 0 else None),
+                    pen6_coef=pen6_coef)
             g_raw = float(original_action_H[5])
             g_applied = float(applied_action_H[5])
             viol_derate = violation_derate(original_action_H, args.viol_derate)
@@ -1286,6 +1315,8 @@ def train_hsrl(num_iterations_H,
                 agent_H.update_ema_cost(sum_c1)
                 hsrl.dual_update_H_hsrl(agent_H, d_block_H, q_rate=q_rate_H,
                                         src=dual_src, ema=agent_H.ema_cost)
+                if DIAG['lam_fixed'] >= 0:
+                    agent_H.lam = float(DIAG['lam_fixed'])
                 agent_L.update_ema_cost(sum_c2)
                 hsrl.dual_update_L_hsrl(agent_L, d_block_L, q_rate=q_rate_L,
                                         src=dual_src, ema=agent_L.ema_cost)
@@ -1837,6 +1868,20 @@ if __name__ == "__main__":
                         help='显式指定成本 critic 基线 (>0 生效, 覆盖 estimate)')
     parser.add_argument('--max_steps', default=0, type=int,
                         help='>0 时覆盖 train_iter_H, 用于短程 A/B')
+    # ---- 诊断专用（默认全关 ⇒ 生产路径逐位不变；见 documentation/diag_two_items_plan.md）----
+    parser.add_argument('--diag_u', default=-1.0, type=float,
+                        help='>=0 ⇒ 全训练期恒定风速 [m/s]（实验 1-S1）')
+    parser.add_argument('--diag_pr', default=-1.0, type=float,
+                        help='>=0 ⇒ 全天恒定电价 [元/MWh]（实验 1-S1/S2）')
+    parser.add_argument('--diag_scalar', default=0, type=int,
+                        help='1 ⇒ actor 只输出一个标量 s=sigmoid(a0)，前 5 维统一取 0.33·s（实验 2）')
+    parser.add_argument('--diag_freeze_g', default=0, type=int,
+                        help='1 ⇒ 第 6 维 g ≡ 0（BESS 不参与；实验 1）')
+    parser.add_argument('--diag_lambda_fixed', default=-1.0, type=float,
+                        help='>=0 ⇒ 每次对偶更新后把 agent_H.lam 钉到该值（actor 空间；实验 1 用 0）')
+    parser.add_argument('--pen_h', default=-1.0, type=float,
+                        help='>0 ⇒ 覆盖 H 前 5 维越界罚系数 [元/单位]（实验 1 用 400 把动作压在界内）')
+
 
     # ==================================================================
     # HSRL 方法分支（--hsrl）—— 口径总表见 aifflor/aifflor_hsrl.py
@@ -1938,6 +1983,19 @@ if __name__ == "__main__":
     args.train_iter_H = 1000 * args.max_episode_length
     if getattr(args, 'max_steps', 0) and args.max_steps > 0:
         args.train_iter_H = int(args.max_steps)
+
+    # ---- 诊断开关落地（默认 -1/0 ⇒ 不进入任何分支，生产路径逐位不变）----
+    DIAG['u'] = float(getattr(args, 'diag_u', -1.0))
+    DIAG['pr'] = float(getattr(args, 'diag_pr', -1.0))
+    DIAG['scalar'] = int(getattr(args, 'diag_scalar', 0))
+    DIAG['freeze_g'] = int(getattr(args, 'diag_freeze_g', 0))
+    DIAG['lam_fixed'] = float(getattr(args, 'diag_lambda_fixed', -1.0))
+    DIAG['pen_h'] = float(getattr(args, 'pen_h', -1.0))
+    if any([DIAG['u'] >= 0, DIAG['pr'] >= 0, DIAG['scalar'], DIAG['freeze_g'],
+            DIAG['lam_fixed'] >= 0, DIAG['pen_h'] > 0]):
+        prCyan('[DIAG] u={} pr={} scalar={} freeze_g={} lam_fixed={} pen_h={}'.format(
+            DIAG['u'], DIAG['pr'], DIAG['scalar'], DIAG['freeze_g'],
+            DIAG['lam_fixed'], DIAG['pen_h']))
     # 只在**未显式指定**（--seed 默认 -1）时随机化。显式 --seed >= 0 必须被尊重，
     # 否则"同 seed 配对 A/B"会被随机种子混淆（历史 bug：本行曾无条件覆盖用户传入的 --seed）。
     if args.seed is None or int(args.seed) < 0:
@@ -1990,6 +2048,14 @@ if __name__ == "__main__":
     env = WindBatteryAIF(max_E, args.nb_turbine, upload, None, physics=aif_physics)
     env_test = WindBatteryAIF(max_E, args.nb_turbine, upload, None,
                               physics=aif_physics_test)
+    # ---- 诊断：恒定风速 / 恒定电价（默认 -1 ⇒ 不动生产路径）----
+    if DIAG['u'] >= 0:
+        _udf = pd.DataFrame(np.full((1440, 201), float(DIAG['u'])))
+        env.wind_noise = _udf
+        env_test.wind_noise = _udf.copy()
+    if DIAG['pr'] >= 0:
+        env.diag_const_pr = float(DIAG['pr'])
+        env_test.diag_const_pr = float(DIAG['pr'])
     prCyan("口径: " + aturb.declared_scope())
 
     if args.seed > 0:
