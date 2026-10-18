@@ -64,27 +64,30 @@ class SP_TD3(object):
             'hidden2': args.hidden2,
             'init_w': args.init_w
         }
+        # critic 专用：--critic_action_first ⇒ 动作从第一层进网（fc1 = ns+na → 4·hidden1）
+        critic_cfg = dict(net_cfg)
+        critic_cfg['action_first'] = bool(int(getattr(args, 'critic_action_first', 0) or 0))
         self.actor = Actor(self.nb_states, self.nb_actions, **net_cfg)
         self.actor_target = Actor(self.nb_states, self.nb_actions, **net_cfg)
         self.actor_optim = Adam(self.actor.parameters(), lr=args.prate)
 
         # ---- TD3: twin critics per channel ----
         # profit channel: critic_p / critic_p2
-        self.critic_p = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_p = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_p = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_p = Critic(self.nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_p = Adam(self.critic_p.parameters(), lr=args.rate)
 
-        self.critic_p2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_p2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_p2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_p2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_p2 = Adam(self.critic_p2.parameters(), lr=args.rate)
 
         # cost channel: critic_c / critic_c2
-        self.critic_c = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_c = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_c = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_c = Critic(self.nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_c = Adam(self.critic_c.parameters(), lr=args.rate)
 
-        self.critic_c2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_c2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_c2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_c2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_c2 = Adam(self.critic_c2.parameters(), lr=args.rate)
 
         hard_update(self.actor_target, self.actor)  # Make sure target is with the same weight

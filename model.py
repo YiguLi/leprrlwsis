@@ -94,12 +94,22 @@ class Actor(nn.Module):
         return out
 
 class Critic(nn.Module):
-    def __init__(self, nb_states, nb_actions, hidden1=400, hidden2=300, init_w=3e-3):
+    def __init__(self, nb_states, nb_actions, hidden1=400, hidden2=300, init_w=3e-3,
+                 action_first=False):
         super(Critic, self).__init__()
-        self.fc1 = nn.Linear(nb_states, hidden1)
-        self.fc4 = nn.Linear(hidden1, hidden2)
-        self.fc2 = nn.Linear(hidden2+nb_actions, 80)
-        # self.fc2 = nn.Linear(hidden1+nb_actions, hidden2)
+        # action_first: 动作**与状态一起**从第一层进网（默认 False = 旧口径：动作在 fc2 拼入）。
+        # 动机：物理是 P ≈ c·u³·g(a) —— u 与 a 的**乘积**。旧口径先把状态压到 hidden1(=16)
+        # 维瓶颈，再在 fc2 拼动作，u×a 的交互只能由 16 个状态特征去合成（实测 S1 上
+        # ∂Q/∂a ≈ 7e-6、fc1 16/16 全死）。首层拼接 + 加宽到 4·hidden1(=64) 让交互在首层即可形成。
+        self.action_first = bool(action_first)
+        if self.action_first:
+            self.fc1 = nn.Linear(nb_states + nb_actions, 4 * hidden1)
+            self.fc4 = nn.Linear(4 * hidden1, hidden2)
+            self.fc2 = nn.Linear(hidden2, 80)
+        else:
+            self.fc1 = nn.Linear(nb_states, hidden1)
+            self.fc4 = nn.Linear(hidden1, hidden2)
+            self.fc2 = nn.Linear(hidden2 + nb_actions, 80)
         self.fc5 = nn.Linear(80, 50)
         self.fc3 = nn.Linear(50, 1)
         self.relu = nn.ReLU()
@@ -122,14 +132,15 @@ class Critic(nn.Module):
     
     def forward(self, xs):
         x, a = xs
-        out = self.fc1(x)
-        out = self.relu(out)
-        out = self.fc4(out)
-        # debug()
-        out = self.fc2(torch.cat([out,a],1))
-        out = self.relu(out)
-        out = self.fc5(out)
-        out = self.relu(out)
+        if self.action_first:
+            out = self.relu(self.fc1(torch.cat([x, a], 1)))
+            out = self.fc4(out)
+            out = self.relu(self.fc2(out))
+        else:
+            out = self.relu(self.fc1(x))
+            out = self.fc4(out)
+            out = self.relu(self.fc2(torch.cat([out, a], 1)))
+        out = self.relu(self.fc5(out))
         out = self.fc3(out)
         return out
 

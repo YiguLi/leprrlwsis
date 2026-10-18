@@ -1875,6 +1875,8 @@ if __name__ == "__main__":
     parser.add_argument('--max_steps', default=0, type=int,
                         help='>0 时覆盖 train_iter_H, 用于短程 A/B')
     # ---- 诊断专用（默认全关 ⇒ 生产路径逐位不变；见 documentation/diag_two_items_plan.md）----
+    parser.add_argument('--critic_action_first', default=0, type=int,
+                        help='1 => critic 的动作从第一层进网（fc1 = nb_states+nb_actions -> 4*hidden1；默认 0=旧口径）')
     parser.add_argument('--diag_u', default=-1.0, type=float,
                         help='>=0 ⇒ 全训练期恒定风速 [m/s]（实验 1-S1）')
     parser.add_argument('--diag_pr', default=-1.0, type=float,
