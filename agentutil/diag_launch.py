@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""四段诊断实验的顺序启动器：S1 → S2 → S3 → E2，每段 70k 步后停。
+"""一条命令顺序跑完四段诊断实验（S1 → S2 → S3 → E2），每段 70k 步后停。
 
-* 每段独立子进程，stdout/stderr 落 `output/diag/logs/<stage>.log`；
-* 任一段异常退出 **不阻塞** 后续段（记录 returncode，继续下一段）；
-* 每段结束后自动跑 `agentutil/diag_report.py` 记分（追加 output/diag/summary.csv）；
-* 状态写 `output/diag/status.json`（可随时查看进度）。
+特性：
+  * **可续跑**（默认）：`output/diag/summary.csv` 里已有该段记录 ⇒ 自动跳过（`--no-resume` 强制重跑）
+  * **心跳**：每 20 s 打印 `已跑步数 / 70k / 步速 / 预计剩余`
+  * 单段失败**不阻塞**后续段（记录 rc，继续）
+  * 每段结束自动跑 `agentutil/diag_report.py` 打分，追加 `output/diag/summary.csv`
+  * 全部结束打印汇总表
+  * 状态文件 `output/diag/status.json`
 
-用法（建议后台跑）:
-    python agentutil/diag_launch.py            # 四段顺序执行
-    python agentutil/diag_launch.py --stages S1 S2    # 只跑指定段
-    python agentutil/diag_launch.py --smoke    # 每段只跑 400 步（自检用）
+用法:
+    python agentutil/diag_launch.py                     # 四段顺序（可续跑）
+    python agentutil/diag_launch.py --stages S1 S2      # 只跑指定段
+    python agentutil/diag_launch.py --no-resume         # 忽略已有记录，全部重跑
+    python agentutil/diag_launch.py --smoke             # 每段 400 步自检（产物进 *-SMOKE）
 """
 import argparse
 import json
@@ -36,7 +40,7 @@ STAGES = {
                               '--diag_pr', '580', '--diag_freeze_g', '1',
                               '--diag_lambda_fixed', '0', '--pen_h', '400'],
                task='maxpower'),
-    # 实验 1-S2：真实风速（clean 池 day 序列）+ 固定电价 580
+    # 实验 1-S2：真实风速（clean 池）+ 固定电价 580
     'S2': dict(env={'HSRL_WIND_CSV': 'FFC_speed_1.csv'},
                argv=COMMON + ['--output', 'output/DIAG-S2', '--diag_pr', '580',
                               '--diag_freeze_g', '1', '--diag_lambda_fixed', '0',
@@ -48,8 +52,7 @@ STAGES = {
                               '--diag_lambda_fixed', '0', '--pen_h', '400'],
                task='maxpower'),
     # 实验 2：actor 只输出标量 s，a=0.33·s；λ 固定 2.0（actor）= 20（物理）；BESS 不参与
-    #   ⚠ 必须用**加噪池**：clean 池下 λ=20 的最优解是 s≡1（没有可平抑的波动，权衡退化），
-    #     加噪池下 DP 最优 s* 是内点（p50 0.48、p5 0.14）⇒ 才是真正的"收益 vs 波动"权衡。
+    #   ⚠ 必须用加噪池：clean 池下 λ=20 的最优是 s≡1（权衡退化），加噪池下 DP 最优 s* 是内点。
     'E2': dict(env={'HSRL_WIND_CSV': 'FFC_speed_noise_1.csv'},
                argv=COMMON + ['--output', 'output/DIAG-E2', '--diag_scalar', '1',
                               '--diag_freeze_g', '1', '--diag_lambda_fixed', '2.0'],
@@ -59,21 +62,49 @@ STAGES = {
 ap = argparse.ArgumentParser()
 ap.add_argument('--stages', nargs='+', default=['S1', 'S2', 'S3', 'E2'])
 ap.add_argument('--smoke', action='store_true', help='每段只跑 400 步')
+ap.add_argument('--no-resume', action='store_true', help='忽略 summary.csv 里已有记录')
+ap.add_argument('--step-cap', type=int, default=STEP)
 a = ap.parse_args()
-steps = 400 if a.smoke else STEP
+steps = 400 if a.smoke else a.step_cap
+summary = os.path.join('output', 'diag', 'summary.csv')
+os.makedirs(os.path.join('output', 'diag', 'logs'), exist_ok=True)
+status_path = os.path.join('output', 'diag', 'status.json')
 
-def _find_run(out_dir):
-    """main 会在 `--output` 下自动建 `AIFFLOR-runN`；返回真正含 df_hsrl.csv 的目录。"""
+
+def done_tags():
+    if a.no_resume or not os.path.exists(summary):
+        return set()
+    try:
+        import csv
+        with open(summary, encoding='utf-8') as fh:
+            return {r.get('task') and r.get('run') for r in csv.DictReader(fh)}
+    except Exception:
+        return set()
+
+
+def steps_from_log(log_path):
+    """从训练日志末尾解析 `step:NNNN`（每步一行标记）⇒ 当前进度，O(1)。"""
+    import re
+    try:
+        with open(log_path, 'rb') as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 16384))
+            txt = fh.read().decode('utf-8', 'replace')
+        m = re.findall(r'step:(\d+)', txt)
+        return (int(m[-1]) + 1) if m else 0
+    except Exception:
+        return 0
+
+
+def find_run(out_dir):
     import glob
     cands = [d for d in glob.glob(os.path.join(out_dir, 'AIFFLOR-run*'))
              if os.path.exists(os.path.join(d, 'df_hsrl.csv'))]
-    if not cands:
-        return out_dir
-    return max(cands, key=lambda d: os.path.getmtime(os.path.join(d, 'df_hsrl.csv')))
+    return max(cands, key=lambda d: os.path.getmtime(os.path.join(d, 'df_hsrl.csv'))) if cands else out_dir
 
 
-os.makedirs(os.path.join('output', 'diag', 'logs'), exist_ok=True)
-status_path = os.path.join('output', 'diag', 'status.json')
+already = done_tags()
 status = {'started': time.strftime('%Y-%m-%d %H:%M:%S'), 'steps': steps, 'stages': {}}
 
 
@@ -83,42 +114,75 @@ def save_status():
 
 
 save_status()
+t_all = time.time()
 for name in a.stages:
     cfg = STAGES[name]
-    log = os.path.join('output', 'diag', 'logs', '%s.log' % name)
+    tag = name + ('-smoke' if a.smoke else '')
+    log = os.path.join('output', 'diag', 'logs', '%s.log' % tag)
+    run_dir = cfg['argv'][cfg['argv'].index('--output') + 1]
+    if a.smoke:
+        run_dir += '-SMOKE'
+    if tag in already:
+        print('[skip] %s 已有记录（%s）' % (tag, summary), flush=True)
+        status['stages'][name] = dict(state='skipped')
+        save_status()
+        continue
     env = dict(os.environ)
     env.update(cfg['env'])
     env['PYTHONIOENCODING'] = 'utf-8'
-    cmd = [PY, os.path.join('aifflor', 'aifflor_main.py')] + cfg['argv'] + ['--max_steps', str(steps)]
-    run_dir = cfg['argv'][cfg['argv'].index('--output') + 1]
-    if a.smoke:                                   # 自检不污染正式产物目录
-        run_dir = run_dir + '-SMOKE'
-        i = cmd.index('--output')
-        cmd[i + 1] = run_dir
+    out_arg = run_dir if a.smoke else cfg['argv'][cfg['argv'].index('--output') + 1]
+    cmd = [PY, os.path.join('aifflor', 'aifflor_main.py')] + list(cfg['argv'])
+    cmd[cmd.index('--output') + 1] = out_arg
+    cmd += ['--max_steps', str(steps)]
+    # ⚠ main 会**追加**写入已有的 df_hsrl.csv（不自动换 run 号）⇒ 每段开跑前必须清空旧产物，
+    #   否则续跑/重跑会把两段数据混在同一个 csv 里（心跳行数>100% 就是这个症状）。
+    import shutil
+    if os.path.exists(out_arg):
+        shutil.rmtree(out_arg, ignore_errors=True)
+    print('\n[launch] %s -> %s' % (name, ' '.join(cmd)), flush=True)
     status['stages'][name] = dict(state='running', t0=time.strftime('%Y-%m-%d %H:%M:%S'))
     save_status()
-    print('[launch] %s -> %s' % (name, ' '.join(cmd)), flush=True)
     t0 = time.time()
     rc = -1
-    try:
-        with open(log, 'w', encoding='utf-8', errors='replace') as fh:
-            rc = subprocess.call(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env)
-    except Exception as ex:                       # 启动失败也不阻塞后续
-        print('[launch] %s 启动异常: %r' % (name, ex), flush=True)
+    with open(log, 'w', encoding='utf-8', errors='replace') as fh:
+        try:
+            proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env)
+            last = -1
+            while proc.poll() is None:
+                time.sleep(20)
+                n = steps_from_log(log)
+                if n != last:
+                    el = time.time() - t0
+                    rate = n / max(el, 1e-9)
+                    eta = (steps - n) / rate / 60.0 if rate > 1e-9 else float('nan')
+                    print('  [%s] %6d/%d (%5.1f%%)  %5.1f 步/秒  已用 %4.0f min  剩余约 %4.0f min'
+                          % (tag, n, steps, 100.0 * n / steps, rate, el / 60.0, eta), flush=True)
+                    last = n
+            rc = proc.returncode
+        except Exception as ex:
+            print('  [%s] 启动异常: %r' % (tag, ex), flush=True)
     dur = time.time() - t0
     status['stages'][name].update(state='done' if rc == 0 else 'failed', rc=int(rc),
                                   t1=time.strftime('%Y-%m-%d %H:%M:%S'), sec=round(dur, 1))
     save_status()
-    print('[launch] %s rc=%d 用时 %.0fs' % (name, rc, dur), flush=True)
-    # 打分（失败也试一下，日志可能已经写了 CSV）
-    rep = [PY, os.path.join('agentutil', 'diag_report.py'), '--run', _find_run(run_dir),
-           '--task', cfg['task'], '--tag', name]
-    try:
-        r = subprocess.call(rep, env=env)
-        print('[launch] %s report rc=%d' % (name, r), flush=True)
-    except Exception as ex:
-        print('[launch] %s report 异常: %r' % (name, ex), flush=True)
+    print('  [%s] rc=%d 用时 %.0f min' % (tag, rc, dur / 60.0), flush=True)
+    rep = [PY, os.path.join('agentutil', 'diag_report.py'), '--run', find_run(out_arg),
+           '--task', cfg['task'], '--tag', tag]
+    r = subprocess.call(rep, env=env)
+    if r != 0:
+        print('  [%s] 打分失败 rc=%d（训练产物仍在 %s）' % (tag, r, out_arg), flush=True)
 
 status['finished'] = time.strftime('%Y-%m-%d %H:%M:%S')
+status['total_min'] = round((time.time() - t_all) / 60.0, 1)
 save_status()
-print('[launch] 全部段结束，见 output/diag/status.json / summary.csv', flush=True)
+print('\n' + '=' * 96)
+print('全部结束（%.0f min）。汇总：' % status['total_min'])
+if os.path.exists(summary):
+    import pandas as pd
+    df = pd.read_csv(summary)
+    cols = [c for c in ['run', 'task', 'eta', 'pattern_err', 'viol_pct', 'a_std_step', 'r2_dua',
+                        'regret_pct', 's_mean', 's_star_mean', 'J_policy', 'J_star', 'n'] if c in df.columns]
+    print(df[cols].to_string(index=False, float_format=lambda v: '%.3f' % v))
+else:
+    print('（还没有 summary.csv —— 每段都失败了？看 output/diag/logs/*.log）')
+print('=' * 96)
