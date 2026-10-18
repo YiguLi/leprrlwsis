@@ -898,7 +898,8 @@ def train(num_iterations_H,
 # 诊断开关（默认全关 ⇒ 生产路径逐位不变）
 #   S1 固定风速+固定电价 / S2 变风速+固定电价 / S3 变风速+变电价 / E2 一维统一降载
 # =============================================================================
-DIAG = {'u': -1.0, 'pr': -1.0, 'scalar': 0, 'freeze_g': 0, 'lam_fixed': -1.0, 'pen_h': -1.0}
+DIAG = {'u': -1.0, 'pr': -1.0, 'scalar': 0, 'freeze_g': 0, 'lam_fixed': -1.0,
+        'pen_h': -1.0, 'center': 0}
 
 
 def _diag_fix_action(a):
@@ -1176,6 +1177,11 @@ def train_hsrl(num_iterations_H,
             observation, observation2, action_rbb, rbb_info,
             penalty_NN=penalty_NN_H + pen6_H, time=time, ptur=ptur,
             pb_cmd=pb_original, turbine_derate=viol_derate)
+        # 诊断：奖励中心化（以"标称动作的出力"为基线）⇒ 奖励只剩"比标称好多少"，
+        #   动作效应不再被状态/绝对收益淹没（S1 实测 ∂Q_p/∂a 只有真值的 1e-4 量级）。
+        if DIAG['center']:
+            _pnom = float(env.PowerOutput(observation[1], env.nominal()))
+            r1 = r1 - float(observation[0]) * (float(ptur) - _pnom) * time
         P_F = reward_details['P_F']
         sum_r1 += r1
         sum_c1 += c1_step
@@ -1879,6 +1885,8 @@ if __name__ == "__main__":
                         help='1 ⇒ 第 6 维 g ≡ 0（BESS 不参与；实验 1）')
     parser.add_argument('--diag_lambda_fixed', default=-1.0, type=float,
                         help='>=0 ⇒ 每次对偶更新后把 agent_H.lam 钉到该值（actor 空间；实验 1 用 0）')
+    parser.add_argument('--diag_center_reward', default=0, type=int,
+                        help='1 => 奖励中心化: r1 -= pr*(P_G-P_nom(u))*dt（把动作效应从状态基线上抬出来）')
     parser.add_argument('--pen_h', default=-1.0, type=float,
                         help='>0 ⇒ 覆盖 H 前 5 维越界罚系数 [元/单位]（实验 1 用 400 把动作压在界内）')
 
@@ -1991,6 +1999,7 @@ if __name__ == "__main__":
     DIAG['freeze_g'] = int(getattr(args, 'diag_freeze_g', 0))
     DIAG['lam_fixed'] = float(getattr(args, 'diag_lambda_fixed', -1.0))
     DIAG['pen_h'] = float(getattr(args, 'pen_h', -1.0))
+    DIAG['center'] = int(getattr(args, 'diag_center_reward', 0))
     if any([DIAG['u'] >= 0, DIAG['pr'] >= 0, DIAG['scalar'], DIAG['freeze_g'],
             DIAG['lam_fixed'] >= 0, DIAG['pen_h'] > 0]):
         prCyan('[DIAG] u={} pr={} scalar={} freeze_g={} lam_fixed={} pen_h={}'.format(
