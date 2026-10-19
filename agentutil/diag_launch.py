@@ -64,6 +64,7 @@ ap.add_argument('--stages', nargs='+', default=['S1', 'S2', 'S3', 'E2'])
 ap.add_argument('--smoke', action='store_true', help='每段只跑 400 步')
 ap.add_argument('--no-resume', action='store_true', help='忽略 summary.csv 里已有记录')
 ap.add_argument('--step-cap', type=int, default=STEP)
+ap.add_argument('--tag-extra', default='', help='tag 追加后缀（用于重跑同一配置）')
 ap.add_argument('--extra', nargs='+', default=[], help='额外透传给 aifflor_main 的参数（原样追加）')
 ap.add_argument('--prod-arch', action='store_true', help='同 --arch v1（历史结构）')
 ap.add_argument('--arch', default='v2', choices=['v1', 'v1af', 'v2'], help='critic 结构（生产默认 v2）')
@@ -129,7 +130,7 @@ for name in a.stages:
     suf += '-lk' if a.leaky else ''
     suf += '-fi' if a.outinit == 'fanin' else ''
     suf += '' if a.bias else '-nb'
-    tag = name + suf + ('-smoke' if a.smoke else '')
+    tag = name + suf + a.tag_extra + ('-smoke' if a.smoke else '')
     log = os.path.join('output', 'diag', 'logs', '%s.log' % tag)
     run_dir = cfg['argv'][cfg['argv'].index('--output') + 1]
     if a.smoke:
