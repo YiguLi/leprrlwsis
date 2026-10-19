@@ -1864,7 +1864,7 @@ if __name__ == "__main__":
                         choices=['uniform', 'legacy'],
                         help='H 层 c1 口径: uniform=波动当量(默认, hsrl_cost 单一真源); '
                              'legacy=各项目原公式(对照臂)')
-    parser.add_argument('--critic_bias_init', default='estimate',
+    parser.add_argument('--critic_bias_init', default='none',
                         choices=['estimate', 'none'],
                         help='critic 输出层 bias 的价值基线初始化: estimate=用 warmup 观测的'
                              '块收益估计 r̄/(1-γ) (默认); none=不初始化(对照臂)')
@@ -1875,7 +1875,7 @@ if __name__ == "__main__":
     parser.add_argument('--max_steps', default=0, type=int,
                         help='>0 时覆盖 train_iter_H, 用于短程 A/B')
     # ---- 诊断专用（默认全关 ⇒ 生产路径逐位不变；见 documentation/diag_two_items_plan.md）----
-    parser.add_argument('--critic_arch', default='v1', choices=['v1', 'v1af', 'v2'],
+    parser.add_argument('--critic_arch', default='v2', choices=['v1', 'v1af', 'v2'],
                         help='critic 结构: v1=历史; v1af=动作首层; v2=双流(s16-100 ∥ a32-64 → square(残差)→128→64)')
     parser.add_argument('--critic_act', default='relu', choices=['relu', 'leaky'],
                         help='critic 激活: relu=历史; leaky=LeakyReLU(0.01)（防死单元）')
@@ -2013,6 +2013,11 @@ if __name__ == "__main__":
         prCyan('[DIAG] u={} pr={} scalar={} freeze_g={} lam_fixed={} pen_h={}'.format(
             DIAG['u'], DIAG['pr'], DIAG['scalar'], DIAG['freeze_g'],
             DIAG['lam_fixed'], DIAG['pen_h']))
+    # 生产口径的 critic 结构（v2 + 无 bias，2026-10 起为默认；--critic_arch/--critic_bias_init 可覆盖）
+    prCyan('[critic] arch={} act={} out_init={} bias_init={}'.format(
+        'v1af' if int(getattr(args, 'critic_action_first', 0) or 0) else getattr(args, 'critic_arch', 'v2'),
+        getattr(args, 'critic_act', 'relu'), getattr(args, 'critic_out_init', '3e3'),
+        getattr(args, 'critic_bias_init', 'none')))
     # 只在**未显式指定**（--seed 默认 -1）时随机化。显式 --seed >= 0 必须被尊重，
     # 否则"同 seed 配对 A/B"会被随机种子混淆（历史 bug：本行曾无条件覆盖用户传入的 --seed）。
     if args.seed is None or int(args.seed) < 0:

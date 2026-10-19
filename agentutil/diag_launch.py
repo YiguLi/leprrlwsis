@@ -65,10 +65,11 @@ ap.add_argument('--smoke', action='store_true', help='每段只跑 400 步')
 ap.add_argument('--no-resume', action='store_true', help='忽略 summary.csv 里已有记录')
 ap.add_argument('--step-cap', type=int, default=STEP)
 ap.add_argument('--prod-arch', action='store_true', help='同 --arch v1（历史结构）')
-ap.add_argument('--arch', default='v1af', choices=['v1', 'v1af', 'v2'], help='critic 结构')
+ap.add_argument('--arch', default='v2', choices=['v1', 'v1af', 'v2'], help='critic 结构（生产默认 v2）')
 ap.add_argument('--leaky', action='store_true', help='critic 用 LeakyReLU(0.01)')
 ap.add_argument('--outinit', default='3e3', choices=['3e3', 'fanin'], help='输出层权重初始化')
-ap.add_argument('--no-bias', action='store_true', help='去掉 critic 输出层 bias 初始化（--critic_bias_init none）')
+ap.add_argument('--bias', action='store_true', help='启用 critic 输出层 bias 初始化（生产默认关）')
+ap.add_argument('--no-bias', action='store_true', help='（兼容旧用法；现已是默认）')
 a = ap.parse_args()
 steps = 400 if a.smoke else a.step_cap
 summary = os.path.join('output', 'diag', 'summary.csv')
@@ -126,7 +127,7 @@ for name in a.stages:
     suf = {'v1': '', 'v1af': '-af', 'v2': '-v2'}[arch]
     suf += '-lk' if a.leaky else ''
     suf += '-fi' if a.outinit == 'fanin' else ''
-    suf += '-nb' if a.no_bias else ''
+    suf += '' if a.bias else '-nb'
     tag = name + suf + ('-smoke' if a.smoke else '')
     log = os.path.join('output', 'diag', 'logs', '%s.log' % tag)
     run_dir = cfg['argv'][cfg['argv'].index('--output') + 1]
@@ -147,8 +148,7 @@ for name in a.stages:
     _argv += ['--critic_out_init', a.outinit]
     cmd = [PY, os.path.join('aifflor', 'aifflor_main.py')] + _argv
     cmd[cmd.index('--output') + 1] = out_arg
-    if a.no_bias:
-        cmd += ['--critic_bias_init', 'none']
+    cmd += ['--critic_bias_init', 'estimate' if a.bias else 'none']
     cmd += ['--max_steps', str(steps)]
     # ⚠ main 会**追加**写入已有的 df_hsrl.csv（不自动换 run 号）⇒ 每段开跑前必须清空旧产物，
     #   否则续跑/重跑会把两段数据混在同一个 csv 里（心跳行数>100% 就是这个症状）。
