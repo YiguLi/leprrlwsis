@@ -71,7 +71,7 @@ ap.add_argument('--dry-run', action='store_true', help='只打印将执行的命
 ap.add_argument('--prod-arch', action='store_true', help='同 --arch v1（历史结构）')
 ap.add_argument('--arch', default='v2', choices=['v1', 'v1af', 'v2'], help='critic 结构（生产默认 v2）')
 ap.add_argument('--leaky', action='store_true', help='critic 用 LeakyReLU(0.01)')
-ap.add_argument('--outinit', default='3e3', choices=['3e3', 'fanin'], help='输出层权重初始化')
+ap.add_argument('--outinit', default='fanin', choices=['3e3', 'fanin'], help='输出层权重初始化（最优=fanin）')
 ap.add_argument('--bias', action='store_true', help='启用 critic 输出层 bias 初始化（生产默认关）')
 ap.add_argument('--no-bias', action='store_true', help='（兼容旧用法；现已是默认）')
 a = ap.parse_args()
@@ -131,7 +131,7 @@ for name in a.stages:
     suf = {'v1': '', 'v1af': '-af', 'v2': '-v2'}[arch]
     suf += '-lk' if a.leaky else ''
     suf += '-fi' if a.outinit == 'fanin' else ''
-    suf += '' if a.bias else '-nb'
+    suf += '-nb' if a.no_bias else ''
     tag = name + suf + a.tag_extra + ('-smoke' if a.smoke else '')
     log = os.path.join('output', 'diag', 'logs', '%s.log' % tag)
     run_dir = cfg['argv'][cfg['argv'].index('--output') + 1]
@@ -153,7 +153,7 @@ for name in a.stages:
     _argv += list(a.extra)
     cmd = [PY, os.path.join('aifflor', 'aifflor_main.py')] + _argv
     cmd[cmd.index('--output') + 1] = out_arg
-    cmd += ['--critic_bias_init', 'estimate' if a.bias else 'none']
+    cmd += ['--critic_bias_init', 'none' if a.no_bias else 'estimate']
     cmd += ['--max_steps', str(steps)]
     # ⚠ main 会**追加**写入已有的 df_hsrl.csv（不自动换 run 号）⇒ 每段开跑前必须清空旧产物，
     #   否则续跑/重跑会把两段数据混在同一个 csv 里（心跳行数>100% 就是这个症状）。

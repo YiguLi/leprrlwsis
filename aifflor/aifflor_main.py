@@ -1864,7 +1864,7 @@ if __name__ == "__main__":
                         choices=['uniform', 'legacy'],
                         help='H 层 c1 口径: uniform=波动当量(默认, hsrl_cost 单一真源); '
                              'legacy=各项目原公式(对照臂)')
-    parser.add_argument('--critic_bias_init', default='none',
+    parser.add_argument('--critic_bias_init', default='estimate',
                         choices=['estimate', 'none'],
                         help='critic 输出层 bias 的价值基线初始化: estimate=用 warmup 观测的'
                              '块收益估计 r̄/(1-γ) (默认); none=不初始化(对照臂)')
@@ -1879,7 +1879,7 @@ if __name__ == "__main__":
                         help='critic 结构: v1=历史; v1af=动作首层; v2=双流(s16-100 ∥ a32-64 → square(残差)→128→64)')
     parser.add_argument('--critic_act', default='relu', choices=['relu', 'leaky'],
                         help='critic 激活: relu=历史; leaky=LeakyReLU(0.01)（防死单元）')
-    parser.add_argument('--critic_out_init', default='3e3', choices=['3e3', 'fanin'],
+    parser.add_argument('--critic_out_init', default='fanin', choices=['3e3', 'fanin'],
                         help='critic 输出层权重初始化: 3e3=历史(±3e-3); fanin=PyTorch 默认(±1/√fan_in≈0.14)')
     parser.add_argument('--critic_action_first', default=0, type=int,
                         help='1 => critic 的动作从第一层进网（fc1 = nb_states+nb_actions -> 4*hidden1；默认 0=旧口径）')
