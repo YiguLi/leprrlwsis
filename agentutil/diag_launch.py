@@ -64,6 +64,7 @@ ap.add_argument('--stages', nargs='+', default=['S1', 'S2', 'S3', 'E2'])
 ap.add_argument('--smoke', action='store_true', help='每段只跑 400 步')
 ap.add_argument('--no-resume', action='store_true', help='忽略 summary.csv 里已有记录')
 ap.add_argument('--step-cap', type=int, default=STEP)
+ap.add_argument('--extra', nargs='+', default=[], help='额外透传给 aifflor_main 的参数（原样追加）')
 ap.add_argument('--prod-arch', action='store_true', help='同 --arch v1（历史结构）')
 ap.add_argument('--arch', default='v2', choices=['v1', 'v1af', 'v2'], help='critic 结构（生产默认 v2）')
 ap.add_argument('--leaky', action='store_true', help='critic 用 LeakyReLU(0.01)')
@@ -146,6 +147,7 @@ for name in a.stages:
     _argv += ['--critic_arch', arch]
     _argv += ['--critic_act', 'leaky' if a.leaky else 'relu']
     _argv += ['--critic_out_init', a.outinit]
+    _argv += list(a.extra)
     cmd = [PY, os.path.join('aifflor', 'aifflor_main.py')] + _argv
     cmd[cmd.index('--output') + 1] = out_arg
     cmd += ['--critic_bias_init', 'estimate' if a.bias else 'none']
