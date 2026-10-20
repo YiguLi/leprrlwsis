@@ -131,7 +131,7 @@ for name in a.stages:
     suf = {'v1': '', 'v1af': '-af', 'v2': '-v2'}[arch]
     suf += '-lk' if a.leaky else ''
     suf += '-fi' if a.outinit == 'fanin' else ''
-    suf += '-nb' if a.no_bias else ''
+    suf += '' if a.bias else '-nb'
     tag = name + suf + a.tag_extra + ('-smoke' if a.smoke else '')
     log = os.path.join('output', 'diag', 'logs', '%s.log' % tag)
     run_dir = cfg['argv'][cfg['argv'].index('--output') + 1]
@@ -153,7 +153,7 @@ for name in a.stages:
     _argv += list(a.extra)
     cmd = [PY, os.path.join('aifflor', 'aifflor_main.py')] + _argv
     cmd[cmd.index('--output') + 1] = out_arg
-    cmd += ['--critic_bias_init', 'none' if a.no_bias else 'estimate']
+    cmd += ['--critic_bias_init', 'estimate' if a.bias else 'none']
     cmd += ['--max_steps', str(steps)]
     # ⚠ main 会**追加**写入已有的 df_hsrl.csv（不自动换 run 号）⇒ 每段开跑前必须清空旧产物，
     #   否则续跑/重跑会把两段数据混在同一个 csv 里（心跳行数>100% 就是这个症状）。

@@ -1660,7 +1660,7 @@ if __name__ == "__main__":
                         type=int,
                         help='hidden num of second fully connect layer')
     parser.add_argument('--rate',
-                        default=0.01,
+                        default=0.003,
                         type=float,
                         help='learning rate')
     parser.add_argument('--prate',
@@ -1864,7 +1864,7 @@ if __name__ == "__main__":
                         choices=['uniform', 'legacy'],
                         help='H 层 c1 口径: uniform=波动当量(默认, hsrl_cost 单一真源); '
                              'legacy=各项目原公式(对照臂)')
-    parser.add_argument('--critic_bias_init', default='estimate',
+    parser.add_argument('--critic_bias_init', default='none',
                         choices=['estimate', 'none'],
                         help='critic 输出层 bias 的价值基线初始化: estimate=用 warmup 观测的'
                              '块收益估计 r̄/(1-γ) (默认); none=不初始化(对照臂)')
@@ -2014,10 +2014,10 @@ if __name__ == "__main__":
             DIAG['u'], DIAG['pr'], DIAG['scalar'], DIAG['freeze_g'],
             DIAG['lam_fixed'], DIAG['pen_h']))
     # 生产口径的 critic 结构（v2 + 无 bias，2026-10 起为默认；--critic_arch/--critic_bias_init 可覆盖）
-    prCyan('[critic] arch={} act={} out_init={} bias_init={}'.format(
+    prCyan('[critic] arch={} act={} out_init={} bias_init={} rate={}'.format(
         'v1af' if int(getattr(args, 'critic_action_first', 0) or 0) else getattr(args, 'critic_arch', 'v2'),
         getattr(args, 'critic_act', 'relu'), getattr(args, 'critic_out_init', '3e3'),
-        getattr(args, 'critic_bias_init', 'none')))
+        getattr(args, 'critic_bias_init', 'none'), getattr(args, 'rate', 0.003)))
     # 只在**未显式指定**（--seed 默认 -1）时随机化。显式 --seed >= 0 必须被尊重，
     # 否则"同 seed 配对 A/B"会被随机种子混淆（历史 bug：本行曾无条件覆盖用户传入的 --seed）。
     if args.seed is None or int(args.seed) < 0:
