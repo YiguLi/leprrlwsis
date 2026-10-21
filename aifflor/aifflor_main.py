@@ -1887,7 +1887,10 @@ if __name__ == "__main__":
     parser.add_argument('--max_steps', default=0, type=int,
                         help='>0 时覆盖 train_iter_H, 用于短程 A/B')
     # ---- 诊断专用（默认全关 ⇒ 生产路径逐位不变；见 documentation/diag_two_items_plan.md）----
-    parser.add_argument('--c1_bound_coef', default=10.0, type=float,
+    parser.add_argument('--cost_clip', default=1, type=int,
+                        help='cost 塔只看 clip 到 [0,0.5] 后的风机动作（c1 只是 clip(a) 的函数；越界梯度由 profit 塔的 pen5 给）。1=开(默认)')
+    parser.add_argument('--na_box', default=5, type=int, help='风机动作维数（前 na_box 维夹到 [0,0.5]）')
+    parser.add_argument('--c1_bound_coef', default=0.0, type=float,
                         help='把越界量也计入 c1（MW·step / 单位 a）: c1 += 该系数 × Σ[max(0,-a)+max(0,a-0.5)]'
                              '；让 cost critic 看到"界"（否则它会外推界内斜率、把界外估成更便宜）。0=关')
     parser.add_argument('--critic_arch', default='v2', choices=['v1', 'v1af', 'v2'],

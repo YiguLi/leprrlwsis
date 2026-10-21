@@ -122,6 +122,9 @@ class SP_TD3(object):
         #   'min' = TD3 原口径 (默认, 不动历史 run)。
         self.nstep = max(1, int(nstep))
         self.target_agg = str(target_agg)
+        # cost 塔只看 clip 后的动作（c1 只是 clip(a) 的函数；原始动作的越界梯度由 profit 塔的 pen5 提供）
+        self.cost_clip = bool(int(getattr(args, 'cost_clip', 1) or 0))
+        self.na_box = int(getattr(args, 'na_box', 5))
         assert self.target_agg in ('min', 'mean'), self.target_agg
         self._pending = []        # nstep>1 时的滑窗队列: 最近 n-1 个块 (等待后继块结算)
         # 每条转移自带的 bootstrap 系数 (γ^n; episode 截断处为 0), 按 memory 下标存。
@@ -257,6 +260,14 @@ class SP_TD3(object):
             return torch.max(q1, q2)
         return torch.min(q1, q2)
 
+    def _clip_box(self, a):
+        """把风机动作维（前 na_box 维）夹到 [0,0.5]；只对 H 层（动作维 = na_box+1）生效。"""
+        if (not self.cost_clip) or a is None or a.shape[-1] != self.na_box + 1:
+            return a
+        out = a.clone()
+        out[..., :self.na_box] = torch.clamp(a[..., :self.na_box], 0.0, 0.5)
+        return out
+
     def update_policy(self):
         # A2: β 退火 —— 每次更新推进 self.PER_beta (0.4→1)，写回实例属性
         # (原 PER_buffer.sample 内递增是局部变量，退火永不生效；此处推进后传入)
@@ -300,8 +311,9 @@ class SP_TD3(object):
         # ---- TD3: twin targets, take min of the pair (clipped double Q) ----
         q_p1_next = self.critic_target_p([next_state_batch, a_smoothed])
         q_p2_next = self.critic_target_p2([next_state_batch, a_smoothed])
-        q_c1_next = self.critic_target_c([next_state_batch, a_smoothed])
-        q_c2_next = self.critic_target_c2([next_state_batch, a_smoothed])
+        a_smoothed_c = self._clip_box(a_smoothed)      # cost 塔: clip 后动作
+        q_c1_next = self.critic_target_c([next_state_batch, a_smoothed_c])
+        q_c2_next = self.critic_target_c2([next_state_batch, a_smoothed_c])
 
         if self.target_agg == 'mean':
             # 去掉 twin-min 的悲观偏差: 冻结批实测 Qbar 6.997 -> 8.235 (真值 9.159)
@@ -336,8 +348,9 @@ class SP_TD3(object):
 
         q_batch_p = self.critic_p([state_batch, action_batch])
         q_batch_p2 = self.critic_p2([state_batch, action_batch])
-        q_batch_c = self.critic_c([state_batch, action_batch])
-        q_batch_c2 = self.critic_c2([state_batch, action_batch])
+        action_batch_c = self._clip_box(action_batch)  # cost 塔: clip 后动作（profit 塔仍用原始动作）
+        q_batch_c = self.critic_c([state_batch, action_batch_c])
+        q_batch_c2 = self.critic_c2([state_batch, action_batch_c])
 
         # Compute the value losses (twin profit + twin cost).
         # Twin critics share the same min-target graph, so a single combined
@@ -372,9 +385,11 @@ class SP_TD3(object):
                 self.critic_p2([state_batch, self.actor(state_batch)]))
             # clamp(min=0) on cost: prevents the actor from exploiting a
             # (pathological) negative cost Q inside the Lagrangian objective.
+            _a_cur = self.actor(state_batch)
+            _a_cur_c = self._clip_box(_a_cur)          # cost 塔: clip 后动作
             min_c_cur = self._aggregate_pair(
-                self.critic_c([state_batch, self.actor(state_batch)]),
-                self.critic_c2([state_batch, self.actor(state_batch)])).clamp(min=0.0)
+                self.critic_c([state_batch, _a_cur_c]),
+                self.critic_c2([state_batch, _a_cur_c])).clamp(min=0.0)
 
             # cost 为 +
             policy_loss = -(min_p_cur - self.lam * min_c_cur)  # TODO
