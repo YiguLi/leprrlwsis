@@ -69,7 +69,9 @@ def check(run_dir, which='critic_p_6.pkl', tag='P'):
     for h in hs:
         h.remove()
     alive = [(int((x > 0).any(0).sum()), x.shape[1]) for x in acts]
-    g, = torch.autograd.grad(q.mean(), a0)
+    # ⚠ 必须用 q.sum()（逐样本梯度）；q.mean() 会让不同样本的梯度相互抵消，
+    #   实测会把 |dQ/da| 低报 4~5 个数量级（S3: 逐样本 ~50 vs 均值法 8.8e-4）。
+    g, = torch.autograd.grad(q.sum(), a0)
     g = g.detach().numpy()[:, :5]
     qn = q.detach().numpy().ravel()
     bias = float(sd['out.bias'] if 'out.bias' in sd else sd['fc3.bias'])
