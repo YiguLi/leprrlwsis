@@ -53,6 +53,12 @@ STAGES = {
                task='maxpower'),
     # 实验 2：actor 只输出标量 s，a=0.33·s；λ 固定 2.0（actor）= 20（物理）；BESS 不参与
     #   ⚠ 必须用加噪池：clean 池下 λ=20 的最优是 s≡1（权衡退化），加噪池下 DP 最优 s* 是内点。
+    # 实验 T1：**真实任务** —— 加噪池、波动惩罚生效（λ 固定 20 物理价）、BESS 放开（g 自由）、
+    #   界罚用项目默认（10），不再钉 λ=0。这是唯一"状态真正有用（高风降载）"的配置。
+    'T1': dict(env={'HSRL_WIND_CSV': 'FFC_speed_noise_1.csv'},
+               argv=COMMON + ['--output', 'output/DIAG-T1', '--diag_freeze_g', '1',
+                              '--hsrl_lam1_min', '20', '--hsrl_lam1_max', '20'],
+               task='maxpower'),
     'E2': dict(env={'HSRL_WIND_CSV': 'FFC_speed_noise_1.csv'},
                argv=COMMON + ['--output', 'output/DIAG-E2', '--diag_scalar', '1',
                               '--diag_freeze_g', '1', '--diag_lambda_fixed', '2.0'],

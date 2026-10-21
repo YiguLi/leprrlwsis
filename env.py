@@ -28,6 +28,9 @@ def _get_matlab():
 # Fixed random day sequence — permanently saved to file.
 # Generated once with np.random.RandomState(42).randint(1, 200, size=199).
 # All training runs share this identical sequence for fair comparison.
+#: 风速池文件（可用 HSRL_WIND_CSV 覆盖；默认 = 生产口径的加噪池）
+WIND_CSV = os.environ.get('HSRL_WIND_CSV', 'FFC_speed_noise_1.csv')
+
 _DAY_SEQ_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               'fixed_day_sequence.csv')
 FIXED_DAY_SEQUENCE = pd.read_csv(_DAY_SEQ_PATH, header=None).values.flatten().tolist()
@@ -75,7 +78,7 @@ class WindBattery:
         self.pr = self.price_list[0]
         
         # wind_speed_2 (Sequence)
-        self.wind_noise = pd.read_csv("FFC_speed_noise_1.csv")
+        self.wind_noise = pd.read_csv(WIND_CSV)
         self.wind_test_scenarios = pd.read_csv("test_scenarios.csv")
         self.count_wind = 0
 
