@@ -2044,10 +2044,11 @@ if __name__ == "__main__":
             DIAG['u'], DIAG['pr'], DIAG['scalar'], DIAG['freeze_g'],
             DIAG['lam_fixed'], DIAG['pen_h']))
     # 生产口径的 critic 结构（v2 + 无 bias，2026-10 起为默认；--critic_arch/--critic_bias_init 可覆盖）
-    prCyan('[critic] arch={} act={} out_init={} bias_init={} rate={}'.format(
+    prCyan('[critic] arch={} act={} out_init={} bias_init={} rate={} cost_clip={} warmup_wt_sched={}'.format(
         'v1af' if int(getattr(args, 'critic_action_first', 0) or 0) else getattr(args, 'critic_arch', 'v2'),
         getattr(args, 'critic_act', 'relu'), getattr(args, 'critic_out_init', '3e3'),
-        getattr(args, 'critic_bias_init', 'none'), getattr(args, 'rate', 0.003)))
+        getattr(args, 'critic_bias_init', 'none'), getattr(args, 'rate', 0.003),
+        getattr(args, 'cost_clip', 1), getattr(args, 'warmup_wt_sched', 'lhs')))
     _c1b = float(getattr(args, 'c1_bound_coef', 10.0))
     if _c1b > 0.0:
         prCyan('[c1] 越界项已开启: c1 += {} × Σ[max(0,-a)+max(0,a-0.5)]  (MW·step)'.format(_c1b))
