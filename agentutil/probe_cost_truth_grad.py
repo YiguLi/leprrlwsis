@@ -126,6 +126,39 @@ def main():
               % (corr(gc[v], dc1[v])[0], 100 * (np.sign(gc[v]) == np.sign(dc1[v])).mean()))
     else:
         print('  越限样本不足（%d 条）' % v.sum())
+    # ---- 修正版真值：c1_t(a) + γ_b·c1_{t+1}(a)  （a_t 通过 P_G(t) 影响下一块的波动成本）----
+    nb = df[df.step.values % 5 == 0].reset_index(drop=True)
+    nxt = {int(r.step): k for k, r in nb.iterrows()}
+    idx_n, u_next, a_next = [], [], []
+    for k, st in enumerate(sub.step.values):
+        j = nxt.get(int(st) + 5)
+        if j is None or j + 1 >= len(nb):
+            continue
+        An = np.fromstring(str(nb.applied_action_H[j]).strip().lstrip('[').rstrip(']'), sep=' ')
+        idx_n.append(k); u_next.append(float(nb.u[j])); a_next.append(An[:NT])
+    if len(idx_n) > 50:
+        idx_n = np.array(idx_n); u_next = np.array(u_next); a_next = np.vstack(a_next)
+        Pn = power_of(ph, u_next, a_next)                      # 下一块的出力（动作固定）
+        dc1_full = np.zeros((len(idx_n), NT))
+        P0s = P0[idx_n]
+        for j in range(NT):
+            Ap = A[idx_n].copy(); Ap[:, j] += EPS
+            Am = A[idx_n].copy(); Am[:, j] -= EPS
+            Pj = (power_of(ph, u[idx_n], Ap) - power_of(ph, u[idx_n], Am)) / (2 * EPS)
+            sgn = np.sign(P0s - prev[idx_n]); sgn[sgn == 0] = 1.0
+            pf_t = np.abs(P0s - prev[idx_n])
+            g_t = (1.0 + 20.0 * (pf_t > 3.0)) * sgn * Pj            # ∂c1_t/∂a
+            # 下一块: P_F_{t+1} = |Pn − P_t(a)| ⇒ ∂/∂a = −sgn2·∂P_t/∂a
+            sgn2 = np.sign(Pn - P0s); sgn2[sgn2 == 0] = 1.0
+            pf_n = np.abs(Pn - P0s)
+            g_n = (1.0 + 20.0 * (pf_n > 3.0)) * (-sgn2) * Pj * 0.95  # γ_b = 0.95
+            dc1_full[:, j] = g_t + g_n
+        gc_n = gc[idx_n]
+        print('\n[修正真值] ∂/∂a [c1_t + 0.95·c1_{t+1}]（含"动作→未来波动"这一项）')
+        print('  Pearson %.3f | Spearman %.3f | 符号一致率 %.1f%%'
+              % (*corr(gc_n, dc1_full), 100 * (np.sign(gc_n) == np.sign(dc1_full)).mean()))
+        print('  量纲 K = %.3f' % (np.abs(gc_n).mean() / max(1e-12, np.abs(dc1_full).mean())))
+
     print('\n[纯出力] 与 ∂P/∂a 的相关（不看折线，只看"动作→出力"是否学对）')
     print('  Pearson %.3f | Spearman %.3f | 符号一致 %.1f%%'
           % (*corr(gc, dP), 100 * (np.sign(gc) == np.sign(dP)).mean()))
