@@ -1600,7 +1600,8 @@ def train_hsrl(num_iterations_H,
             print('  [{}] {:>7}/{} ({:5.1f}%)  {:5.1f} 步/秒  已用 {:4.0f} min  剩余约 {:4.0f} min'
                   .format(_tag, step, num_iterations_H,
                           100.0 * step / max(1, num_iterations_H), _rate,
-                          _el / 60.0, max(0.0, _left) / 60.0), flush=True)
+                          _el / 60.0, max(0.0, _left) / 60.0),
+                  file=sys.__stdout__, flush=True)
         episode_steps += 1
         episode_reward += r1
         episode_cost += c1_step
@@ -1665,9 +1666,9 @@ def train_hsrl(num_iterations_H,
         try:
             import hsrl_metrics
             _m = hsrl_metrics.summarize(output, tail=0.2, tag=_tag)
-            print('')
-            print(hsrl_metrics.SUMMARY_HEADER, flush=True)
-            print(hsrl_metrics.format_row(_m), flush=True)
+            print('', file=sys.__stdout__)
+            print(hsrl_metrics.SUMMARY_HEADER, file=sys.__stdout__, flush=True)
+            print(hsrl_metrics.format_row(_m), file=sys.__stdout__, flush=True)
         except Exception as _e:
             print('[summary] 汇总失败: {}'.format(_e), flush=True)
 
@@ -1925,6 +1926,8 @@ if __name__ == "__main__":
     parser.add_argument('--cost_clip', default=1, type=int,
                         help='cost 塔只看 clip 到 [0,0.5] 后的风机动作（c1 只是 clip(a) 的函数；越界梯度由 profit 塔的 pen5 给）。1=开(默认)')
     parser.add_argument('--na_box', default=5, type=int, help='风机动作维数（前 na_box 维夹到 [0,0.5]）')
+    parser.add_argument('--log_file', default=1, type=int,
+                        help='1=把逐行详细输出写入 <output>/train.log, 控制台只留进度行与汇总行（与 diag 一致）')
     parser.add_argument('--progress', default=1, type=int,
                         help='1=打印 diag 同款进度行（每 --progress_every 步）与训练结束汇总行')
     parser.add_argument('--progress_every', default=500, type=int, help='进度行间隔（环境步）')
@@ -2045,6 +2048,17 @@ if __name__ == "__main__":
     _HCFG = hc.h_settings()
     prCyan(hc.summary())
     args.output = get_output_folder(args.output, args.env)
+    # ---- 控制台只显示 diag 同款进度/汇总；详细逐行输出写入 <output>/train.log ----
+    if int(getattr(args, 'log_file', 1) or 0):
+        try:
+            os.makedirs(args.output, exist_ok=True)
+            _lf = open(os.path.join(args.output, 'train.log'), 'w', encoding='utf-8', buffering=1)
+            sys.stdout = _lf
+            print('[log] 详细输出 → {}（控制台只显示进度与汇总）'
+                  .format(os.path.join(args.output, 'train.log')),
+                  file=sys.__stdout__, flush=True)
+        except Exception as _e:
+            print('[log] 重定向失败, 保持控制台输出: {}'.format(_e), file=sys.__stdout__, flush=True)
     if args.resume == 'default':
         args.resume = 'output/{}-run0'.format(args.env)
 
