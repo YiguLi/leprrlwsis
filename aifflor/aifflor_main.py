@@ -1040,6 +1040,7 @@ def train_hsrl(num_iterations_H,
     test_seed = int(getattr(args, 'hsrl_test_seed', -1))
     test_trigger = 0
 
+    c1_bound_coef = float(getattr(args, 'c1_bound_coef', 10.0))   # c1 越界项系数（见 --c1_bound_coef）
     while step < num_iterations_H:
         prYellow('########### step:{} ###########'.format(step))
         if observation is None:
@@ -1183,6 +1184,17 @@ def train_hsrl(num_iterations_H,
             _pnom = float(env.PowerOutput(observation[1], env.nominal()))
             r1 = r1 - float(observation[0]) * (float(ptur) - _pnom) * time
         P_F = reward_details['P_F']
+
+        # ---- 越界项计入 c1（HSRL 主循环）：cost critic 的目标对 clip 不变（a<0 与 a=0 物理同值），
+        #      于是它只能外推界内斜率、把"界外"估成更便宜 ⇒ actor 被吸引出界（实测 Q_c(-0.5)=-34.8
+        #      vs 界内 +14.2）。这里给 cost 通道一个真实的"界"代价，量纲与 c1 一致（MW·step）。
+        if c1_bound_coef > 0.0:
+            _o5 = np.asarray(original_action_H, dtype=float).reshape(-1)[:5]
+            _viol = float(np.sum(np.maximum(0.0, -_o5) + np.maximum(0.0, _o5 - 0.5)))
+            if _viol > 0.0:
+                c1_step = c1_step + c1_bound_coef * _viol
+                reward_details['c1_bound'] = c1_bound_coef * _viol
+
         sum_r1 += r1
         sum_c1 += c1_step
         gap_pen = 0.0        # HSRL: 块末 SOC 目标 gap 罚已删除（执行偏差由 c_L 承接）
@@ -1875,6 +1887,9 @@ if __name__ == "__main__":
     parser.add_argument('--max_steps', default=0, type=int,
                         help='>0 时覆盖 train_iter_H, 用于短程 A/B')
     # ---- 诊断专用（默认全关 ⇒ 生产路径逐位不变；见 documentation/diag_two_items_plan.md）----
+    parser.add_argument('--c1_bound_coef', default=10.0, type=float,
+                        help='把越界量也计入 c1（MW·step / 单位 a）: c1 += 该系数 × Σ[max(0,-a)+max(0,a-0.5)]'
+                             '；让 cost critic 看到"界"（否则它会外推界内斜率、把界外估成更便宜）。0=关')
     parser.add_argument('--critic_arch', default='v2', choices=['v1', 'v1af', 'v2'],
                         help='critic 结构: v1=历史; v1af=动作首层; v2=双流(s16-100 ∥ a32-64 → square(残差)→128→64)')
     parser.add_argument('--critic_act', default='relu', choices=['relu', 'leaky'],
@@ -2018,6 +2033,9 @@ if __name__ == "__main__":
         'v1af' if int(getattr(args, 'critic_action_first', 0) or 0) else getattr(args, 'critic_arch', 'v2'),
         getattr(args, 'critic_act', 'relu'), getattr(args, 'critic_out_init', '3e3'),
         getattr(args, 'critic_bias_init', 'none'), getattr(args, 'rate', 0.003)))
+    _c1b = float(getattr(args, 'c1_bound_coef', 10.0))
+    if _c1b > 0.0:
+        prCyan('[c1] 越界项已开启: c1 += {} × Σ[max(0,-a)+max(0,a-0.5)]  (MW·step)'.format(_c1b))
     # 只在**未显式指定**（--seed 默认 -1）时随机化。显式 --seed >= 0 必须被尊重，
     # 否则"同 seed 配对 A/B"会被随机种子混淆（历史 bug：本行曾无条件覆盖用户传入的 --seed）。
     if args.seed is None or int(args.seed) < 0:
