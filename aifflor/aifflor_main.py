@@ -77,6 +77,7 @@ L: r2 = −1·min(clip_amount, 20)   [MW] 命令与实际之差 (两段 clip 合
 """
 import os
 import sys
+import time as _time_mod   # 注意: 函数内 'time' 被时间步长(float)占用
 import numpy as np
 import argparse
 from copy import deepcopy
@@ -1041,6 +1042,10 @@ def train_hsrl(num_iterations_H,
     test_trigger = 0
 
     c1_bound_coef = float(getattr(args, 'c1_bound_coef', 10.0))   # c1 越界项系数（见 --c1_bound_coef）
+    _progress = bool(int(getattr(args, 'progress', 1) or 0))
+    _prog_every = max(1, int(getattr(args, 'progress_every', 500) or 500))
+    _t0 = _time_mod.time()
+    _tag = os.path.basename(str(output).rstrip('/\\'))
     explore_mix_blocks = int(getattr(args, 'explore_mix_blocks', 0) or 0)
     _wt_lhs_rng = np.random.RandomState(int(getattr(args, 'seed', 0) or 0) + 7919)
     while step < num_iterations_H:
@@ -1588,6 +1593,14 @@ def train_hsrl(num_iterations_H,
 
         # ---- 推进 ----
         step += 1
+        if _progress and step % _prog_every == 0:
+            _el = _time_mod.time() - _t0
+            _rate = step / max(1e-9, _el)
+            _left = (num_iterations_H - step) / max(1e-9, _rate)
+            print('  [{}] {:>7}/{} ({:5.1f}%)  {:5.1f} 步/秒  已用 {:4.0f} min  剩余约 {:4.0f} min'
+                  .format(_tag, step, num_iterations_H,
+                          100.0 * step / max(1, num_iterations_H), _rate,
+                          _el / 60.0, max(0.0, _left) / 60.0), flush=True)
         episode_steps += 1
         episode_reward += r1
         episode_cost += c1_step
@@ -1647,6 +1660,16 @@ def train_hsrl(num_iterations_H,
                                df_test_rows, df_test_written)
         flush_csv_append_batch('{}/update_stats_H.csv'.format(output),
                                df_update_rows, df_update_written)
+
+    if _progress:
+        try:
+            import hsrl_metrics
+            _m = hsrl_metrics.summarize(output, tail=0.2, tag=_tag)
+            print('')
+            print(hsrl_metrics.SUMMARY_HEADER, flush=True)
+            print(hsrl_metrics.format_row(_m), flush=True)
+        except Exception as _e:
+            print('[summary] 汇总失败: {}'.format(_e), flush=True)
 
     if phase_mode > 0:
         prGreen('phase check: mode={} dims={} checked={} mismatch={} ({:.4f}%)'.format(
@@ -1902,6 +1925,9 @@ if __name__ == "__main__":
     parser.add_argument('--cost_clip', default=1, type=int,
                         help='cost 塔只看 clip 到 [0,0.5] 后的风机动作（c1 只是 clip(a) 的函数；越界梯度由 profit 塔的 pen5 给）。1=开(默认)')
     parser.add_argument('--na_box', default=5, type=int, help='风机动作维数（前 na_box 维夹到 [0,0.5]）')
+    parser.add_argument('--progress', default=1, type=int,
+                        help='1=打印 diag 同款进度行（每 --progress_every 步）与训练结束汇总行')
+    parser.add_argument('--progress_every', default=500, type=int, help='进度行间隔（环境步）')
     parser.add_argument('--c1_bound_coef', default=0.0, type=float,
                         help='把越界量也计入 c1（MW·step / 单位 a）: c1 += 该系数 × Σ[max(0,-a)+max(0,a-0.5)]'
                              '；让 cost critic 看到"界"（否则它会外推界内斜率、把界外估成更便宜）。0=关')
