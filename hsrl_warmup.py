@@ -78,6 +78,9 @@ HSRL warmup 期调度助手（多项目共享）
 import numpy as np
 
 # ---------------------------------------------------------------- 默认参数
+#: LHS（拉丁超立方）覆盖区间 —— 直接铺满动作物理盒 [0, 0.5]
+LHS_LO, LHS_HI = 0.0, 0.5
+
 WT_START = 0.2           # ⚠ 起点由 1/3（单机 Cp 峰）改为 0.2：**warmup 不需要往最优方向带**
 # 附带好处：0.2 正好落在 step=0.05 的整数格上 ⇒ 可达集就是 {0.05,0.10,...,0.45} 这 9 个整格点。
 # 旧起点 1/3 = 0.3333 不是 0.05 的整数倍 ⇒ 整个格点偏移（实测只能踩到 0.0833/0.1333/…），
@@ -192,7 +195,8 @@ class WarmupSchedule:
                  sig_step_lo=SIG_STEP_LO, sig_step_hi=SIG_STEP_HI,
                  sig_lo=SIG_LO, sig_hi=SIG_HI,
                  wt_sched='mix', prior=WT_PRIOR, prior_frac=WT_PRIOR_FRAC,
-                 prior_step=WT_PRIOR_STEP, wide_gain=WT_WIDE_GAIN):
+                 prior_step=WT_PRIOR_STEP, wide_gain=WT_WIDE_GAIN,
+                 lhs_n_blocks=None):
         self.nb_turbine = int(nb_turbine)
         self.nb_actions = int(nb_actions) if nb_actions else None
         self.start, self.step = float(start), float(step)
@@ -223,6 +227,10 @@ class WarmupSchedule:
         #: 抽样序列（否则同一 seed 下历史 run 无法复现）。
         self.rng_near = None
         self.rng_wide = None
+        #: LHS 覆盖（wt_sched='lhs'）: n_blocks 全局分层, 池耗尽后按 64 块重新生成
+        self._lhs_n = None if lhs_n_blocks is None else int(lhs_n_blocks)
+        self._lhs = None
+        self._lhs_i = 0
         self._blk = 0
         self.reset()
 
@@ -289,6 +297,16 @@ class WarmupSchedule:
             return -float(self.rng.uniform(self.sig_step_lo, self.sig_step_hi))
         return 0.0                           # 580 平峰 ⇒ 不动
 
+    def _lhs_points(self, n):
+        """拉丁超立方采样（逐维分层 + 独立置换）—— 覆盖 [LHS_LO, LHS_HI]。"""
+        n = int(max(1, n))
+        pts = np.empty((n, self.nb_turbine), dtype=float)
+        for d in range(self.nb_turbine):
+            bins = (np.arange(n) + self.rng.random(n)) / n
+            self.rng.shuffle(bins)
+            pts[:, d] = LHS_LO + bins * (LHS_HI - LHS_LO)
+        return pts
+
     def action(self, price=None):
         """返回本块的上层动作；`enabled=False` 时返回 None（调用方走旧随机臂）。
 
@@ -299,6 +317,15 @@ class WarmupSchedule:
             return None
         if self._first:
             self._first = False                      # 第 0 块 = 起点 (start 各维, 信号 sig_value)
+        elif self.wt_sched == 'lhs':
+            # ---- LHS 覆盖：每维在 [0,0.5] 上分层（同一样本量下逐维均匀铺满）----
+            if self._lhs is None or self._lhs_i >= self._lhs.shape[0]:
+                self._lhs = self._lhs_points(self._lhs_n or 64)
+                self._lhs_i = 0
+            self._wt = self._lhs[self._lhs_i].copy()
+            self._lhs_i += 1
+            self._sig = float(np.clip(self._sig + self.sig_delta(price),
+                                      self.sig_lo, self.sig_hi))
         elif self.wt_sched == 'mix':
             # ---- 混合采样（正式口径）----
             self._wt = self._sample_mix()
@@ -560,7 +587,7 @@ def add_warmup_args(parser, yaw=False):
     parser.add_argument('--warmup_sched', default='fixed', choices=['fixed', 'random'],
                         help=sched_help)
     # ---- 风机/偏航动作的**混合采样**（正式口径；旧口径用 `walk` 复现）----
-    parser.add_argument('--warmup_wt_sched', default='mix', choices=['mix', 'walk'],
+    parser.add_argument('--warmup_wt_sched', default='lhs', choices=['lhs', 'mix', 'walk'],
                         help='warmup 期风机动作的生成方式（**正式口径 = mix**）: '
                              'mix=**混合采样** —— 约 --warmup_wt_prior_frac 比例的块走'
                              '"先验结构 + 邻域扰动"(--warmup_wt_prior 为中心、逐维 ±'
@@ -824,11 +851,12 @@ def build_from_args(args, agent_H, agent_L=None):
         sig_mode=str(getattr(args, 'warmup_sig', 'price_walk')),
         sig_step_lo=float(getattr(args, 'warmup_sig_step_lo', SIG_STEP_LO)),
         sig_step_hi=float(getattr(args, 'warmup_sig_step_hi', SIG_STEP_HI)),
-        wt_sched=str(getattr(args, 'warmup_wt_sched', 'mix')),
+        wt_sched=str(getattr(args, 'warmup_wt_sched', 'lhs')),
         prior=parse_prior(getattr(args, 'warmup_wt_prior', None), default=WT_PRIOR),
         prior_frac=float(getattr(args, 'warmup_wt_prior_frac', WT_PRIOR_FRAC)),
         prior_step=float(getattr(args, 'warmup_wt_prior_step', WT_PRIOR_STEP)),
-        wide_gain=float(getattr(args, 'warmup_wt_wide_gain', WT_WIDE_GAIN)))
+        wide_gain=float(getattr(args, 'warmup_wt_wide_gain', WT_WIDE_GAIN)),
+        lhs_n_blocks=(int(getattr(args, 'warmup', 0) or 0) // 5) or None)
     _mode = str(getattr(args, 'warmup_bess', 'price'))
     if _mode == 'random':
         rule = None

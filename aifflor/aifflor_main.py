@@ -1041,6 +1041,8 @@ def train_hsrl(num_iterations_H,
     test_trigger = 0
 
     c1_bound_coef = float(getattr(args, 'c1_bound_coef', 10.0))   # c1 越界项系数（见 --c1_bound_coef）
+    explore_mix_blocks = int(getattr(args, 'explore_mix_blocks', 0) or 0)
+    _wt_lhs_rng = np.random.RandomState(int(getattr(args, 'seed', 0) or 0) + 7919)
     while step < num_iterations_H:
         prYellow('########### step:{} ###########'.format(step))
         if observation is None:
@@ -1089,6 +1091,14 @@ def train_hsrl(num_iterations_H,
             else:
                 original_action_H = agent_H.select_action(norm_observation)
                 original_action_H = _diag_fix_action(original_action_H)
+                # ---- 早期覆盖混合（--explore_mix_blocks）: a = ε·actor + (1−ε)·U(0,0.5) ----
+                if explore_mix_blocks > 0:
+                    _blk_i = max(0, (int(step) - int(args.warmup)) // 5)
+                    if _blk_i < explore_mix_blocks:
+                        _eps = _blk_i / float(explore_mix_blocks)
+                        _ar = _wt_lhs_rng.uniform(0.0, 0.5, 5)
+                        original_action_H = np.asarray(original_action_H, dtype=float).copy()
+                        original_action_H[:5] = _eps * original_action_H[:5] + (1.0 - _eps) * _ar
                 applied_action_H, penalty_NN_H, pen6_H = hsrl.check_action_H_hsrl(
                     original_action_H, E_block_start,
                     pen_coef=(DIAG['pen_h'] if DIAG['pen_h'] > 0 else None),
@@ -1887,6 +1897,8 @@ if __name__ == "__main__":
     parser.add_argument('--max_steps', default=0, type=int,
                         help='>0 时覆盖 train_iter_H, 用于短程 A/B')
     # ---- 诊断专用（默认全关 ⇒ 生产路径逐位不变；见 documentation/diag_two_items_plan.md）----
+    parser.add_argument('--explore_mix_blocks', default=0, type=int,
+                        help='warmup 后前 N 块用 a=ε·actor+(1−ε)·U(0,0.5) 混合（ε 线性 0→1），把覆盖延伸到训练早期；0=关')
     parser.add_argument('--cost_clip', default=1, type=int,
                         help='cost 塔只看 clip 到 [0,0.5] 后的风机动作（c1 只是 clip(a) 的函数；越界梯度由 profit 塔的 pen5 给）。1=开(默认)')
     parser.add_argument('--na_box', default=5, type=int, help='风机动作维数（前 na_box 维夹到 [0,0.5]）')
