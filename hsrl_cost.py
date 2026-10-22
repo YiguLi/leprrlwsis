@@ -159,9 +159,44 @@ def v_unscale(x):
 
 
 # ---------------------------------------------------------------- 成本 / 偏好
+#: 平滑开关（--c1_smooth）：把 |ΔP| 与 (P_F−3)⁺ 两个折点改成连续可导。
+#: 数值等价性：|c1_平滑 − c1_硬| ≤ SMOOTH_EPS + K_V·ln2/SMOOTH_BETA（β=100, ε=0.05 ⇒ 0.189）。
+SMOOTH = False
+SMOOTH_BETA = 100.0
+SMOOTH_EPS = 0.05
+
+
+def set_smooth(enable=False, beta=100.0, eps=0.05):
+    """由 main 调用（--c1_smooth / --c1_smooth_beta / --c1_smooth_eps）。"""
+    global SMOOTH, SMOOTH_BETA, SMOOTH_EPS
+    SMOOTH = bool(int(enable))
+    SMOOTH_BETA = float(beta)
+    SMOOTH_EPS = float(eps)
+
+
+def smooth_pf(dp):
+    """平滑 |ΔP|：sqrt(ΔP²+ε²) − ε（与 |ΔP| 差 ≤ ε，且在 0 处连续可导）。"""
+    d = float(dp)
+    return (d * d + SMOOTH_EPS ** 2) ** 0.5 - SMOOTH_EPS
+
+
+def _softplus_shift(x, beta):
+    """数值稳定的 shifted softplus：softplus_β(x) − ln2/β（x=0 处取 0）。"""
+    b = float(beta)
+    x = float(x)
+    return max(x, 0.0) + np.log1p(np.exp(-abs(b * x))) / b - np.log(2.0) / b
+
+
 def fluct_cost(P_F):
-    """波动当量 [MW·step]：c1 = P_F + K_V·(P_F−3)⁺。"""
+    """波动当量 [MW·step]：c1 = P_F + K_V·(P_F−3)⁺。
+
+    `set_smooth(True)` 时改为
+        c1 = P̃_F + K_V·[softplus_β(P̃_F − 3) − ln2/β],  P̃_F = sqrt(ΔP²+ε²) − ε
+    只改"折点附近的形状"，取值偏差 ≤ ε + K_V·ln2/β。
+    """
     p = float(P_F)
+    if SMOOTH:
+        return p + K_V * _softplus_shift(p - P_F_LIMIT, SMOOTH_BETA)
     return p + K_V * max(0.0, p - P_F_LIMIT)
 
 

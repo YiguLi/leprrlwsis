@@ -55,6 +55,9 @@ def main():
     ap.add_argument('run_dir', nargs='?', default='output/DIAG-S3')
     ap.add_argument('--n', type=int, default=800, help='样本数（块首步）')
     ap.add_argument('--which', default='critic_c_6.pkl')
+    ap.add_argument('--smooth_beta', type=float, default=0.0,
+                    help='>0 ⇒ 真值也按平滑版 c1 计算（与 --c1_smooth 口径一致）')
+    ap.add_argument('--smooth_eps', type=float, default=0.05)
     a = ap.parse_args()
 
     D = find_run(a.run_dir)
@@ -83,9 +86,18 @@ def main():
         Am = A.copy(); Am[:, j] -= EPS
         Pj = (power_of(ph, u, Ap) - power_of(ph, u, Am)) / (2 * EPS)
         dP[:, j] = Pj
-        sgn = np.sign(P0 - prev)
-        sgn[sgn == 0] = 1.0
-        dc1[:, j] = (1.0 + 20.0 * (PF0 > 3.0)) * sgn * Pj
+        if a.smooth_beta > 0:
+            # 平滑版真值：c1 = p̃ + 20·[softplus_β(p̃−3) − ln2/β], p̃ = sqrt(ΔP²+ε²) − ε
+            dpv = P0 - prev
+            beta, eps = a.smooth_beta, a.smooth_eps
+            p_t = np.sqrt(dpv ** 2 + eps ** 2) - eps
+            fac = 1.0 + 20.0 / (1.0 + np.exp(-beta * (p_t - 3.0)))
+            slope = dpv / np.sqrt(dpv ** 2 + eps ** 2)
+            dc1[:, j] = fac * slope * Pj
+        else:
+            sgn = np.sign(P0 - prev)
+            sgn[sgn == 0] = 1.0
+            dc1[:, j] = (1.0 + 20.0 * (PF0 > 3.0)) * sgn * Pj
 
     S = torch.tensor(np.column_stack([sub.pr / 1000, sub.u / 10, sub.SOC / 0.5,
                                       prev / 5]).astype(np.float32))
@@ -158,6 +170,11 @@ def main():
         print('  Pearson %.3f | Spearman %.3f | 符号一致率 %.1f%%'
               % (*corr(gc_n, dc1_full), 100 * (np.sign(gc_n) == np.sign(dc1_full)).mean()))
         print('  量纲 K = %.3f' % (np.abs(gc_n).mean() / max(1e-12, np.abs(dc1_full).mean())))
+
+    q = np.percentile(np.abs(dc1), 50)
+    big = np.abs(dc1) > q
+    print('\n[大梯度子集] |真值| > 中位 的样本: n=%d | sign 一致 %.1f%% | Pearson %.3f'
+          % (big.sum(), 100 * (np.sign(gc[big]) == np.sign(dc1[big])).mean(), corr(gc[big], dc1[big])[0]))
 
     print('\n[纯出力] 与 ∂P/∂a 的相关（不看折线，只看"动作→出力"是否学对）')
     print('  Pearson %.3f | Spearman %.3f | 符号一致 %.1f%%'
