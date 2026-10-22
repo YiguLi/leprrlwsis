@@ -26,16 +26,12 @@ import model  # noqa: E402
 
 
 def infer_arch(sd, ns=4, na=6):
-    if 's1.weight' in sd:
-        return 'v2'
-    if sd['fc1.weight'].shape[1] == ns + na:
-        return 'v1af'
-    return 'v1'
+    return model.infer_arch(sd, ns, na)
 
 
 def layer_names(m):
     """按 forward 顺序给出激活层名（供打印）。"""
-    if m.arch == 'v2':
+    if m.arch in ('v2', 'v3'):
         return ['s1', 's2', 'a1', 'a2', 'm1', 'm2', 'm3']
     if m.arch == 'v1af':
         return ['fc1', 'fc2', 'fc5']

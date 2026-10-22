@@ -91,7 +91,7 @@ def main():
                                       prev / 5]).astype(np.float32))
     at = torch.tensor(A_FULL.astype(np.float32), requires_grad=True)  # 6 维（末维 = g）
     sd = torch.load(os.path.join(D, a.which), map_location='cpu')
-    net = model.Critic(4, 6, hidden1=16, hidden2=100, arch='v2')
+    net = model.Critic(4, 6, hidden1=16, hidden2=100, arch=model.infer_arch(sd))
     net.load_state_dict(sd); net.eval()
     q = net((S, at))
     g, = torch.autograd.grad(q.sum(), at)
