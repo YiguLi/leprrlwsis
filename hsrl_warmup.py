@@ -121,17 +121,15 @@ DT = 1.0 / 60.0
 RATED_POWER = 0.5
 SOC_TOL = 0.0            # 下层无死区 (与各项目 SocTracker 默认一致)
 
-#: **warmup 时长口径**（正式方法统一，2026-10-08 起）：未显式传 `--warmup` 时
-#: `warmup = WARMUP_STEPS = 1440` 步 —— **一个完整 episode（一天）**，
-#: **不再与 `--bsize` 挂钩**。理由：
+#: **warmup 时长口径**（2026-10-23 起：7200 步 = **5 个完整 episode/天**）：
+#: 未显式传 `--warmup` 时 `warmup = WARMUP_STEPS = 7200`，**不与 `--bsize` 挂钩**。理由：
 #:   ① 1440 步覆盖完整电价三档（300/580/980）× 完整风况日循环 ⇒ warmup 的 (s,a) 分布
 #:      与策略期同分布，而不是"只看一天的某一小段"；
-#:   ② H 层每 5 步产 1 条 transition ⇒ 缓冲 1440/5 = 288 条 ≥ bsize(256)
-#:      ⇒ **首个 minibatch 不再复制同一条 transition**（旧 `--warmup 200` + bsize=256
-#:      时首 batch 每条被复制 ~6 份，这正是当初把它绑到 bsize 的原因；现在固定 1440 后
-#:      这个目的自动达成，且不必随 bsize 漂移）。
+#:   ② H 层每 5 步产 1 条 transition ⇒ 缓冲 7200/5 = **1440 条 ≫ bsize(256)**
+#:      ⇒ 首个 minibatch 不复制同一条 transition，且 LHS 覆盖 1440 个块（每维分层更细）；
+#:      旧口径 1440 步（288 条）只是"够用"，7200 步给的是 5 天、覆盖 5 个不同风况日。
 #: warmup 期**不进行任何网络更新**（`BiasInitTracker` 运行期断言）。
-WARMUP_STEPS = 1440
+WARMUP_STEPS = 7200
 #: **旧口径**（与 `--bsize` 挂钩）的系数，仅供复现：`--warmup_bsize_mult 4` ⇒ `4 × bsize`。
 #: 默认 0.0 = 不挂钩（走 `WARMUP_STEPS`）。
 WARMUP_BSIZE_MULT = 0.0
@@ -879,7 +877,7 @@ def resolve_warmup(args, verbose=True):
     """把 `args.warmup` 解析成**步数**并打印口径；返回 args（就地改写）。
 
     口径（**正式方法统一**，2026-10-08 起 **不再与 `--bsize` 挂钩**）：
-      * 未显式传 `--warmup`（默认 None）⇒ `warmup = WARMUP_STEPS = 1440` 步
+      * 未显式传 `--warmup`（默认 None）⇒ `warmup = WARMUP_STEPS = 7200` 步
         （= 一个完整 episode/一天）。
       * `--warmup_bsize_mult > 0` ⇒ 走**旧口径** `mult × bsize`（默认 0.0 = 不挂钩）。
       * 显式传 `--warmup N` ⇒ **尊重 N**（最高优先）。
