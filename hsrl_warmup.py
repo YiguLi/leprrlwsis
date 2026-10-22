@@ -580,8 +580,9 @@ def add_warmup_args(parser, yaw=False):
     parser.add_argument('--warmup_bsize_mult', default=WARMUP_BSIZE_MULT, type=float,
                         help='**旧口径**（与 --bsize 挂钩）：>0 时 warmup = 该系数 × --bsize '
                              '（如 4 ⇒ bsize=256 时 1024 步）。默认 %.1f = **不挂钩**，'
-                             '走固定 %d 步（一个 episode/一天）。仅当未显式传 --warmup 时生效。'
-                             % (WARMUP_BSIZE_MULT, WARMUP_STEPS))
+                             '走固定 %d 步（= %d 个 episode/天）。仅当未显式传 --warmup 时生效。'
+                             % (WARMUP_BSIZE_MULT, WARMUP_STEPS,
+                                max(1, int(WARMUP_STEPS) // 1440)))
     parser.add_argument('--warmup_sched', default='fixed', choices=['fixed', 'random'],
                         help=sched_help)
     # ---- 风机/偏航动作的**混合采样**（正式口径；旧口径用 `walk` 复现）----
@@ -899,8 +900,8 @@ def resolve_warmup(args, verbose=True):
             src = 'bsize×%.1f（**旧口径**, --warmup_bsize_mult>0）' % mult
         else:
             args.warmup = int(WARMUP_STEPS)
-            src = ('固定 %d 步 = 一个 episode/一天（**不与 --bsize 挂钩**）'
-                   % int(WARMUP_STEPS))
+            src = ('固定 %d 步 = %d 个 episode/天（**不与 --bsize 挂钩**）'
+                   % (int(WARMUP_STEPS), max(1, int(WARMUP_STEPS) // 1440)))
     else:
         args.warmup = int(given)
         src = '显式 --warmup %d' % args.warmup
