@@ -1923,8 +1923,8 @@ if __name__ == "__main__":
     # ---- 诊断专用（默认全关 ⇒ 生产路径逐位不变；见 documentation/diag_two_items_plan.md）----
     parser.add_argument('--explore_mix_blocks', default=0, type=int,
                         help='warmup 后前 N 块用 a=ε·actor+(1−ε)·U(0,0.5) 混合（ε 线性 0→1），把覆盖延伸到训练早期；0=关')
-    parser.add_argument('--c1_smooth', default=0, type=int,
-                        help='1=c1 的两个折点(abs(dP) 与 20*(P_F-3)+)改为连续可导的 softplus 平滑；'
+    parser.add_argument('--c1_smooth', default=1, type=int,
+                        help='1(默认)=c1 的两个折点(abs(dP) 与 20*(P_F-3)+)改为连续可导的 softplus 平滑；0=硬折点；'
                              '取值偏差 ≤ eps + 20·ln2/β（默认 β=100, eps=0.05 ⇒ 0.19 MW·step）')
     parser.add_argument('--c1_smooth_beta', default=100.0, type=float, help='softplus 温度 β（越大越接近硬折点）')
     parser.add_argument('--c1_smooth_eps', default=0.05, type=float, help='平滑 abs(dP) 的 ε（MW）')
