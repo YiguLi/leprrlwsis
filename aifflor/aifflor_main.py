@@ -1807,7 +1807,7 @@ if __name__ == "__main__":
                         type=int,
                         help='train iters each timestep')
     parser.add_argument('--epsilon',
-                        default=4000,
+                        default=10000,
                         type=int,
                         help='【H 层】探索噪声 ε 由 1 线性衰减到 0 所需的【决策次数】。'
                              'H 每 5 个环境步决策一次 ⇒ 4000 次 = 20k 环境步'
@@ -1959,7 +1959,7 @@ if __name__ == "__main__":
                         help='>=0 ⇒ 每次对偶更新后把 agent_H.lam 钉到该值（actor 空间；实验 1 用 0）')
     parser.add_argument('--diag_center_reward', default=0, type=int,
                         help='1 => 奖励中心化: r1 -= pr*(P_G-P_nom(u))*dt（把动作效应从状态基线上抬出来）')
-    parser.add_argument('--pen_h', default=-1.0, type=float,
+    parser.add_argument('--pen_h', default=100.0, type=float,
                         help='>0 ⇒ 覆盖 H 前 5 维越界罚系数 [元/单位]（实验 1 用 400 把动作压在界内）')
 
 
@@ -2090,8 +2090,12 @@ if __name__ == "__main__":
     DIAG['lam_fixed'] = float(getattr(args, 'diag_lambda_fixed', -1.0))
     DIAG['pen_h'] = float(getattr(args, 'pen_h', -1.0))
     DIAG['center'] = int(getattr(args, 'diag_center_reward', 0))
+    prCyan('[train] pen_h={} epsilon={} wt_noise={} (pen_h=越界罚系数元/单位; '
+           'epsilon=噪声衰减所需决策次数)'.format(
+               getattr(args, 'pen_h', 100.0), getattr(args, 'epsilon', 10000),
+               getattr(args, 'wt_noise', 0.05)))
     if any([DIAG['u'] >= 0, DIAG['pr'] >= 0, DIAG['scalar'], DIAG['freeze_g'],
-            DIAG['lam_fixed'] >= 0, DIAG['pen_h'] > 0]):
+            DIAG['lam_fixed'] >= 0]):
         prCyan('[DIAG] u={} pr={} scalar={} freeze_g={} lam_fixed={} pen_h={}'.format(
             DIAG['u'], DIAG['pr'], DIAG['scalar'], DIAG['freeze_g'],
             DIAG['lam_fixed'], DIAG['pen_h']))
