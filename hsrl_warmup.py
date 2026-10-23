@@ -229,6 +229,7 @@ class WarmupSchedule:
         self._lhs_n = None if lhs_n_blocks is None else int(lhs_n_blocks)
         self._lhs = None
         self._lhs_i = 0
+        self._g = None                     # 第 6 维随机游走的当前值（g_walk 用）
         self._blk = 0
         self.reset()
 
@@ -294,6 +295,23 @@ class WarmupSchedule:
         if p >= PRICE_HIGH - 1e-6:           # 980 高峰 ⇒ 目标下调（放电方向）
             return -float(self.rng.uniform(self.sig_step_lo, self.sig_step_hi))
         return 0.0                           # 580 平峰 ⇒ 不动
+
+    def g_walk(self, lo, hi):
+        """第 6 维 g 的**可行域内随机游走**（与电价无关）。
+
+        每次调用（= 每个块）：g ← clip(g + U(−1,1)·G_STEP_FRAC·(hi−lo), lo, hi)；
+        初值 0（通常落在可行域内），越界即夹回。`lo/hi` 由调用方按当前 SOC 给出
+        （= −C_max / +D_max，见 `aifflor_hsrl.feasible_total`）。
+        """
+        lo, hi = float(lo), float(hi)
+        if hi <= lo:                       # 退化（SOC 卡死）⇒ 取中点
+            self._g = 0.5 * (lo + hi)
+            return self._g
+        if getattr(self, '_g', None) is None:
+            self._g = float(np.clip(0.0, lo, hi))
+        step = G_STEP_FRAC * (hi - lo)
+        self._g = float(np.clip(self._g + self.rng.uniform(-step, step), lo, hi))
+        return self._g
 
     def _lhs_points(self, n):
         """拉丁超立方采样（逐维分层 + 独立置换）—— 覆盖 [LHS_LO, LHS_HI]。"""
@@ -388,6 +406,9 @@ class WarmupBessRule:
 
 # ---------------------------------------------------------------- 价格条件随机规则
 #: warmup 期"价格条件随机充放"的幅度区间 (MW) 与三档电价 (元/MWh)
+#: warmup 期第 6 维 g 的随机游走步长 = 该比例 × 可行域宽度（[−C_max, +D_max]）
+G_STEP_FRAC = 0.15
+
 WARMUP_BESS_LO, WARMUP_BESS_HI = 0.3, 0.5
 PRICE_LOW, PRICE_MID, PRICE_HIGH = 300.0, 580.0, 980.0
 

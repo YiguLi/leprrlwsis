@@ -1080,12 +1080,12 @@ def train_hsrl(num_iterations_H,
                 _wa = warmup_sched.action(float(observation[0]))   # None ⇒ 对照臂
                 if _wa is None:
                     original_action_H = np.asarray(agent_H.random_action(), dtype=float).copy()
-                    # 第 6 维按 HSRL 量程重抽（U(−2.5, 2.5) MW·min）
-                    original_action_H[5] = hsrl.random_g()
                 else:
                     original_action_H = np.asarray(_wa, dtype=float).copy()
-                    # 价格游走 sig → g: **反号 + ×5**（低谷充电 ⇒ g<0；见 hsrl 常量区）
-                    original_action_H[5] = hsrl.g_from_warmup_signal(original_action_H[5])
+                # 第 6 维 g：**在块级可行域 [−C_max, +D_max] 内随机游走**（不再按电价）
+                _g6 = (warmup_sched.g_walk(-feas_c_max, feas_d_max)
+                       if warmup_sched is not None else hsrl.random_g())
+                original_action_H[5] = float(_g6)
                 original_action_H = _diag_fix_action(original_action_H)
                 applied_action_H, _pen5_w, _pen6_w = hsrl.check_action_H_hsrl(
                     original_action_H, E_block_start,
