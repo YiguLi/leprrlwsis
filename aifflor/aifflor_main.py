@@ -1806,6 +1806,9 @@ if __name__ == "__main__":
                         default=200000,
                         type=int,
                         help='train iters each timestep')
+    parser.add_argument('--noise_zero_step', default=115200, type=int,
+                        help='探索噪声归零的环境步：warmup 结束后 ε 从 1 线性降到 0，于该步恰好归零；'
+                             '0=不用（退回 --epsilon 的决策次数口径）。默认 115200')
     parser.add_argument('--epsilon',
                         default=10000,
                         type=int,
@@ -1881,10 +1884,10 @@ if __name__ == "__main__":
                         help='WT 5 维探索噪声幅度 (±wt_noise*eps)')
     parser.add_argument('--sig_noise_max', default=0.2, type=float,
                         help='SOC 目标信号维探索噪声幅度上限 (±sig_noise_max*eps)')
-    parser.add_argument('--sig_noise_min', default=0.01, type=float,
+    parser.add_argument('--sig_noise_min', default=0.0, type=float,
                         help='SOC 目标信号维探索噪声**地板** (eps 收敛到它, 不再降到 0); '
                              '0.01 ⇒ SOC 目标抖动 ±0.05 MWh = SOC_TOL(0.1) 的一半')
-    parser.add_argument('--wt_noise_floor', default=0.01, type=float,
+    parser.add_argument('--wt_noise_floor', default=0.0, type=float,
                         help='WT 5 维探索噪声**地板** (0 = 20k 步后这些维完全不再探索); '
                              '0.01 = 行为带 [0,0.5] 的 2%, 折算单机功率抖动约 ±2.4%')
 
@@ -2052,6 +2055,13 @@ if __name__ == "__main__":
     hc.set_cost_scale(args.cost_scale)   # cost 通道缩放 (λ 自动跟随)
     _HCFG = hc.h_settings()
     prCyan(hc.summary())
+    # ---- 探索噪声日程：warmup 后 ε:1→0，在 --noise_zero_step 处归零 ----
+    if getattr(args, 'warmup', None) is None:
+        args.warmup = int(hwarm.WARMUP_STEPS)
+    _nzs = int(getattr(args, 'noise_zero_step', 0) or 0)
+    if _nzs > 0:
+        _span = max(1, _nzs - int(args.warmup))
+        args.epsilon = max(1, int(round(_span / 5.0)))     # 决策次数 = 块数
     hc.set_smooth(int(getattr(args, 'c1_smooth', 0) or 0),
                   float(getattr(args, 'c1_smooth_beta', 100.0)),
                   float(getattr(args, 'c1_smooth_eps', 0.05)))
@@ -2090,10 +2100,13 @@ if __name__ == "__main__":
     DIAG['lam_fixed'] = float(getattr(args, 'diag_lambda_fixed', -1.0))
     DIAG['pen_h'] = float(getattr(args, 'pen_h', -1.0))
     DIAG['center'] = int(getattr(args, 'diag_center_reward', 0))
-    prCyan('[train] pen_h={} epsilon={} wt_noise={} (pen_h=越界罚系数元/单位; '
-           'epsilon=噪声衰减所需决策次数)'.format(
-               getattr(args, 'pen_h', 100.0), getattr(args, 'epsilon', 10000),
-               getattr(args, 'wt_noise', 0.05)))
+    _nzs = int(getattr(args, 'noise_zero_step', 0) or 0)
+    prCyan('[train] pen_h={} wt_noise={} floor={} | 噪声日程: ε 1→0 于 step {}（warmup {} 起，跨 {} 块/{} 步）'.format(
+        getattr(args, 'pen_h', 100.0), getattr(args, 'wt_noise', 0.05),
+        getattr(args, 'wt_noise_floor', 0.0),
+        (_nzs if _nzs > 0 else '按 --epsilon={} 块'.format(getattr(args, 'epsilon', 0))),
+        getattr(args, 'warmup', None), getattr(args, 'epsilon', 0),
+        (int(getattr(args, 'epsilon', 0)) * 5)))
     if any([DIAG['u'] >= 0, DIAG['pr'] >= 0, DIAG['scalar'], DIAG['freeze_g'],
             DIAG['lam_fixed'] >= 0]):
         prCyan('[DIAG] u={} pr={} scalar={} freeze_g={} lam_fixed={} pen_h={}'.format(

@@ -237,7 +237,9 @@ class SP_TD3(object):
         if self.nb_actions == self.nb_turbine + 1:
             amp_e = np.array([self.wt_noise] * self.nb_turbine + [self.sig_noise_max],
                              dtype=np.float32)
-            floor_e = np.array([self.wt_noise] * self.nb_turbine + [self.sig_noise_min],
+            # 2026-10-23: 地板改为 `wt_noise_floor`（默认 0 ⇒ 噪声随 ε 衰减到 **0**）；
+            # 传入 floor = wt_noise 可恢复"恒定噪声"的旧口径。
+            floor_e = np.array([self.wt_noise_floor] * self.nb_turbine + [self.sig_noise_min],
                                dtype=np.float32)
         elif self.nb_actions == self.nb_turbine:
             # 纯风机维（aifflor / yawflor / nolow 的 td3per·td3perseg）: 全维恒定
