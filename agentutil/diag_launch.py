@@ -75,7 +75,7 @@ ap.add_argument('--extra', nargs=argparse.REMAINDER, default=[],
                     help='额外透传给 aifflor_main 的参数（**必须放命令行最后**，如 --extra --wt_noise 0.15）')
 ap.add_argument('--dry-run', action='store_true', help='只打印将执行的命令并退出')
 ap.add_argument('--prod-arch', action='store_true', help='同 --arch v1（历史结构）')
-ap.add_argument('--arch', default='v2', choices=['v1', 'v1af', 'v2', 'v3', 'v4'], help='critic 结构（生产默认 v2）')
+ap.add_argument('--arch', default='v2', choices=['v1', 'v1af', 'v2', 'v3', 'v4', 'v5'], help='critic 结构（生产默认 v2）')
 ap.add_argument('--leaky', action='store_true', help='critic 用 LeakyReLU(0.01)')
 ap.add_argument('--outinit', default='fanin', choices=['3e3', 'fanin'], help='输出层权重初始化（最优=fanin）')
 ap.add_argument('--bias', action='store_true', help='启用 critic 输出层 bias 初始化（生产默认关）')
@@ -134,7 +134,7 @@ t_all = time.time()
 for name in a.stages:
     cfg = STAGES[name]
     arch = 'v1' if a.prod_arch else a.arch
-    suf = {'v1': '', 'v1af': '-af', 'v2': '-v2', 'v3': '-v3', 'v4': '-v4'}[arch]
+    suf = {'v1': '', 'v1af': '-af', 'v2': '-v2', 'v3': '-v3', 'v4': '-v4', 'v5': '-v5'}[arch]
     suf += '-lk' if a.leaky else ''
     suf += '-fi' if a.outinit == 'fanin' else ''
     suf += '' if a.bias else '-nb'
