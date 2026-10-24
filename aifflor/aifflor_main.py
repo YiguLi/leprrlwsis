@@ -1942,7 +1942,7 @@ if __name__ == "__main__":
     parser.add_argument('--c1_bound_coef', default=0.0, type=float,
                         help='把越界量也计入 c1（MW·step / 单位 a）: c1 += 该系数 × Σ[max(0,-a)+max(0,a-0.5)]'
                              '；让 cost critic 看到"界"（否则它会外推界内斜率、把界外估成更便宜）。0=关')
-    parser.add_argument('--critic_arch', default='v2', choices=['v1', 'v1af', 'v2', 'v3', 'v4', 'v5'],
+    parser.add_argument('--critic_arch', default='v2', choices=['v1', 'v1af', 'v2', 'v3', 'v4', 'v5', 'v6'],
                         help='critic 结构: v1=历史; v1af=动作首层; v2=双流(s16-100 ∥ a32-64 → square(残差)→128→64)')
     parser.add_argument('--critic_act', default='relu', choices=['relu', 'leaky'],
                         help='critic 激活: relu=历史; leaky=LeakyReLU(0.01)（防死单元）')
