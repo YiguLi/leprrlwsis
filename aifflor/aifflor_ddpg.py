@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 
-from model import (Actor, Critic)
+from model import (Actor, Critic, AuxModel)
 from PER_buffer import PrioritizedReplayBuffer
 from random_process import OrnsteinUhlenbeckProcess
 from util import *
@@ -126,6 +126,21 @@ class SP_TD3(object):
         self.target_agg = str(target_agg)
         # cost 塔只看 clip 后的动作（c1 只是 clip(a) 的函数；原始动作的越界梯度由 profit 塔的 pen5 提供）
         self.cost_clip = bool(int(getattr(args, 'cost_clip', 1) or 0))
+        # ---- k=1 的 1-step 监督模型（model-based 策略改进）----
+        self.aux_model = bool(int(getattr(args, 'aux_model', 0) or 0))
+        self.aux_mix = float(getattr(args, 'aux_mix', 1.0))
+        self.aux_warmup = int(getattr(args, 'aux_warmup', 5000) or 0)
+        self.aux_count = 0
+        if self.aux_model:
+            _afp = bool(int(getattr(args, 'critic_feat_power', 0) or 0))
+            _afk = float(getattr(args, 'critic_feat_power_k', 1.357e-3))
+            self.aux_r = AuxModel(self.nb_states, self.nb_actions,
+                                  feat_power=_afp, feat_power_k=_afk)
+            self.aux_c = AuxModel(self.nb_states, self.nb_actions,
+                                  feat_power=_afp, feat_power_k=_afk)
+            _lr = float(getattr(args, 'aux_rate', 1e-3))
+            self.aux_optim_r = Adam(self.aux_r.parameters(), lr=_lr)
+            self.aux_optim_c = Adam(self.aux_c.parameters(), lr=_lr)
         self.na_box = int(getattr(args, 'na_box', 5))
         assert self.target_agg in ('min', 'mean'), self.target_agg
         self._pending = []        # nstep>1 时的滑窗队列: 最近 n-1 个块 (等待后继块结算)
@@ -379,6 +394,22 @@ class SP_TD3(object):
         nn.utils.clip_grad_norm_(self.critic_c2.parameters(), max_norm=2.0, norm_type=2)
         self.critic_optim_c2.step()
 
+        # ---- k=1 的 1-step 监督模型: f(s,a) ≈ r1/s_p, c1/s_c（目标无 bootstrap）----
+        if self.aux_model:
+            self.aux_r.zero_grad(); self.aux_c.zero_grad()
+            _pr = self.aux_r([state_batch, action_batch])
+            _cc = self.aux_c([state_batch, action_batch])
+            _lr = torch.mean(torch.mean((_pr - profit_batch) ** 2, dim=1))
+            _lc = torch.mean(torch.mean((_cc - cost_batch) ** 2, dim=1))
+            (_lr + _lc).backward()
+            self.aux_optim_r.step(); self.aux_optim_c.step()
+            self.aux_count += 1
+            if self.aux_count <= 3 or self.aux_count % 500 == 0:
+                print('[aux] n=%d | L_r=%.3e L_c=%.3e | f_c 均 %+.4f | 目标 c 均 %+.4f | a/b=%.4f/%.4f'
+                      % (self.aux_count, float(_lr), float(_lc), float(_cc.mean()),
+                         float(cost_batch.mean()), float(self.aux_c.out.bias), float(self.aux_r.out.bias)),
+                      flush=True)
+
         # ---- TD3: delayed policy update ----
         self.update_count += 1
         if self.update_count % self.policy_delay == 0:
@@ -396,7 +427,17 @@ class SP_TD3(object):
                 self.critic_c2([state_batch, _a_cur_c])).clamp(min=0.0)
 
             # cost 为 +
-            policy_loss = -(min_p_cur - self.lam * min_c_cur)  # TODO
+            _crit = min_p_cur - self.lam * min_c_cur
+            if self.aux_model:
+                # k=1 model-based 策略改进: 用 1-step 模型的梯度（无 bootstrap 噪声）
+                _a_cur2 = self.actor(state_batch)
+                _aux = self.aux_r([state_batch, _a_cur2]) - self.lam * self.aux_c([state_batch, _a_cur2])
+                # 预热: aux 前 aux_warmup 次更新不参与（避免用没学好的模型）
+                _beta = self.aux_mix * min(1.0, self.aux_count / max(1, self.aux_warmup))
+                _obj = _beta * _aux + (1.0 - _beta) * _crit
+            else:
+                _obj = _crit
+            policy_loss = -(_obj)  # TODO
             policy_loss = policy_loss.mean()
             policy_loss.backward()
             # Gradient Clipping
@@ -619,6 +660,11 @@ class SP_TD3(object):
         self.s_t = obs
         self.random_process.reset_states()
 
+    def save_aux(self, output):
+        if getattr(self, 'aux_model', False):
+            torch.save(self.aux_r.state_dict(), '{}/aux_r_{}.pkl'.format(output, self.nb_actions))
+            torch.save(self.aux_c.state_dict(), '{}/aux_c_{}.pkl'.format(output, self.nb_actions))
+
     def load_weights(self, output):
         if output is None: return
 
@@ -648,6 +694,7 @@ class SP_TD3(object):
         torch.save(self.critic_p2.state_dict(), '{}/critic_p2_{}.pkl'.format(output, self.nb_actions))
         torch.save(self.critic_c.state_dict(), '{}/critic_c_{}.pkl'.format(output, self.nb_actions))
         torch.save(self.critic_c2.state_dict(), '{}/critic_c2_{}.pkl'.format(output, self.nb_actions))
+        self.save_aux(output)
 
     def save_checkpoint(self, output, step):
         """Save checkpoint in a dedicated subfolder per checkpoint step."""

@@ -314,3 +314,59 @@ def infer_arch(sd, ns=4, na=6):
     if sd['fc1.weight'].shape[1] == ns + na:
         return 'v1af'
     return 'v1'
+
+
+def feat_from_sd(sd, ns=4, na=6, hidden1=16, hidden2=100):
+    """按 state_dict 判断是否启用了 P(a,u)/5 特征（动作输入多 1 维）。"""
+    if 'a1.weight' in sd:
+        return sd['a1.weight'].shape[1] == na + 1
+    if 'fc1.weight' in sd:                       # v1af: 动作与状态先拼接
+        return sd['fc1.weight'].shape[1] == ns + na + 1
+    if 'fc2.weight' in sd:                       # v1: 动作在 fc2 拼入
+        return sd['fc2.weight'].shape[1] == hidden2 + na + 1
+    return False
+
+
+def build_critic_from_sd(sd, ns=4, na=6, hidden1=16, hidden2=100):
+    """按 state_dict 自动还原 arch + feat_power 并加载（供 probe 使用）。"""
+    arch = infer_arch(sd, ns, na)
+    feat = feat_from_sd(sd, ns, na, hidden1, hidden2)
+    net = Critic(ns, na, hidden1=hidden1, hidden2=hidden2, arch=arch, feat_power=feat)
+    net.load_state_dict(sd)
+    net.eval()
+    return net
+
+
+class AuxModel(nn.Module):
+    """1-step 监督模型：f(s,a) ≈ r1 或 ≈ c1（无 bootstrap / 无 target 网络）。
+
+    k=1 的 model-based 策略改进用它求 ∇_a；目标在给定 (s,a) 时是确定性的 ⇒ 噪声≈0。
+    """
+    def __init__(self, nb_states, nb_actions, hidden=64,
+                 feat_power=False, feat_power_k=1.357e-3, feat_u_index=1,
+                 feat_u_scale=10.0, feat_nt=5):
+        super(AuxModel, self).__init__()
+        self.feat_power = bool(feat_power) and (nb_actions == feat_nt + 1)
+        self.feat_power_k = float(feat_power_k)
+        self.feat_u_index = int(feat_u_index)
+        self.feat_u_scale = float(feat_u_scale)
+        self.feat_nt = int(feat_nt)
+        _na = nb_actions + (1 if self.feat_power else 0)
+        self.fc1 = nn.Linear(nb_states + _na, hidden)
+        self.fc2 = nn.Linear(hidden, hidden)
+        self.out = nn.Linear(hidden, 1)
+        self.relu = nn.ReLU()
+        for m in (self.fc1, self.fc2):
+            m.weight.data = fanout_init(m.weight.data.size())
+
+    def forward(self, xs):
+        x, a = xs
+        if self.feat_power:
+            u_ = (x[:, self.feat_u_index] * self.feat_u_scale).clamp(min=0.0).unsqueeze(1)
+            g_ = 4.0 * a[:, :self.feat_nt] * (1.0 - a[:, :self.feat_nt]) ** 2
+            pf_ = (self.feat_power_k * u_ ** 3 * g_.sum(1, keepdim=True)) / 5.0
+            a = torch.cat([a, pf_], 1)
+        z = torch.cat([x, a], 1)
+        z = self.relu(self.fc1(z))
+        z = self.relu(self.fc2(z))
+        return self.out(z)

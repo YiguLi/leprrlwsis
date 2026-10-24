@@ -45,9 +45,7 @@ def check(run_dir, which='critic_p_6.pkl', tag='P'):
         print('%-24s 缺 %s' % (os.path.basename(run_dir.rstrip('/\\')), which)); return
     sd = torch.load(p, map_location='cpu')
     arch = infer_arch(sd)
-    net = model.Critic(4, 6, hidden1=16, hidden2=100, arch=arch)
-    net.load_state_dict(sd)
-    net.eval()
+    net = model.build_critic_from_sd(sd, 4, 6)
 
     df = pd.read_csv(os.path.join(D, 'df_hsrl.csv'),
                      usecols=['pr', 'u', 'SOC', 'turbine_profit', 'applied_action_H'])

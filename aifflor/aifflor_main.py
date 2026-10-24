@@ -1931,6 +1931,13 @@ if __name__ == "__main__":
                              '取值偏差 ≤ eps + 20·ln2/β（默认 β=100, eps=0.05 ⇒ 0.19 MW·step）')
     parser.add_argument('--c1_smooth_beta', default=100.0, type=float, help='softplus 温度 β（越大越接近硬折点）')
     parser.add_argument('--c1_smooth_eps', default=0.05, type=float, help='平滑 abs(dP) 的 ε（MW）')
+    parser.add_argument('--aux_model', default=0, type=int,
+                        help='1=k=1 的 1-step 监督模型 f_r/f_c（MSE, 无 bootstrap），actor 的梯度改用 '
+                             '∇_a[f_r − λ f_c]（model-based 策略改进）；0=关闭（默认）')
+    parser.add_argument('--aux_rate', default=1e-3, type=float, help='aux 模型的 Adam 学习率')
+    parser.add_argument('--aux_mix', default=1.0, type=float, help='actor 目标里 aux 项的权重 β（1=纯 aux）')
+    parser.add_argument('--aux_warmup', default=5000, type=int,
+                        help='aux 训练多少次更新后才接管 actor 梯度（线性 ramp）')
     parser.add_argument('--critic_feat_power', default=0, type=int,
                         help='1=给 critic 增加输入 P(a,u)/5（无尾流解析代理 k·u³·Σ4a(1−a)², R²≈0.992）'
                              '——把 c1=|P−P_G| 的折点搬到输入坐标上; 默认 0')
