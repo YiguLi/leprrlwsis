@@ -104,7 +104,8 @@ def main():
     at = torch.tensor(A_FULL.astype(np.float32), requires_grad=True)  # 6 维（末维 = g）
     sd = torch.load(os.path.join(D, a.which), map_location='cpu')
     if a.which.startswith('aux'):
-        net = model.AuxModel(4, 6)
+        _fp = sd['fc1.weight'].shape[1] == 4 + 6 + 1      # 是否带 P(a,u)/5 特征
+        net = model.AuxModel(4, 6, feat_power=_fp)
         net.load_state_dict(sd)
         net.eval()
     else:
