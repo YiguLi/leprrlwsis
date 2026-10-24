@@ -1931,6 +1931,11 @@ if __name__ == "__main__":
                              '取值偏差 ≤ eps + 20·ln2/β（默认 β=100, eps=0.05 ⇒ 0.19 MW·step）')
     parser.add_argument('--c1_smooth_beta', default=100.0, type=float, help='softplus 温度 β（越大越接近硬折点）')
     parser.add_argument('--c1_smooth_eps', default=0.05, type=float, help='平滑 abs(dP) 的 ε（MW）')
+    parser.add_argument('--critic_feat_power', default=0, type=int,
+                        help='1=给 critic 增加输入 P(a,u)/5（无尾流解析代理 k·u³·Σ4a(1−a)², R²≈0.992）'
+                             '——把 c1=|P−P_G| 的折点搬到输入坐标上; 默认 0')
+    parser.add_argument('--critic_feat_power_k', default=1.357e-3, type=float,
+                        help='P_hat 的标定系数 k（由数据无截距回归得到）')
     parser.add_argument('--cost_clip', default=1, type=int,
                         help='cost 塔只看 clip 到 [0,0.5] 后的风机动作（c1 只是 clip(a) 的函数；越界梯度由 profit 塔的 pen5 给）。1=开(默认)')
     parser.add_argument('--na_box', default=5, type=int, help='风机动作维数（前 na_box 维夹到 [0,0.5]）')

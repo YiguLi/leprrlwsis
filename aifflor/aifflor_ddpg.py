@@ -70,6 +70,8 @@ class SP_TD3(object):
                               else str(getattr(args, 'critic_arch', 'v1') or 'v1'))
         critic_cfg['act'] = str(getattr(args, 'critic_act', 'relu') or 'relu')
         critic_cfg['out_init'] = str(getattr(args, 'critic_out_init', '3e3') or '3e3')
+        critic_cfg['feat_power'] = bool(int(getattr(args, 'critic_feat_power', 0) or 0))
+        critic_cfg['feat_power_k'] = float(getattr(args, 'critic_feat_power_k', 1.357e-3))
         self.actor = Actor(self.nb_states, self.nb_actions, **net_cfg)
         self.actor_target = Actor(self.nb_states, self.nb_actions, **net_cfg)
         self.actor_optim = Adam(self.actor.parameters(), lr=args.prate)

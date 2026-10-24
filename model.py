@@ -95,7 +95,9 @@ class Actor(nn.Module):
 
 class Critic(nn.Module):
     def __init__(self, nb_states, nb_actions, hidden1=400, hidden2=300, init_w=3e-3,
-                 action_first=False, arch=None, act='relu', out_init='3e3'):
+                 action_first=False, arch=None, act='relu', out_init='3e3',
+                 feat_power=False, feat_power_k=1.357e-3, feat_u_index=1,
+                 feat_u_scale=10.0, feat_nt=5):
         super(Critic, self).__init__()
         # 三种结构（默认 v1 = 历史口径，逐位不变）：
         #   v1    : fc1(x)→fc4→cat(a)→fc2→fc5→fc3
@@ -111,18 +113,28 @@ class Critic(nn.Module):
         self.action_first = (self.arch == 'v1af')
         self.act_kind = str(act)
         self.out_init = str(out_init)
+        # ---- 可选特征: P(a,u)/5（无尾流解析代理）----
+        #   P_hat = k·u³·Σ_i 4a_i(1−a_i)²,  k 由数据标定（R²≈0.992, 平均相对误差 3.4%）
+        #   作用: 把 c1 = |P − P_G| 的折点搬到"输入坐标"上（网络不必自己合成乘法）。
+        #   注意: 该特征对 (x,a) **可导** ⇒ actor 也获得一条正确的 ∂P/∂a 通路。
+        self.feat_power = bool(feat_power) and (nb_actions == feat_nt + 1)
+        self.feat_power_k = float(feat_power_k)
+        self.feat_u_index = int(feat_u_index)
+        self.feat_u_scale = float(feat_u_scale)
+        self.feat_nt = int(feat_nt)
+        self.in_actions = nb_actions + (1 if self.feat_power else 0)
         self.relu = nn.LeakyReLU(0.01) if self.act_kind == 'leaky' else nn.ReLU()
         if self.arch == 'v6':
             # s4->32 ∥ a6->32, 合并时**再把原始 a 传一次** => cat(32+32+na) = 70 (H)
             self.s1 = nn.Linear(nb_states, 32)
-            self.a1 = nn.Linear(nb_actions, 32)
-            self.m1 = nn.Linear(32 + 32 + nb_actions, 256)
+            self.a1 = nn.Linear(self.in_actions, 32)
+            self.m1 = nn.Linear(32 + 32 + self.in_actions, 256)
             self.m2 = nn.Linear(256, 256)
             self.m3 = nn.Linear(256, 128)
             self.out = nn.Linear(128, 1)
         elif self.arch == 'v5':
             self.s1 = nn.Linear(nb_states, 16)      # 4 -> 16
-            self.a1 = nn.Linear(nb_actions, 32)     # 6 -> 32
+            self.a1 = nn.Linear(self.in_actions, 32)   # 6(+1) -> 32
             w = 16 + 32                            # 48
             self.m1 = nn.Linear(w, 100)
             self.m2 = nn.Linear(100, 80)
@@ -130,7 +142,7 @@ class Critic(nn.Module):
             self.out = nn.Linear(50, 1)
         elif self.arch == 'v4':
             self.s1 = nn.Linear(nb_states, hidden1)      # 4 -> 16
-            self.a1 = nn.Linear(nb_actions, 32)          # 6 -> 32
+            self.a1 = nn.Linear(self.in_actions, 32)     # 6(+1) -> 32
             w = hidden1 + 32                             # 48
             self.m1 = nn.Linear(w, w)                    # 48 -> 48（残差）
             self.m2 = nn.Linear(w, 32)
@@ -139,7 +151,7 @@ class Critic(nn.Module):
             self.a_emb = 128 if self.arch == 'v3' else 64     # 动作支路输出宽度
             self.s1 = nn.Linear(nb_states, hidden1)
             self.s2 = nn.Linear(hidden1, hidden2)
-            self.a1 = nn.Linear(nb_actions, 32)
+            self.a1 = nn.Linear(self.in_actions, 32)
             self.a2 = nn.Linear(32, self.a_emb)
             w = hidden2 + self.a_emb
             self.m1 = nn.Linear(w, w)          # square 层（带残差 ⇒ 等效加深、不靠"保维"硬压）
@@ -147,7 +159,7 @@ class Critic(nn.Module):
             self.m3 = nn.Linear(128, 64)
             self.out = nn.Linear(64, 1)
         elif self.arch == 'v1af':
-            self.fc1 = nn.Linear(nb_states + nb_actions, 4 * hidden1)
+            self.fc1 = nn.Linear(nb_states + self.in_actions, 4 * hidden1)
             self.fc4 = nn.Linear(4 * hidden1, hidden2)
             self.fc2 = nn.Linear(hidden2, 80)
             self.fc5 = nn.Linear(80, 50)
@@ -192,6 +204,13 @@ class Critic(nn.Module):
 
     def forward(self, xs):
         x, a = xs
+        if getattr(self, 'feat_power', False):
+            # P(a,u)/5 —— 无尾流解析代理（k 由数据标定, R²≈0.992）
+            # 注意: 必须保持 2-D，否则 (N,) 与 (N,1) 广播会变成 (N,N)
+            u_ = (x[:, self.feat_u_index] * self.feat_u_scale).clamp(min=0.0).unsqueeze(1)
+            g_ = 4.0 * a[:, :self.feat_nt] * (1.0 - a[:, :self.feat_nt]) ** 2
+            pf_ = (self.feat_power_k * u_ ** 3 * g_.sum(1, keepdim=True)) / 5.0
+            a = torch.cat([a, pf_], 1)
         if self.arch == 'v6':
             hs = self.relu(self.s1(x))
             ha = self.relu(self.a1(a))
