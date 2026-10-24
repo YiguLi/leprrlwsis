@@ -112,7 +112,14 @@ class Critic(nn.Module):
         self.act_kind = str(act)
         self.out_init = str(out_init)
         self.relu = nn.LeakyReLU(0.01) if self.act_kind == 'leaky' else nn.ReLU()
-        if self.arch in ('v2', 'v3'):
+        if self.arch == 'v4':
+            self.s1 = nn.Linear(nb_states, hidden1)      # 4 -> 16
+            self.a1 = nn.Linear(nb_actions, 32)          # 6 -> 32
+            w = hidden1 + 32                             # 48
+            self.m1 = nn.Linear(w, w)                    # 48 -> 48（残差）
+            self.m2 = nn.Linear(w, 32)
+            self.out = nn.Linear(32, 1)
+        elif self.arch in ('v2', 'v3'):
             self.a_emb = 128 if self.arch == 'v3' else 64     # 动作支路输出宽度
             self.s1 = nn.Linear(nb_states, hidden1)
             self.s2 = nn.Linear(hidden1, hidden2)
@@ -141,7 +148,12 @@ class Critic(nn.Module):
         # 口径：隐藏层权重用 fan_out (fanout_init)；**输出层**用 ±init_w=±3e-3
         # （历史约定，见 Agent 文档；--critic_out_init fanin 可改成 PyTorch 的 fan_in 默认）。
         # bias 一律不碰（生产路径的 baseline 由 hsrl_agent_init.BiasInitTracker 负责）。
-        if self.arch in ('v2', 'v3'):
+        if self.arch == 'v4':
+            for m in (self.s1, self.a1, self.m1, self.m2):
+                m.weight.data = fanout_init(m.weight.data.size())
+            if self.out_init != 'fanin':
+                self.out.weight.data.uniform_(-init_w, init_w)
+        elif self.arch in ('v2', 'v3'):
             for m in (self.s1, self.s2, self.a1, self.a2, self.m1, self.m2, self.m3):
                 m.weight.data = fanout_init(m.weight.data.size())
             if self.out_init != 'fanin':
@@ -154,6 +166,13 @@ class Critic(nn.Module):
 
     def forward(self, xs):
         x, a = xs
+        if self.arch == 'v4':
+            hs = self.relu(self.s1(x))
+            ha = self.relu(self.a1(a))
+            z = torch.cat([hs, ha], 1)
+            m = self.relu(self.m1(z)) + z
+            m = self.relu(self.m2(m))
+            return self.out(m)
         if self.arch in ('v2', 'v3'):
             hs = self.relu(self.s2(self.relu(self.s1(x))))
             ha = self.relu(self.a2(self.relu(self.a1(a))))
@@ -225,6 +244,8 @@ class Critic_L(nn.Module):
 def infer_arch(sd, ns=4, na=6):
     """按 state_dict 推断 critic 结构（v1 / v1af / v2 / v3）。"""
     if 's1.weight' in sd:
+        if 'a2.weight' not in sd:
+            return 'v4'
         return 'v3' if sd['a2.weight'].shape[0] == 128 else 'v2'
     if sd['fc1.weight'].shape[1] == ns + na:
         return 'v1af'
