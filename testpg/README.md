@@ -262,6 +262,11 @@ python agentutil/test_testpg_contract.py
 7. **FLORIS 版本**：与 aifflor 相同，使用 `calibrated=False` 的 stock 尾流参数 +
    `LEVEL_COEF=1/1.6696`；换 FLORIS 版本或改该系数会改变 `Pmax` 的绝对电平，但不改变
    testPg 的动作语义。
+8. **超短 warmup 的已知坑**：H 层 `nstep=5` 时，首个策略更新点若 H buffer 只有 **1 条**
+   转移，会触发 `PER_buffer._sample_proportional` 的既有递归 bug（`len-1 == 0` 让
+   `reduce(0,0)` 走到 `end=-1`）。调试用的短程 smoke 请让 `--warmup` **≥ 25 步**
+   （至少 2 条转移）；默认 7200 步不受影响。该 bug 与 testPg 无关，本臂未改共享
+   `PER_buffer.py`。
 
 ---
 
