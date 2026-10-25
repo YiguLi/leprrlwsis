@@ -63,6 +63,7 @@
 | H-DDPG | `H_main.py` + `H_ddpg.py` | 双层 DDPG（上层功率分配 + 下层储能控制） |
 | S-DDPG | `S_main.py` + `S_ddpg.py` | PDO-DDPG（策略解耦优化）单层架构 |
 | RBB | `rbb/` | 上层 DDPG 学习 + **下层规则** BESS 的首个版本；其 `rbb_rule_bess.RuleBasedBESS` 被 `per` / `td3per` 等方法复用 |
+| **testPg** | `testpg/` | **aifflor 的对照实验臂**：固定风机行为 `[0.2,0.2,0.2,0.2,0.33]` + 只学标量降载率 `rate`（H 动作 2 维 `[rate, goal]`），其余与 aifflor 同口径；未注册进 `test_five_days.py`（见 `testpg/README.md`） |
 
 ### 命名约定（据代码与各目录 README 归纳，非官方规范）
 
