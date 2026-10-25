@@ -462,10 +462,24 @@ python aifflor\aifflor_main.py --hsrl     # HSRL:  块总放电量 + 绝对 pb +
 
 * **`aifflor/aifflor_hsrl.py` 是 HSRL 口径的唯一真源**（常量 + 纯函数 + warmup 摊还执行器 +
   20 步测试函数）。共享模块 `hsrl_soctarget.py` / `hsrl_warmup.py` / `aifflor_myfunc.py`
-  **一行都没改** ⇒ 另外 7 个项目不受影响。
+  的既有口径不因本分支改变（2026-10-25 只在 `hsrl_warmup` **新增** `unified` 分支、
+  并让 aifflor 显式改默认 ⇒ 其余入口仍 `lhs`，行为不变）。
 * `aifflor_main.py` 里 `train_hsrl()` 与 `train()` **并列实现**（不共用循环）：
   未加 `--hsrl` 时 `train_hsrl` 与 `aifflor_hsrl` 的函数**一行都不会被调用**，
   因此旧路径可以断言"逐位不变"（见本文末的回归证据）。
+
+**warmup 上层（两条分支共用，2026-10-25 起）**：7200 步 = 1440 个块，默认
+`--warmup_wt_sched unified` —— **一半随机行为改成"五维统一随机升降噪声"**：
+
+* 奇数块（720 个）：整场只维护一个偏移 `o`，`a_i = prior_i + o`
+  （`prior = [0.2,0.2,0.2,0.2,1/3]`）；每块 `o ← o ± 0.05`（**五维共享同一个 δ**），
+  `o` 夹在 `[0.05−min(prior), 0.45−max(prior)] = [−0.15, 0.1167]`
+  ⇒ 五维同向升降、相对形状不变，且始终在 `[0.05,0.45]`。
+* 偶数块（719 个，含第 0 块起点）：仍走 LHS 全局覆盖 `[0,0.5]`，保住非相干的覆盖。
+* 动机：aifflor 的宏观自由度是"整场降载水平"（`model.proj_farm_level` 的射线投影），
+  critic 需要**五维同向**的样本才能辨识该方向；纯 LHS 几乎不提供相干样本。
+* 复现旧口径：`--warmup_wt_sched lhs`；其余 main 不传该参数 ⇒ 共享默认仍是 `lhs`。
+  契约测试：`python agentutil/test_warmup_unified.py`。
 
 ### 口径对照表
 

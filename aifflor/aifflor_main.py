@@ -227,8 +227,9 @@ def train(num_iterations_H,
     phase_checked = 0
 
     # ---- warmup 期调度 + critic bias 触发状态 ----
-    #   warmup_sched: 上层确定性动作调度 (wt 0.33 起每块 ±0.05 clip[0.20,0.45]; 信号维恒 0
-    #                 ⇒ SOC 目标语义的项目 soc_target ≡ 3, 影子电价语义的项目影子价 ≡ 0)
+    #   warmup_sched: 上层动作调度（aifflor 默认 --warmup_wt_sched unified：偶数块 LHS
+    #                 全局覆盖 / 奇数块在结构先验上做**五维统一随机升降**，见 hsrl_warmup；
+    #                 信号维按 --warmup_sig 生成）
     #   bias_init   : warmup 块样本收集 + bias 一次性应用
     #                 (修 step == args.warmup 与块末 episode_steps%5==4 不同余导致永不触发的 bug;
     #                  触发点 = warmup 之后第一个块末, 仍在首次策略更新之前)
@@ -1896,7 +1897,7 @@ if __name__ == "__main__":
                              '0.01 ⇒ SOC 目标抖动 ±0.05 MWh = SOC_TOL(0.1) 的一半')
     parser.add_argument('--wt_noise_floor', default=0.0, type=float,
                         help='WT 5 维探索噪声**地板** (0 = 20k 步后这些维完全不再探索); '
-                             '0.01 = 行为带 [0,0.5] 的 2%, 折算单机功率抖动约 ±2.4%')
+                             '0.01 = 行为带 [0,0.5] 的 2%%, 折算单机功率抖动约 ±2.4%%')
 
     # ---- 24h 相位特征 (--phase_feat) ----
     parser.add_argument('--phase_feat', default=0, type=int, choices=[0, 1, 2],
@@ -2040,9 +2041,10 @@ if __name__ == "__main__":
                         help='HSRL: recent_batch（λ2，以及 λ1 选 recent_batch 时）的近端条数'
                              '（默认 %d: H 每块 1 条 ⇒ ≈1 天）' % hsrl.HSRL_DUAL_RECENT_N)
     parser.add_argument('--hsrl_lam1_min', default=hsrl.HSRL_LAM1_PHYS_MIN, type=float,
-                        help='HSRL: λ1 的**物理价下限** [元/(MW·step)]（默认 %.1f；= 名义边际收益 9.67 的 '
+                        help='HSRL: λ1 的**物理价下限** [元/(MW·step)]（默认 {:.1f}；= 名义边际收益 9.67 的 '
                              '21%%、低电价边际收益 5.0 的 40%%，且 < BESS 退化边际价 20 ⇒ 界内波动不值得'
-                             '动用 BESS）。当前实现把上界设为 20 的 2.5× = 50' % hsrl.HSRL_LAM1_PHYS_MIN)
+                             '动用 BESS）。当前实现把上界设为 20 的 2.5× = 50'.format(
+                                 hsrl.HSRL_LAM1_PHYS_MIN))
     parser.add_argument('--hsrl_lam1_max', default=hsrl.HSRL_LAM1_PHYS_MAX, type=float,
                         help='HSRL: λ1 的**物理价上限** [元/(MW·step)]（默认 %.1f = max(平抑资源边际成本: '
                              'BESS 退化 20, 峰价降载 16.33) 的 2.5×；界外波动单价是 20·λ1 ⇒ '
@@ -2069,7 +2071,9 @@ if __name__ == "__main__":
                         help='HSRL: 仅 --hsrl_test_wind random 时生效的采样种子 '
                              '(>0 固定; 默认 -1 = 每次触发重新随机)。采样用**独立** RandomState '
                              '⇒ 不吃训练流、不改变训练轨迹')
-    hwarm.add_warmup_args(parser)
+    # aifflor 默认 warmup 风机动作 = 'unified'（一半 LHS + 一半五维统一随机升降噪声）；
+    # 其余 main 不传该参数 ⇒ 共享默认仍为 'lhs'，行为逐位不变。
+    hwarm.add_warmup_args(parser, wt_sched_default='unified')
     args = parser.parse_args()
     args = hwarm.resolve_warmup(args)   # WARMUP_AUTO: 正式口径 warmup=bsize*mult, 期零网络更新
     hc.set_mode(args.c1_mode)

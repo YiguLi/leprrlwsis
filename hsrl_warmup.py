@@ -18,6 +18,19 @@ HSRL warmup 期调度助手（多项目共享）
       5 个风机轴向因子各维从 **`WT_START`=0.2** 起步，每块各维独立随机 **±0.05**，
       直接 clip 到 **[0.05, 0.45]**；可达集是 0.05 的整格点。
 
+   **(c) 新口径 `wt_sched='unified'`（**aifflor 默认**，2026-10-25 起）= 一半 LHS 全局覆盖
+   + 一半"五维统一随机升降噪声"**：按**块序号奇偶**交替 —— 奇数块 = 统一噪声，偶数块
+   = 上面的 LHS 全局覆盖（第 0 块仍是起点 `start`）。统一噪声臂**对整场只维护一个偏移量**
+   `o`：从先验结构 `prior` 出发，每块抽**一个**共享 `δ ∈ {−step, +step}`，
+   `o ← clip(o + δ, lo−min(prior), hi−max(prior))`，再令 **五个风机维同时取
+   `a_i = prior_i + o`**。所以同一块内五维加的是**同一个**增量（不是五维各自独立抖动），
+   且偏移的界保证五维**始终留在 [lo,hi] 内、结构形状不被逐维裁剪破坏** ⇒ 整场共同升降。
+   统一臂自持状态，不被中间的 LHS 块打断（它是一条连续的共同游走轨迹）；比例精确 50%，
+   不用掷币、不额外消耗随机流。
+   动机：aifflor 的宏观动作自由度是"整场降载水平"（`model.proj_farm_level` 把它投影成
+   射线 `a_i = s·c_i`），critic 需要**五维同向**的 (Δa₁…Δa₅) 样本才能辨识该方向；
+   纯 LHS 的五维独立采样几乎不提供相干样本。保留另一半 LHS 是为了不丢全局覆盖。
+
    ⚠ 2026-09-28 两轮修正（记录以免重犯）：旧值 `0.33 / [0.20,0.45] / U(0.25,0.40)` 的
    判据是"**单机** C_p 保持 86%~100% 最优"，用错了对象。第一轮改成"对准均匀动作的
    功率峰 `0.20 / [0.15,0.25] / U(0.17,0.23)`"——**同样是错的**：那个峰只是**均匀族**
@@ -206,12 +219,16 @@ class WarmupSchedule:
         self.sig_step_lo, self.sig_step_hi = float(sig_step_lo), float(sig_step_hi)
         self.sig_lo, self.sig_hi = float(sig_lo), float(sig_hi)
         #: 风机 5 维生成方式（`--warmup_wt_sched`）：
-        #:   'walk' = **旧口径**（逐维随机游走，起点 `start`、每块 ±`step`、clip 到 [lo,hi]）
-        #:            ⇒ 显式传 `--warmup_wt_sched walk` 可逐位复现历史 run；
-        #:   'mix'  = **混合采样**（正式口径）：以 `prior_frac` 的概率走"先验邻域"臂 ——
-        #:            以 `prior` 向量为中心、逐维 ±`prior_step` 的独立扰动（= 最优结构 + 扰动）；
-        #:            其余 (1−`prior_frac`) 走"全局覆盖"臂 —— 在 [lo,hi] 上**独立均匀**采样
-        #:            （不逐维游走 ⇒ 五个动作维相互独立，能采到先验邻域之外的组合）。
+        #:   'walk'    = **旧口径**（逐维随机游走，起点 `start`、每块 ±`step`、clip 到 [lo,hi]）
+        #:               ⇒ 显式传 `--warmup_wt_sched walk` 可逐位复现历史 run；
+        #:   'mix'     = **混合采样**（正式口径）：以 `prior_frac` 的概率走"先验邻域"臂 ——
+        #:               以 `prior` 向量为中心、逐维 ±`prior_step` 的独立扰动（= 最优结构 + 扰动）；
+        #:               其余 (1−`prior_frac`) 走"全局覆盖"臂 —— 在 [lo,hi] 上**独立均匀**采样
+        #:               （不逐维游走 ⇒ 五个动作维相互独立，能采到先验邻域之外的组合）。
+        #:   'lhs'     = 全局 LHS 分层覆盖 [LHS_LO, LHS_HI]（其余入口的 CLI 默认）；
+        #:   'unified' = **aifflor 默认**：偶数块 LHS / 奇数块五维**共享同一个** ±`step`
+        #:               的随机升降（作用在整场偏移量 `o` 上：`a_i = prior_i + o`，
+        #:               `o ∈ [lo−min(prior), hi−max(prior)]`）⇒ 半随机覆盖 + 半相干升降。
         self.wt_sched = str(wt_sched)
         self.prior = self._mk_prior(prior)
         self.prior_frac = float(np.clip(prior_frac, 0.0, 1.0))
@@ -266,6 +283,8 @@ class WarmupSchedule:
 
     def reset(self):
         self._wt = np.full(self.nb_turbine, self.start, dtype=float)
+        #: `wt_sched='unified'` 的整场偏移量 o（所有风机维共享同一个 o）
+        self._wt_u_off = 0.0
         self._sig = self.sig_value
         self._first = True
         self._blk = 0
@@ -323,6 +342,15 @@ class WarmupSchedule:
             pts[:, d] = LHS_LO + bins * (LHS_HI - LHS_LO)
         return pts
 
+    def _next_lhs(self):
+        """取 LHS 覆盖池的下一个点（池耗尽后重新生成）。`lhs` 与 `unified` 共用。"""
+        if self._lhs is None or self._lhs_i >= self._lhs.shape[0]:
+            self._lhs = self._lhs_points(self._lhs_n or 64)
+            self._lhs_i = 0
+        wt = self._lhs[self._lhs_i].copy()
+        self._lhs_i += 1
+        return wt
+
     def action(self, price=None):
         """返回本块的上层动作；`enabled=False` 时返回 None（调用方走旧随机臂）。
 
@@ -335,11 +363,22 @@ class WarmupSchedule:
             self._first = False                      # 第 0 块 = 起点 (start 各维, 信号 sig_value)
         elif self.wt_sched == 'lhs':
             # ---- LHS 覆盖：每维在 [0,0.5] 上分层（同一样本量下逐维均匀铺满）----
-            if self._lhs is None or self._lhs_i >= self._lhs.shape[0]:
-                self._lhs = self._lhs_points(self._lhs_n or 64)
-                self._lhs_i = 0
-            self._wt = self._lhs[self._lhs_i].copy()
-            self._lhs_i += 1
+            self._wt = self._next_lhs()
+            self._sig = float(np.clip(self._sig + self.sig_delta(price),
+                                      self.sig_lo, self.sig_hi))
+        elif self.wt_sched == 'unified':
+            # ---- aifflor 新口径：偶数块 LHS / 奇数块五维统一随机升降噪声 ----
+            if self._blk % 2 == 1:
+                # 统一臂：整场只维护一个偏移量 o，五维**共享同一个** δ
+                #   o ∈ [lo−min(prior), hi−max(prior)] ⇒ a_i = prior_i + o 恒在 [lo,hi]，
+                #   形状（prior 的相对差）不因逐维裁剪而畸变。
+                o_lo = self.lo - float(np.min(self.prior))
+                o_hi = self.hi - float(np.max(self.prior))
+                d = float(self.rng.choice([-self.step, self.step]))
+                self._wt_u_off = float(np.clip(self._wt_u_off + d, o_lo, o_hi))
+                self._wt = np.clip(self.prior + self._wt_u_off, self.lo, self.hi)
+            else:
+                self._wt = self._next_lhs()
             self._sig = float(np.clip(self._sig + self.sig_delta(price),
                                       self.sig_lo, self.sig_hi))
         elif self.wt_sched == 'mix':
@@ -569,11 +608,13 @@ def fill_bess_transition(agent_L, s_L, a_L, r2, c2, s_L_next, done_L,
     return agent_L.observe_jump(s_L, a_L, r2, c2, s_L_next, done_L, **kwargs)
 
 
-def add_warmup_args(parser, yaw=False):
+def add_warmup_args(parser, yaw=False, wt_sched_default='lhs'):
     """把 warmup 调度的命令行开关挂到各 main 的 parser 上（9 个 main + yawflor 共用）。
 
     `yaw=True` ⇒ 默认值换成**偏航带**（`YAW_START/STEP/LO/HI`，无量纲 `n∈[−1,1]`），
     文案与**先验中心**（`YAW_PRIOR` = 全 0）也换成偏航语义。
+    `wt_sched_default` ⇒ `--warmup_wt_sched` 的默认值；共享默认保持 `'lhs'`，
+    **aifflor_main 显式传 `'unified'`**（一半 LHS + 一半五维统一随机升降噪声）。
     """
     if yaw:
         d_start, d_step, d_lo, d_hi = YAW_START, YAW_STEP, YAW_LO, YAW_HI
@@ -606,9 +647,14 @@ def add_warmup_args(parser, yaw=False):
                                 max(1, int(WARMUP_STEPS) // 1440)))
     parser.add_argument('--warmup_sched', default='fixed', choices=['fixed', 'random'],
                         help=sched_help)
-    # ---- 风机/偏航动作的**混合采样**（正式口径；旧口径用 `walk` 复现）----
-    parser.add_argument('--warmup_wt_sched', default='lhs', choices=['lhs', 'mix', 'walk'],
-                        help='warmup 期风机动作的生成方式（**正式口径 = mix**）: '
+    # ---- 风机/偏航动作的采样口径（`unified` = aifflor 默认；旧口径用 `walk` 复现）----
+    parser.add_argument('--warmup_wt_sched', default=wt_sched_default,
+                        choices=['lhs', 'unified', 'mix', 'walk'],
+                        help='warmup 期风机动作的生成方式: '
+                             'unified=**aifflor 默认** —— 一半随机行为改成"五维统一随机升降噪声": '
+                             '奇数块在结构先验 --warmup_wt_prior 上施加**五维共享**的 '
+                             '±--warmup_wt_step 随机升降（整场共同涨落），偶数块走 LHS 全局覆盖；'
+                             'lhs=全局 LHS 分层覆盖（其余项目的默认）；'
                              'mix=**混合采样** —— 约 --warmup_wt_prior_frac 比例的块走'
                              '"先验结构 + 邻域扰动"(--warmup_wt_prior 为中心、逐维 ±'
                              '--warmup_wt_prior_step)，其余块在 [--warmup_wt_lo,hi] 上'

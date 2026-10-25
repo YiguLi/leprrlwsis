@@ -283,6 +283,7 @@ python td3leprrlrb/td3leprrlrb_main.py    # 需配置 LLM
 |---|---|---|
 | `--warmup` | 200 | warmup 块数（**已不再纯随机**，见文末附注） |
 | `--warmup_sched` | `fixed` | warmup 上层动作调度：`fixed` = 1/3 起每块 ±0.05、clip[0.05,0.45]、信号维恒 0；`random` = 旧 `random_action()`（对照臂） |
+| `--warmup_wt_sched` | `lhs` | warmup 风机 5 维生成方式：`lhs` = LHS 全局覆盖（其余入口默认）；`unified` = **aifflor 默认** —— 一半 LHS + 一半"五维统一随机升降噪声"（奇数块 `a_i = prior_i + o`，`o` 每块加**同一个** ±0.05，整场同向升降；偶数块走 LHS）；`mix` = 先验邻域 + 全局覆盖；`walk` = 旧逐维游走（复现历史 run） |
 | `--warmup_bess` | `rule` | BESS-RL 项目（per/prrbb/prle/td3per/td3prrbb/td3prle）warmup 下层行为：`rule` = RBB 窗口 + SOC 目标跟踪（确定性，无随机）；`random` = 旧 `agent_L.random_action()`（对照臂） |
 | `--warmup_soc_target` | 3.0 | warmup 期规则下层跟踪的 SOC 目标（MWh） |
 | `--discount` | 0.99 | 折扣因子（以 5 min 的"块"为单位） |
