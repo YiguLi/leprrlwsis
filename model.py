@@ -370,3 +370,57 @@ class AuxModel(nn.Module):
         z = self.relu(self.fc1(z))
         z = self.relu(self.fc2(z))
         return self.out(z)
+
+
+class StructCostModel(nn.Module):
+    """实验 C：结构化解码的成本模型。
+
+    网络只学**光滑标量** z(s,a) ≈ ΔP（带符号的出力变化），成本由解析层解码：
+        c_hat = |z| + K·relu(|z| - limit)        （与 env 的 c1 定义同构：K=20, limit=3）
+    这样 |·| 与 20× 折点由结构精确给出，网络不必"拟合折点"，也不必把斜率挤过读出头。
+
+    decode='soft' 时用 softplus(beta) 代替 relu（便于与现有平滑版对照）。
+    """
+
+    def __init__(self, nb_states, nb_actions, hidden=64, k=20.0, limit=3.0,
+                 feat_power=False, feat_power_k=1.357e-3, feat_u_index=1,
+                 feat_u_scale=10.0, feat_nt=5, decode='hard', beta=100.0):
+        super(StructCostModel, self).__init__()
+        self.feat_power = bool(feat_power) and (nb_actions == feat_nt + 1)
+        self.feat_power_k = float(feat_power_k)
+        self.feat_u_index = int(feat_u_index)
+        self.feat_u_scale = float(feat_u_scale)
+        self.feat_nt = int(feat_nt)
+        self.k, self.limit = float(k), float(limit)
+        self.decode, self.beta = str(decode), float(beta)
+        _na = nb_actions + (1 if self.feat_power else 0)
+        self.fc1 = nn.Linear(nb_states + _na, hidden)
+        self.fc2 = nn.Linear(hidden, hidden)
+        self.z_out = nn.Linear(hidden, 1)
+        self.relu = nn.ReLU()
+        for m in (self.fc1, self.fc2):
+            m.weight.data = fanout_init(m.weight.data.size())
+        # |z| 在 z=0 处次梯度为 0 ⇒ 给一个非零初值，避免"死梯度"
+        with torch.no_grad():
+            self.z_out.bias.data.fill_(1.0)
+
+    def z(self, xs):
+        x, a = xs
+        if self.feat_power:
+            u_ = (x[:, self.feat_u_index] * self.feat_u_scale).clamp(min=0.0).unsqueeze(1)
+            g_ = 4.0 * a[:, :self.feat_nt] * (1.0 - a[:, :self.feat_nt]) ** 2
+            pf_ = (self.feat_power_k * u_ ** 3 * g_.sum(1, keepdim=True)) / 5.0
+            a = torch.cat([a, pf_], 1)
+        h = self.relu(self.fc1(torch.cat([x, a], 1)))
+        h = self.relu(self.fc2(h))
+        return self.z_out(h)
+
+    def decode_c(self, z):
+        az = z.abs()
+        if self.decode == 'soft':
+            sp = torch.nn.functional.softplus(self.beta * (az - self.limit)) / self.beta
+            return az + self.k * sp
+        return az + self.k * torch.relu(az - self.limit)
+
+    def forward(self, xs):
+        return self.decode_c(self.z(xs))

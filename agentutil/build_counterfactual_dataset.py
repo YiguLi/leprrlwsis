@@ -84,6 +84,14 @@ def main():
         pf[:, 1:] = np.abs(np.diff(P, axis=1))
         return c1_of(pf).sum(1)
 
+    def cost_t1(actions5, sel_):
+        """块首步(t=1)的 c1：参考值 P_G_prev 在状态里 ⇒ 单步结构化解码的目标"""
+        P = P_of(actions5, U[sel_, 0])
+        return (np.abs(P - PGP[sel_]) + K_V * np.maximum(0.0, np.abs(P - PGP[sel_]) - LIMIT))
+
+    def dp_t1(actions5, sel_):
+        return P_of(actions5, U[sel_, 0]) - PGP[sel_]
+
     base = block_cost(A5[sel], sel)
     out = {'state': np.column_stack([PR[sel] / 1000, U[sel, 0] / 10, SOC[sel] / 0.5, PGP[sel] / 5]).astype(np.float32),
            'action': A5[sel].astype(np.float32),
@@ -92,6 +100,9 @@ def main():
            'day': DAY[sel].astype(np.int32),
            'u0': U[sel, 0].astype(np.float32),
            'step': (sel * 5).astype(np.int64)}
+
+    out['cost1_base'] = cost_t1(A5[sel], sel).astype(np.float32)
+    out['dp1_base'] = dp_t1(A5[sel], sel).astype(np.float32)
 
     for d in [float(x) for x in a.deltas.split(',')]:
         d_true = np.zeros((len(sel), 5), np.float32)
@@ -110,6 +121,17 @@ def main():
             d_true[:, j] = np.where(good, (cp - cm) / np.maximum(2 * eff, 1e-9), (cp - cm) / np.maximum(eff, 1e-9))
             d_eff[:, j] = eff
             one_side[:, j] = (~good).astype(np.int8)
+        # t=1 的导数标签
+        d1 = np.zeros((len(sel), 5), np.float32)
+        for j in range(5):
+            ap_ = A5[sel].copy(); ap_[:, j] += d
+            am_ = A5[sel].copy(); am_[:, j] -= d
+            hi = ap_[:, j] > 0.5; lo = am_[:, j] < 0.0
+            ap_[hi, j] = 0.5; am_[lo, j] = 0.0
+            eff = (ap_[:, j] - am_[:, j]) / 2.0
+            cp = cost_t1(ap_, sel); cm = cost_t1(am_, sel)
+            d1[:, j] = (cp - cm) / np.maximum(2 * eff, 1e-9)
+        out['d1%.3f' % d] = d1
         out['d%.3f' % d] = d_true
         out['deff%.3f' % d] = d_eff
         out['oneside%.3f' % d] = one_side
