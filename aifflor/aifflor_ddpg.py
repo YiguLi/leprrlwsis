@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 
-from model import (Actor, Critic, AuxModel)
+from model import (Actor, Critic, AuxModel, proj_farm_level)
 from PER_buffer import PrioritizedReplayBuffer
 from random_process import OrnsteinUhlenbeckProcess
 from util import *
@@ -126,6 +126,8 @@ class SP_TD3(object):
         self.target_agg = str(target_agg)
         # cost 塔只看 clip 后的动作（c1 只是 clip(a) 的函数；原始动作的越界梯度由 profit 塔的 pen5 提供）
         self.cost_clip = bool(int(getattr(args, 'cost_clip', 1) or 0))
+        # 场级降载投影（--farm_level 1）：actor 输出先投影到 a_i = s·c_i 的射线
+        self.farm_level = bool(int(getattr(args, 'farm_level', 0) or 0))
         # ---- k=1 的 1-step 监督模型（model-based 策略改进）----
         self.aux_model = bool(int(getattr(args, 'aux_model', 0) or 0))
         self.aux_mix = float(getattr(args, 'aux_mix', 1.0))
@@ -322,7 +324,7 @@ class SP_TD3(object):
         # ---- TD3: target policy smoothing (clipped Gaussian noise,
         #      scaled per dimension by action amplitude) ----
         amp_t = torch.tensor(self.action_amp, dtype=torch.float32, device=self.device)
-        a_next = self.actor_target(next_state_batch)
+        a_next = self._act(self.actor_target, next_state_batch)
         noise = torch.randn_like(a_next) * (self.policy_noise * amp_t)
         noise = noise.clamp(-self.noise_clip * amp_t, self.noise_clip * amp_t)
         a_smoothed = a_next + noise
@@ -420,7 +422,7 @@ class SP_TD3(object):
                 self.critic_p2([state_batch, self.actor(state_batch)]))
             # clamp(min=0) on cost: prevents the actor from exploiting a
             # (pathological) negative cost Q inside the Lagrangian objective.
-            _a_cur = self.actor(state_batch)
+            _a_cur = self._act(self.actor, state_batch)
             _a_cur_c = self._clip_box(_a_cur)          # cost 塔: clip 后动作
             min_c_cur = self._aggregate_pair(
                 self.critic_c([state_batch, _a_cur_c]),
@@ -430,7 +432,7 @@ class SP_TD3(object):
             _crit = min_p_cur - self.lam * min_c_cur
             if self.aux_model:
                 # k=1 model-based 策略改进: 用 1-step 模型的梯度（无 bootstrap 噪声）
-                _a_cur2 = self.actor(state_batch)
+                _a_cur2 = self._act(self.actor, state_batch)
                 _aux = self.aux_r([state_batch, _a_cur2]) - self.lam * self.aux_c([state_batch, _a_cur2])
                 # 预热: aux 前 aux_warmup 次更新不参与（避免用没学好的模型）
                 _beta = self.aux_mix * min(1.0, self.aux_count / max(1, self.aux_warmup))
@@ -636,8 +638,15 @@ class SP_TD3(object):
         self.a_t = action
         return action
 
+    def _act(self, net, s):
+        """actor 前向 + (可选)场级投影 —— 所有调用点都必须走这里。"""
+        a = net(s)
+        if getattr(self, 'farm_level', False):
+            a = proj_farm_level(a)
+        return a
+
     def select_action(self, s_t, decay_epsilon=True):
-        action = to_numpy(self.actor(to_tensor(np.array([s_t])))).squeeze(0)
+        action = to_numpy(self._act(self.actor, to_tensor(np.array([s_t])))).squeeze(0)
 
         # 逐维探索噪声: 均匀 U(-amp, +amp), amp = max(amp_dim*eps, floor_dim)
         # (信号维幅值 0.2*eps 且地板 0.05; WT 维 0.05*eps; 见 __init__)

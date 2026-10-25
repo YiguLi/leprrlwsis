@@ -424,3 +424,27 @@ class StructCostModel(nn.Module):
 
     def forward(self, xs):
         return self.decode_c(self.z(xs))
+
+
+#: Cp 最优的整场基准型线（由 refs_u.csv 实测 a* 的均值；与 u 基本无关）
+FARM_CENTRE = [0.3418, 0.4247, 0.2889, 0.2562, 0.3705]
+
+
+def proj_farm_level(a, centre=None):
+    """把动作的前 5 维**投影到"整场同比例降载"这条射线上**： a_i = s·c_i, s≥0。
+
+    动机（用户口径）：期望的宏观行为是"高风时整体降低/抬高出力水平"，而不是逐台微调。
+    投影是线性的 ⇒ 动作只保留 1 个自由度 s，actor 的梯度变成
+        ∂/∂s = Σ_i c_i ∂/∂a_i
+    即"5 维同向的相干和"，而非 5 个各自带噪的偏导。第 6 维(g)保持不变。
+    不改变奖励/成本定义，也不改变 critic 的 6 维输入与日志口径。
+    """
+    if centre is None:
+        centre = FARM_CENTRE
+    c = torch.tensor(centre, dtype=a.dtype, device=a.device).view(1, -1)
+    a5 = a[:, :5]
+    s = (a5 * c).sum(1, keepdim=True) / (c * c).sum()
+    s = s.clamp(min=0.0)
+    out = a.clone()
+    out[:, :5] = (s * c).clamp(0.0, 0.5)
+    return out

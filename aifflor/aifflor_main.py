@@ -93,6 +93,7 @@ sys.path.insert(0, _HSRL_DIR)
 from aifflor.aifflor_env import AifflorPhysics, WindBatteryAIF
 from aifflor import aifflor_turbine as aturb
 from aifflor.aifflor_ddpg import SP_TD3
+from model import proj_farm_level as _proj_farm_level   # 场级降载投影 (--farm_level)
 from aifflor import aifflor_hsrl as hsrl   # --hsrl 分支的全部口径 (单一真源)
 from util import *
 from td3per.td3per_myfunc import (
@@ -1086,6 +1087,9 @@ def train_hsrl(num_iterations_H,
                 _g6 = (warmup_sched.g_walk(-feas_c_max, feas_d_max)
                        if warmup_sched is not None else hsrl.random_g())
                 original_action_H[5] = float(_g6)
+                if getattr(args, 'farm_level', 0):
+                    original_action_H = _proj_farm_level(
+                        torch.tensor(original_action_H[None, :], dtype=torch.float32)).numpy()[0]
                 original_action_H = _diag_fix_action(original_action_H)
                 applied_action_H, _pen5_w, _pen6_w = hsrl.check_action_H_hsrl(
                     original_action_H, E_block_start,
@@ -1095,6 +1099,9 @@ def train_hsrl(num_iterations_H,
                 pen6_H = 0.0
             else:
                 original_action_H = agent_H.select_action(norm_observation)
+                if getattr(args, 'farm_level', 0):
+                    original_action_H = _proj_farm_level(
+                        torch.tensor(original_action_H[None, :], dtype=torch.float32)).numpy()[0]
                 original_action_H = _diag_fix_action(original_action_H)
                 # ---- 早期覆盖混合（--explore_mix_blocks）: a = ε·actor + (1−ε)·U(0,0.5) ----
                 if explore_mix_blocks > 0:
@@ -1931,6 +1938,9 @@ if __name__ == "__main__":
                              '取值偏差 ≤ eps + 20·ln2/β（默认 β=100, eps=0.05 ⇒ 0.19 MW·step）')
     parser.add_argument('--c1_smooth_beta', default=100.0, type=float, help='softplus 温度 β（越大越接近硬折点）')
     parser.add_argument('--c1_smooth_eps', default=0.05, type=float, help='平滑 abs(dP) 的 ε（MW）')
+    parser.add_argument('--farm_level', default=0, type=int,
+                        help='1=场级降载：actor 输出投影到 a_i=s·c_i 射线（只保留 1 个宏观自由度, '
+                             '期望行为=高风整体降/升出力）；不改奖励与 c1 定义')
     parser.add_argument('--aux_model', default=0, type=int,
                         help='1=k=1 的 1-step 监督模型 f_r/f_c（MSE, 无 bootstrap），actor 的梯度改用 '
                              '∇_a[f_r − λ f_c]（model-based 策略改进）；0=关闭（默认）')
