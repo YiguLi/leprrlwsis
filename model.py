@@ -32,6 +32,16 @@ def fanout_init(size, fanout=None):
     v = 1. / np.sqrt(fanout)
     return torch.Tensor(size).uniform_(-v, v)
 
+
+#: v6 critic 的固定宽度（**与 --hidden1/--hidden2 无关**；改这里就是改 v6）。
+#:
+#: 2026-10-26 按用户口径重构：
+#:     state : 4 → 32 → 32
+#:     action: 6 → 64 → 64
+#:     merge : 96 (32+64，原始 a 不再重复拼入) → 128 → 256 → 256 → 128 → 1
+#: 合并输入恒为 96 ⇒ H(nb_actions=6) 与 L(nb_actions=1) 共用同一套 merge 形状。
+V6_DIMS = dict(s=(32, 32), a=(64, 64), merge=(128, 256, 256, 128))
+
 class Actor(nn.Module):
     def __init__(self, nb_states, nb_actions, hidden1=400, hidden2=300, init_w=3e-3):
         super(Actor, self).__init__()
@@ -99,11 +109,17 @@ class Critic(nn.Module):
                  feat_power=False, feat_power_k=1.357e-3, feat_u_index=1,
                  feat_u_scale=10.0, feat_nt=5):
         super(Critic, self).__init__()
-        # 三种结构（默认 v1 = 历史口径，逐位不变）：
+        # 六种结构（默认 v1 = 历史口径，逐位不变）：
         #   v1    : fc1(x)→fc4→cat(a)→fc2→fc5→fc3
         #   v1af  : cat(x,a)→fc1(4·hidden1)→fc4→fc2→fc5→fc3        （动作首层进网）
         #   v2    : s: ns→hidden1→hidden2  ∥  a: na→32→64
         #           合并 [hidden2+64] →(square, 带残差)→128→64→1   （双流 + 慢压缩）
+        #   v6    : s: ns→32→32  ∥  a: na'→64→64
+        #           合并 [32+64]=96 →128→256→256→128→1   （**原始 a 不再重复拼入**）
+        #   v6old : 2026-10-24 的旧 v6（s 4→32 ∥ a→32，cat(32+32+na)→256→256→128→1；
+        #           合并时把原始 a 再传一次）。**只保留给历史 checkpoint 复现**
+        #           （output/V6/AIFFLOR-run1、documentation/critic_arch_v6_review.md），
+        #           新训练不要再用；`--critic_arch` 也不暴露它。
         # 动机：物理是 P ≈ c·u³·g(a) —— u 与 a 的**乘积**；且 6 维动作是非单调
         # （单机 Cp 在 1/3 取峰）、逐台不对称的。让动作先独立成型，再与状态融合。
         if arch is None:
@@ -125,7 +141,30 @@ class Critic(nn.Module):
         self.in_actions = nb_actions + (1 if self.feat_power else 0)
         self.relu = nn.LeakyReLU(0.01) if self.act_kind == 'leaky' else nn.ReLU()
         if self.arch == 'v6':
-            # s4->32 ∥ a6->32, 合并时**再把原始 a 传一次** => cat(32+32+na) = 70 (H)
+            # s: ns→32→32 ∥ a: na'→64→64，合并 cat(32+64)=96（**不再重复拼原始 a**）
+            #   →128→256→256→128→1。
+            # 与旧 v6 的区别（2026-10-26 重构，按用户口径）：
+            #   * 状态/动作支路各加深到 2 层（旧的只有 1 层、状态侧仅 192 参数）；
+            #   * 动作支路 32→64；
+            #   * merge 前 96 维**只来自两条支路**，原始 a 的重复拼接被去掉
+            #     （旧 v6 的 ha 与原始 a 直连在均值上互相抵消，见
+            #      documentation/critic_arch_v6_review.md §4）；
+            #   * merge 输入恒为 96 ⇒ **H 层与 L 层共用同一套 merge 形状**
+            #     （旧的 70/65 会让 infer_arch 把 L 层认成 v4）。
+            _s1, _s2 = V6_DIMS['s']
+            _a1, _a2 = V6_DIMS['a']
+            _m1, _m2, _m3, _m4 = V6_DIMS['merge']
+            self.s1 = nn.Linear(nb_states, _s1)
+            self.s2 = nn.Linear(_s1, _s2)
+            self.a1 = nn.Linear(self.in_actions, _a1)
+            self.a2 = nn.Linear(_a1, _a2)
+            self.m1 = nn.Linear(_s2 + _a2, _m1)
+            self.m2 = nn.Linear(_m1, _m2)
+            self.m3 = nn.Linear(_m2, _m3)
+            self.m4 = nn.Linear(_m3, _m4)
+            self.out = nn.Linear(_m4, 1)
+        elif self.arch == 'v6old':
+            # 旧 v6（只读兼容，见 init 注释）：cat(32+32+na) = 70 (H) / 65 (L)
             self.s1 = nn.Linear(nb_states, 32)
             self.a1 = nn.Linear(self.in_actions, 32)
             self.m1 = nn.Linear(32 + 32 + self.in_actions, 256)
@@ -177,6 +216,12 @@ class Critic(nn.Module):
         # （历史约定，见 Agent 文档；--critic_out_init fanin 可改成 PyTorch 的 fan_in 默认）。
         # bias 一律不碰（生产路径的 baseline 由 hsrl_agent_init.BiasInitTracker 负责）。
         if self.arch == 'v6':
+            for m in (self.s1, self.s2, self.a1, self.a2,
+                      self.m1, self.m2, self.m3, self.m4):
+                m.weight.data = fanout_init(m.weight.data.size())
+            if self.out_init != 'fanin':
+                self.out.weight.data.uniform_(-init_w, init_w)
+        elif self.arch == 'v6old':
             for m in (self.s1, self.a1, self.m1, self.m2, self.m3):
                 m.weight.data = fanout_init(m.weight.data.size())
             if self.out_init != 'fanin':
@@ -212,9 +257,18 @@ class Critic(nn.Module):
             pf_ = (self.feat_power_k * u_ ** 3 * g_.sum(1, keepdim=True)) / 5.0
             a = torch.cat([a, pf_], 1)
         if self.arch == 'v6':
+            hs = self.relu(self.s2(self.relu(self.s1(x))))
+            ha = self.relu(self.a2(self.relu(self.a1(a))))
+            m = torch.cat([hs, ha], 1)             # 96 = 32(s) + 64(a)；原始 a 不再拼入
+            m = self.relu(self.m1(m))
+            m = self.relu(self.m2(m))
+            m = self.relu(self.m3(m))
+            m = self.relu(self.m4(m))
+            return self.out(m)
+        if self.arch == 'v6old':
             hs = self.relu(self.s1(x))
             ha = self.relu(self.a1(a))
-            m = torch.cat([hs, ha, a], 1)          # 原始 action 再传一次
+            m = torch.cat([hs, ha, a], 1)          # 旧口径：原始 action 再传一次
             m = self.relu(self.m1(m))
             m = self.relu(self.m2(m))
             m = self.relu(self.m3(m))
@@ -303,13 +357,26 @@ class Critic_L(nn.Module):
         return out
 
 def infer_arch(sd, ns=4, na=6):
-    """按 state_dict 推断 critic 结构（v1 / v1af / v2 / v3）。"""
+    """按 state_dict 推断 critic 结构（v1 / v1af / v2 / v3 / v4 / v5 / v6 / v6old）。
+
+    ⚠ 判据必须用 m1 的**完整形状**，不能只看 `shape[1]`：v4 的 m1 是方阵 (w,w)，
+      v5 的是 (100,48)，v6 的是 (128,96)，旧 v6（v6old）的是 (256, 32+32+na')
+      —— 只看输入维时 v4/v5 在 hidden1=16 会撞车（都是 48）。
+    """
     if 's1.weight' in sd:
+        if 'm4.weight' in sd:                         # v6 独有：96→128→256→256→128
+            return 'v6'
         if 'a2.weight' not in sd:
             if 'm1.weight' not in sd:
                 return 'v4'
-            _c = sd['m1.weight'].shape[1]
-            return {70: 'v6', 48: 'v5'}.get(_c, 'v4')
+            sh = tuple(sd['m1.weight'].shape)          # (out, in)
+            if sh[0] == 256 and sh[1] in (70, 65):     # 旧 v6: H=70 / L=65
+                return 'v6old'
+            if sh[0] == sh[1]:                         # v4: 方阵
+                return 'v4'
+            if sh == (100, 48):                        # v5
+                return 'v5'
+            return 'v4'
         return 'v3' if sd['a2.weight'].shape[0] == 128 else 'v2'
     if sd['fc1.weight'].shape[1] == ns + na:
         return 'v1af'
