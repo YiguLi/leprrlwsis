@@ -256,8 +256,13 @@ def summary(pr=None):
             '越限 {:.1f}元/MW·step={:.1f}× 边际收益); '
             'actor 用 λ=λ_raw×(s_c/s_p)∈[{:.4f},{:.4f}] 初值 {:.4f}; '
             '归一化 s_p={:g} (r1) / s_c={:g} (c1) — 入 critic 前各除一次, 对偶/日志/CSV 仍为原始口径'
-            .format(MODE, K_V, D_BLOCK, LAM_MIN, LAM_MAX, smooth_mul, viol_mul,
-                    LAM_MIN, (1.0 + K_V) * LAM_MIN, viol_mul,
+            # 占位符顺序（14 个）：MODE, K_V, D_BLOCK, λ_raw_lo, λ_raw_hi,
+            #   平滑价(=λ_raw_lo), 平滑%(=smooth_mul), 越限价(=(1+K_V)·λ_raw_lo),
+            #   越限×(=viol_mul), actor_lo, actor_hi, actor_init, s_p, s_c
+            # ⚠ 此前多传了一个 `viol_mul`（15 个实参配 14 个占位符）⇒ 从"平滑%"起整行
+            #   右移一位，打印出 平滑 210%、λ 区间 [2.1, 0.0967]、s_p=0.0967 这种假配置。
+            .format(MODE, K_V, D_BLOCK, LAM_MIN, LAM_MAX,
+                    LAM_MIN, smooth_mul, (1.0 + K_V) * LAM_MIN, viol_mul,
                     LAM_MIN * _kl, LAM_MAX * _kl, LAM_INIT * _kl,
                     VALUE_SCALE, COST_SCALE))
 
