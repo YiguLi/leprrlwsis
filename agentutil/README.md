@@ -92,6 +92,10 @@
 | `critictest/make_dataset_fluct.py` | **五步功率波动和**：`F5=|P1−P0|+Σ|P_t−P_{t−1}|`，窗口 + 前一行 `u0`，只把 `u1` 给网络、`a` 在 `u0..u5` 恒定 | `python agentutil/critictest/make_dataset_fluct.py` |
 | `critictest/compare_fluct.py` | 五步波动任务对照：`f5/f5u3/f5n`、三模型平均、`E[F5|u1]` 基线 + 配对 bootstrap | `python agentutil/critictest/compare_fluct.py` |
 | `critictest/README_fluct.md` | 五步波动任务的探索、结果、最佳方法与局限 | — |
+| `critictest/step_decomp.py` | **逐步奖励分解 critic**：state/action 64 编码 + FiLM + 192→256→256(残差)→128 + 共享逐步 reward 头（5 阶段嵌入）+ 终端头 + 固定 QComposer | — |
+| `critictest/train_step_decomp.py` | 训练 `L=L_sum+λ_r L_r+λ_B L_B`（纯监督无宏 TD；B 目标=0） | `python agentutil/critictest/train_step_decomp.py` |
+| `critictest/evaluate_step_decomp.py` | 评价：F5、逐步 5 阶段、B、基线/monolithic 对照、梯度逐维+余弦、图 | `python agentutil/critictest/evaluate_step_decomp.py` |
+| `critictest/README_step_decomp.md` | 架构映射、训练、结果、与 f5n 的对比、结论与局限 | — |
 
 结论（详见 [critictest/README.md](critictest/README.md)）：单步主臂 test
 `R²=0.999916` / `RMSE=0.131 MW` / `MAPE=0.548%`，动作梯度 pooled `r=0.966`、
@@ -106,7 +110,12 @@ real 上 factorized 与 `sp5n`64 打平；最佳梯度是 factorized 分解
 `F5=Σ|ΔP|` 的 R² 约 0.49（风速逐点差异主导）；`f5/f5u3/f5n` 三个 16/100
 臂统计打平（test RMSE 3.0787–3.0844），但都显著优于 `E[F5|u1]` 基线
 （3.1458，约 −0.067 MW / 2%）；动作梯度最好的是 `f5n`（r 0.823 / 符号 0.817）；
-64/256 与三模型集成均无显著收益。**不启 MATLAB**。
+64/256 与三模型集成均无显著收益。
+**逐步奖励分解 critic**（详见 [critictest/README_step_decomp.md](critictest/README_step_decomp.md)）：
+按外部架构实现 FiLM + 共享逐步 reward 头 + 终端头 + 固定 QComposer（183k 参数），
+test F5 RMSE 3.1005（f5n 3.0832，显著差 0.017 MW），但 MAPE 41.1%
+（f5n 44.7%）与梯度方向略好（余弦 0.875/0.949 vs 0.854/0.933），
+幅度偏小（斜率 0.737）；纯 F5 拟合仍推荐 14k 的 `f5n`。**不启 MATLAB**。
 
 ## 研究笔记（非脚本）
 

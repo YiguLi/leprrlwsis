@@ -5,6 +5,9 @@
 >   [README_5step.md](README_5step.md)。
 > * 五步功率**波动和**任务（`F5=Σ|ΔP|`，只给 `u1`）见
 >   [README_fluct.md](README_fluct.md)。
+> * **逐步奖励分解 critic**（FiLM + 共享逐步 reward 头 + 终端头 + QComposer，
+>   按 `macro_critic_step_reward_decomposition_architecture.md`）见
+>   [README_step_decomp.md](README_step_decomp.md)。
 
 ## 一句话结论
 
