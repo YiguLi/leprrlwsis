@@ -921,6 +921,25 @@ def _diag_fix_action(a):
     return a
 
 
+def _apply_scalar_wt(a, args):
+    """--scalar_wt：把前 `na_box` 维风机动作就地压成同一个值（a_i = a_0）。
+
+    这是**刻意设计的 baseline 动作空间**：五台风机共用一个轴向因子 ⇒ 只剩 1 个自由度，
+    第 1..4 维"存在但无用"（对它们的梯度恒为 0）。第 6 维 g 不动。
+
+    为什么放在主循环（而不是只放在 agent 里）：warmup 的 LHS 调度、`--diag_scalar`、
+    `--explore_mix_blocks` 都会改写前 5 维，必须在它们**之后**、`check_action_H_hsrl`
+    **之前**落地，否则实际执行的动作就不是"五台同一个因子"。
+
+    注：不做 clip —— 越界仍由 `check_action_H_hsrl` 裁 + pen5 罚。因此当 a_0 越界时
+    5 台会同时越界、pen5 是"单台越界"的 5 倍；这是"一个动作驱动五台"的必然结果。
+    """
+    if not int(getattr(args, 'scalar_wt', 0) or 0):
+        return
+    nt = int(getattr(args, 'na_box', 5) or 5)
+    a[:nt] = float(a[0])
+
+
 # =============================================================================
 # HSRL 分支的训练主循环（--hsrl；口径总表见 aifflor/aifflor_hsrl.py）
 # =============================================================================
@@ -1092,6 +1111,7 @@ def train_hsrl(num_iterations_H,
                     original_action_H = _proj_farm_level(
                         torch.tensor(original_action_H[None, :], dtype=torch.float32)).numpy()[0]
                 original_action_H = _diag_fix_action(original_action_H)
+                _apply_scalar_wt(original_action_H, args)
                 applied_action_H, _pen5_w, _pen6_w = hsrl.check_action_H_hsrl(
                     original_action_H, E_block_start,
                     pen_coef=(DIAG['pen_h'] if DIAG['pen_h'] > 0 else None),
@@ -1112,6 +1132,9 @@ def train_hsrl(num_iterations_H,
                         _ar = _wt_lhs_rng.uniform(0.0, 0.5, 5)
                         original_action_H = np.asarray(original_action_H, dtype=float).copy()
                         original_action_H[:5] = _eps * original_action_H[:5] + (1.0 - _eps) * _ar
+                # --scalar_wt 必须在**所有改写之后、clip 之前**落地（diag_fix / explore_mix
+                # 都会打散前 5 维）；否则实际执行的动作不是"五台同一个因子"。
+                _apply_scalar_wt(original_action_H, args)
                 applied_action_H, penalty_NN_H, pen6_H = hsrl.check_action_H_hsrl(
                     original_action_H, E_block_start,
                     pen_coef=(DIAG['pen_h'] if DIAG['pen_h'] > 0 else None),
@@ -1942,6 +1965,11 @@ if __name__ == "__main__":
     parser.add_argument('--farm_level', default=0, type=int,
                         help='1=场级降载：actor 输出投影到 a_i=s·c_i 射线（只保留 1 个宏观自由度, '
                              '期望行为=高风整体降/升出力）；不改奖励与 c1 定义')
+    parser.add_argument('--scalar_wt', default=0, type=int,
+                        help='1=**刻意设计的 baseline 动作空间**：五台风机的轴向因子全部等于'
+                             '动作第 0 维（a_i=a_0）⇒ 只剩 1 个自由度，第 1..4 维"存在但无用"'
+                             '（投影线性 ⇒ 对它们的梯度恒为 0）。第 6 维 g 不受影响。'
+                             '与 --farm_level 互斥；warmup/探索噪声/diag 改写之后仍强制相等')
     parser.add_argument('--aux_model', default=0, type=int,
                         help='1=k=1 的 1-step 监督模型 f_r/f_c（MSE, 无 bootstrap），actor 的梯度改用 '
                              '∇_a[f_r − λ f_c]（model-based 策略改进）；0=关闭（默认）')
@@ -2075,6 +2103,13 @@ if __name__ == "__main__":
     # 其余 main 不传该参数 ⇒ 共享默认仍为 'lhs'，行为逐位不变。
     hwarm.add_warmup_args(parser, wt_sched_default='unified')
     args = parser.parse_args()
+    # ---- baseline 动作空间（--scalar_wt）：与场级射线投影互斥 ----
+    #   --farm_level: 1 个自由度，但保留逐台形状 a_i = s·c_i
+    #   --scalar_wt : 1 个自由度，且**连形状也不要** a_i = a_0（第 1..4 维无用）
+    # 同时开会让"到底投影到哪条流形"变得不可判读 ⇒ 直接拒绝。
+    assert not (int(getattr(args, 'scalar_wt', 0) or 0)
+                and int(getattr(args, 'farm_level', 0) or 0)), \
+        '--scalar_wt 与 --farm_level 互斥（两者都是把动作压到 1 个自由度，语义不同）'
     args = hwarm.resolve_warmup(args)   # WARMUP_AUTO: 正式口径 warmup=bsize*mult, 期零网络更新
     hc.set_mode(args.c1_mode)
     hc.set_value_scale(args.value_scale)   # 值函数回归空间归一化 (单一真源)
@@ -2144,6 +2179,12 @@ if __name__ == "__main__":
         getattr(args, 'critic_act', 'relu'), getattr(args, 'critic_out_init', '3e3'),
         getattr(args, 'critic_bias_init', 'none'), getattr(args, 'rate', 0.003),
         getattr(args, 'cost_clip', 1), getattr(args, 'warmup_wt_sched', 'lhs')))
+    if int(getattr(args, 'scalar_wt', 0) or 0):
+        prLightPurple('[baseline] 动作空间 = 1 个自由度: 五台风机轴向因子全部 = a[0]'
+                  '（a_i = a_0；第 1..4 维存在但无用, 梯度恒 0）；g 独立。'
+                  'warmup/探索噪声之后仍强制相等。c1 平滑={} critic_arch={}'.format(
+                      int(getattr(args, 'c1_smooth', 0) or 0),
+                      getattr(args, 'critic_arch', 'v2')))
     _c1b = float(getattr(args, 'c1_bound_coef', 10.0))
     if _c1b > 0.0:
         prCyan('[c1] 越界项已开启: c1 += {} × Σ[max(0,-a)+max(0,a-0.5)]  (MW·step)'.format(_c1b))

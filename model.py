@@ -497,6 +497,31 @@ class StructCostModel(nn.Module):
 FARM_CENTRE = [0.3418, 0.4247, 0.2889, 0.2562, 0.3705]
 
 
+def proj_scalar_wt(a, nt=5):
+    """把前 nt 维风机动作压成**同一个值** a_0：`a_i = a_0`（i<nt），其余维不变。
+
+    刻意设计的 baseline 动作空间（--scalar_wt）：五台风机共用一个轴向因子，
+    因此
+      * 有效自由度只有 **1**（第 0 维），第 1..nt−1 维"存在但无用"；
+      * 投影是线性映射 `a[:nt] = [1,0,0,0,0]·a` ⇒ `∂/∂a_j (j≥1) ≡ 0`（梯度恒 0，
+        不是"很小"）；
+      * 与 `proj_farm_level` 的区别：那条射线保留逐台**形状** c_i（a_i = s·c_i），
+        这里连形状都不要（a_i 全相等）。
+
+    不改变第 6 维（g），也不做 clip —— 越界仍由 `check_action_H_hsrl` + pen5 处理。
+    """
+    out = a.clone()
+    out[..., :nt] = a[..., :1]
+    return out
+
+
+def proj_scalar_wt_np(a, nt=5):
+    """`proj_scalar_wt` 的 numpy 版（供主循环 / select_action 用）。"""
+    out = np.array(a, dtype=np.float64, copy=True).reshape(-1)
+    out[:nt] = out[0]
+    return out
+
+
 def proj_farm_level(a, centre=None):
     """把动作的前 5 维**投影到"整场同比例降载"这条射线上**： a_i = s·c_i, s≥0。
 

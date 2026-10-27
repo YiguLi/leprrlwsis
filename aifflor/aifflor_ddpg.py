@@ -5,7 +5,8 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 
-from model import (Actor, Critic, AuxModel, proj_farm_level)
+from model import (Actor, Critic, AuxModel, proj_farm_level,
+                   proj_scalar_wt, proj_scalar_wt_np)
 from PER_buffer import PrioritizedReplayBuffer
 from random_process import OrnsteinUhlenbeckProcess
 from util import *
@@ -128,6 +129,11 @@ class SP_TD3(object):
         self.cost_clip = bool(int(getattr(args, 'cost_clip', 1) or 0))
         # 场级降载投影（--farm_level 1）：actor 输出先投影到 a_i = s·c_i 的射线
         self.farm_level = bool(int(getattr(args, 'farm_level', 0) or 0))
+        # 单自由度风机动作（--scalar_wt 1，**刻意设计的 baseline**）：
+        #   前 5 维压成同一个值 a_0 ⇒ 五台风机共用一个轴向因子，只剩 1 个自由度，
+        #   第 1..4 维"存在但无用"（投影线性 ⇒ 对它们的梯度恒为 0）。
+        #   ⚠ 与 --farm_level 互斥（main 里 assert）；两者都开时 scalar 后生效。
+        self.scalar_wt = bool(int(getattr(args, 'scalar_wt', 0) or 0))
         # ---- k=1 的 1-step 监督模型（model-based 策略改进）----
         self.aux_model = bool(int(getattr(args, 'aux_model', 0) or 0))
         self.aux_mix = float(getattr(args, 'aux_mix', 1.0))
@@ -416,13 +422,16 @@ class SP_TD3(object):
         self.update_count += 1
         if self.update_count % self.policy_delay == 0:
             self.actor.zero_grad()
-            # Fresh forward through the (just updated) critics: min of twins.
+            # 演员评估点 = **投影后**的确定性动作（与 select_action 一致）。
+            # ⚠ 旧写法利润塔用 `self.actor(state_batch)`（未投影），成本塔用 `_act`（投影）
+            #   ⇒ 开 --farm_level/--scalar_wt 时两条通道评估的是**不同动作**，
+            #   利润梯度跑到动作流形之外。此处统一走 `_act`（未开投影时逐位等价）。
+            _a_cur = self._act(self.actor, state_batch)
             min_p_cur = self._pair_min(
-                self.critic_p([state_batch, self.actor(state_batch)]),
-                self.critic_p2([state_batch, self.actor(state_batch)]))
+                self.critic_p([state_batch, _a_cur]),
+                self.critic_p2([state_batch, _a_cur]))
             # clamp(min=0) on cost: prevents the actor from exploiting a
             # (pathological) negative cost Q inside the Lagrangian objective.
-            _a_cur = self._act(self.actor, state_batch)
             _a_cur_c = self._clip_box(_a_cur)          # cost 塔: clip 后动作
             min_c_cur = self._aggregate_pair(
                 self.critic_c([state_batch, _a_cur_c]),
@@ -432,8 +441,7 @@ class SP_TD3(object):
             _crit = min_p_cur - self.lam * min_c_cur
             if self.aux_model:
                 # k=1 model-based 策略改进: 用 1-step 模型的梯度（无 bootstrap 噪声）
-                _a_cur2 = self._act(self.actor, state_batch)
-                _aux = self.aux_r([state_batch, _a_cur2]) - self.lam * self.aux_c([state_batch, _a_cur2])
+                _aux = self.aux_r([state_batch, _a_cur]) - self.lam * self.aux_c([state_batch, _a_cur])
                 # 预热: aux 前 aux_warmup 次更新不参与（避免用没学好的模型）
                 _beta = self.aux_mix * min(1.0, self.aux_count / max(1, self.aux_warmup))
                 _obj = _beta * _aux + (1.0 - _beta) * _crit
@@ -638,12 +646,29 @@ class SP_TD3(object):
         self.a_t = action
         return action
 
-    def _act(self, net, s):
-        """actor 前向 + (可选)场级投影 —— 所有调用点都必须走这里。"""
-        a = net(s)
+    def _project(self, a):
+        """动作投影（**所有 actor 前向都必须走这里**）。
+
+        顺序：先 farm_level（射线 a_i=s·c_i），再 scalar_wt（a_i=a_0）。
+        对 v1/v2/... 的 6 维动作只改前 na_box 维，第 6 维 g 原样保留。
+        """
         if getattr(self, 'farm_level', False):
             a = proj_farm_level(a)
+        if getattr(self, 'scalar_wt', False):
+            a = proj_scalar_wt(a, nt=int(getattr(self, 'na_box', 5)))
         return a
+
+    def _project_np(self, a):
+        """numpy 版投影（用于**加完探索噪声之后**的实际执行动作）。"""
+        if getattr(self, 'scalar_wt', False):
+            a = proj_scalar_wt_np(a, nt=int(getattr(self, 'na_box', 5)))
+        elif getattr(self, 'farm_level', False):
+            a = to_numpy(proj_farm_level(to_tensor(np.asarray(a, dtype=float).reshape(1, -1)))).reshape(-1)
+        return a
+
+    def _act(self, net, s):
+        """actor 前向 + (可选)场级投影 —— 所有调用点都必须走这里。"""
+        return self._project(net(s))
 
     def select_action(self, s_t, decay_epsilon=True):
         action = to_numpy(self._act(self.actor, to_tensor(np.array([s_t])))).squeeze(0)
@@ -658,6 +683,14 @@ class SP_TD3(object):
             #   ε 线性降到 0 的用时 = args.epsilon 决策（H=4000⇒20k 环境步）
             amp = self.explore_amp * eps + self.explore_floor * (1.0 - eps)
             action = action + (np.random.random(self.nb_actions) - 0.5) * 2.0 * amp
+
+        # ⚠ --scalar_wt 的**定义**是"五台风机的轴向因子必须相等" ⇒ 噪声加完之后
+        #   必须再投影一次，否则实际执行的动作会散开成 5 个不同值、第 1..4 维重新
+        #   变成有意义的自由度，baseline 就不是 baseline 了。
+        #   等价于"探索只发生在第 0 维"（第 1..4 维的噪声被丢弃）。
+        #   farm_level 本条**故意不套用**（保持 FARM1 臂已跑的语义不变，单独议）。
+        if getattr(self, 'scalar_wt', False):
+            action = self._project_np(action)
 
         if decay_epsilon and self.is_training:   # 评测(is_training=False) 不消耗 ε 预算
             self.epsilon -= self.depsilon
