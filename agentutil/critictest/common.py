@@ -38,6 +38,12 @@ for _p in (ROOT, _AGENTUTIL, _HERE):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+# FLORIS 在 import 时会拉起 matplotlib；后者要写字体缓存。受限沙箱下 ~/.matplotlib
+# 可能不可写，按 `agentutil/README.md` 的约定指到 output/ 下（gitignore）。
+_MPLCACHE = os.path.join(ROOT, 'output', '_mplcache')
+os.environ.setdefault('MPLCONFIGDIR', _MPLCACHE)
+os.makedirs(_MPLCACHE, exist_ok=True)
+
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import torch  # noqa: E402

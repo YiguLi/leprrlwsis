@@ -79,6 +79,19 @@
 `test_compare_projects.py`、`test_scenario.py`、`compare_*.py`、
 `extract_training_wind_days.py`、`generate_day_sequence.py`。
 
+## critictest/ —— 用 PER 结构 critic-target 拟合风场出力
+
+| 文件 | 用途 | 命令 |
+|---|---|---|
+| `critictest/make_dataset.py` | 用 **aifflor/FLORIS** 生成 `(u,a)→P` 数据集：40k/5k/5k 的 `u~U(3.5,25)`、`a~U(0,0.5)^5` 覆盖集 + 3k 实测风速/结构化动作的 real 集；同时保存 `s=1000·P/u³` | `python agentutil/critictest/make_dataset.py` |
+| `critictest/train_critic.py` | 与 PER **逐层相同**的 critic（`1→16→100 ∥ 5→80→50→1`，14 313 参数）+ target（`τ=1e-3` 软更新）做监督拟合；主目标 `s`，`--target p` 为直接拟合 P 的消融 | `python agentutil/critictest/train_critic.py --target sp --out agentutil/critictest/results/sp` |
+| `critictest/evaluate.py` | 四个 split 的 R²/RMSE/MAPE、分风速段、5 种真实动作族、`∂P/∂a` autograd vs aifflor 中心差分、online-target 一致性、图 | `python agentutil/critictest/evaluate.py --ckpt ... --out ...` |
+
+结论（详见 [critictest/README.md](critictest/README.md)）：主臂 test `R²=0.999916` /
+`RMSE=0.131 MW` / `MAPE=0.548%`，动作梯度 pooled `r=0.966`、斜率 `0.999`；
+直接拟合 `P` 的消融臂 `MAPE=2.95%`、动作响应 `s` 的 R² 仅 0.416
+⇒ 准稳态下的 `u³` 因子应提出到网络外。**不启 MATLAB**。
+
 ## 研究笔记（非脚本）
 
 | 文件 | 内容 |

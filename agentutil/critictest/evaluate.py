@@ -110,14 +110,17 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
     gt = np.zeros((sel.size, C.NT), dtype=np.float64)
     lo = np.full_like(ae_g, C.A_PHYS_LO)
     for j in range(C.NT):
-        ap = np.clip(ae_g + delta, lo, C.A_HI)
-        am = np.clip(ae_g - delta, lo, C.A_HI)
+        # ⚠ 只扰动第 j 维（不能 ap = ae_g + delta，那是"五维同时动"的方向导数）
+        ap = ae_g.copy()
+        am = ae_g.copy()
+        ap[:, j] = np.clip(ae_g[:, j] + delta, lo[:, j], C.A_HI)
+        am[:, j] = np.clip(ae_g[:, j] - delta, lo[:, j], C.A_HI)
         pp, _ = C.power_of(phys, u_g, ap, chunk=4096)
         pm_, _ = C.power_of(phys, u_g, am, chunk=4096)
         gt[:, j] = (pp - pm_) / (ap[:, j] - am[:, j])
 
     x = torch.as_tensor(C.state_features(u_g, feature))
-    A = torch.as_tensor(ae_g.astype(np.float32), requires_grad=True)
+    A = torch.as_tensor(ae_g.astype(np.float32)).requires_grad_(True)
     out = q([x, A])
     g_t = torch.autograd.grad(out.sum(), A)[0].detach().numpy().astype(np.float64)
     if target == 'sp':
@@ -130,16 +133,28 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
     else:
         raise ValueError(target)
 
-    # autograd vs 网络自身的中心差分（证明梯度计算口径没写错）
+    # autograd vs 网络自身的中心差分（证明梯度计算口径没写错）。
+    # ⚠ 用 δ=1e-3 而不是外层 1e-2：ReLU 网络是分段线性，1e-2 的割线会跨多个
+    #   折点，和"局部 autograd 导数"本来就不该逐点相等（那是折点效应，不是 bug）。
     net_fd = np.zeros((min(20, sel.size), C.NT), dtype=np.float64)
     nfd = sel.size and min(20, sel.size)
+    self_d = 1e-3
     for j in range(C.NT):
-        ap = np.clip(ae_g[:nfd] + delta, lo[:nfd], C.A_HI)
-        am = np.clip(ae_g[:nfd] - delta, lo[:nfd], C.A_HI)
+        ap = ae_g[:nfd].copy()
+        am = ae_g[:nfd].copy()
+        ap[:, j] = np.clip(ae_g[:nfd, j] + self_d, lo[:nfd, j], C.A_HI)
+        am[:, j] = np.clip(ae_g[:nfd, j] - self_d, lo[:nfd, j], C.A_HI)
         pp = C.predict_power(q, u_g[:nfd], ap, target=target, feature=feature)
         pm_ = C.predict_power(q, u_g[:nfd], am, target=target, feature=feature)
         net_fd[:, j] = (pp - pm_) / (ap[:, j] - am[:, j])
-    autograd_selfcheck = float(np.max(np.abs(net_fd - gp[:nfd]))) if nfd else float('nan')
+    if nfd:
+        _sd = np.abs(net_fd - gp[:nfd])
+        autograd_selfcheck = dict(median=float(np.median(_sd)),
+                                  p90=float(np.percentile(_sd, 90)),
+                                  max=float(np.max(_sd)), delta=self_d)
+    else:
+        autograd_selfcheck = dict(median=float('nan'), p90=float('nan'),
+                                  max=float('nan'), delta=self_d)
 
     dims = {}
     for j in range(C.NT):
@@ -147,7 +162,7 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
     pooled = _grad_cmp(gt.reshape(-1), gp.reshape(-1))
     keep = min(200, sel.size)
     res = dict(n=int(sel.size), delta=float(delta),
-               autograd_vs_netfd_max_abs=autograd_selfcheck,
+               autograd_vs_netfd=autograd_selfcheck,
                pooled=pooled, dims=dims,
                true_abs_median=float(np.median(np.abs(gt))),
                pred_abs_median=float(np.median(np.abs(gp))),
@@ -213,12 +228,14 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
             continue
         pred = C.predict_power(q, u[m], a[m], target=target, feature=feature)
         tpred = C.predict_power(qt, u[m], a[m], target=target, feature=feature)
-        pred_s = C.predict_target(q, u[m], a[m], feature=feature)
+        # s 指标一律由**预测的 P** 反算（p/log 臂的原始输出不是 s，不能直接比）
+        pred_s = C.S_SCALE * pred / np.power(u[m], 3)
         mP = C.regression_metrics(pred, p[m])
         mT = C.regression_metrics(tpred, p[m])
         mS = C.regression_metrics(pred_s, s_true[m], mape_floor=0.01)
         metrics['splits'][name] = dict(power=mP, target_power=mT, specific_power=mS)
         preds[name] = pred
+        preds[name + '_target'] = tpred
         print('  %-6s %8d %12.6f %10.4f %10.4f %10.3f %10.3f'
               % (name, mP['n'], mP['r2'], mP['rmse'], mP['mae'],
                  mP['mape'], mP['max_abs']))
@@ -282,8 +299,9 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
                         delta=delta, out_dir=out_dir)
     grad_plot = gc.pop('plot', None)
     metrics['gradient'] = gc
-    print('  自检 autograd vs 网络自身差分: max|Δ|=%.3e MW/unit' %
-          gc['autograd_vs_netfd_max_abs'])
+    _sc = gc['autograd_vs_netfd']
+    print('  自检 autograd vs 网络自身差分（δ=%.0e）: median|Δ|=%.3e, p90=%.3e, max=%.3e MW/unit'
+          % (_sc['delta'], _sc['median'], _sc['p90'], _sc['max']))
     print('  %-8s %6s %10s %10s %12s %10s %10s' %
           ('dim', 'n', 'pearson', 'slope', 'median_rel', 'sign_agree', 'MAE'))
     for j in range(C.NT):
@@ -373,12 +391,16 @@ def make_figures(out_dir, ds, preds, metrics, meta, grad_plot=None):
     bins = metrics['per_u_bin']
     mids = [0.5 * (b['lo'] + b['hi']) for b in bins]
     fig, axes = plt.subplots(2, 1, figsize=(10, 7), sharex=True)
-    axes[0].bar(mids, [b['r2'] for b in bins], width=1.4, color='#3b7dd8')
-    axes[0].set_ylabel('R²')
+    # R² 都在 0.998~1.000，线性柱状图看不出差别 ⇒ 画 1−R²（对数，越低越好）
+    one_minus = [max(1.0 - b['r2'], 1e-10) for b in bins]
+    axes[0].bar(mids, one_minus, width=1.4, color='#3b7dd8')
+    axes[0].set_yscale('log')
+    axes[0].set_ylim(min(one_minus) * 0.7, max(one_minus) * 2.6)
+    axes[0].set_ylabel('1 − R²  (log, lower is better)')
     axes[0].set_title('test by wind-speed bin (numbers = n)')
-    for x, b in zip(mids, bins):
-        axes[0].text(x, max(b['r2'], 0) + 0.002, str(b['n']), ha='center', fontsize=7)
-    axes[0].grid(alpha=0.3, axis='y')
+    for x, b, v in zip(mids, bins, one_minus):
+        axes[0].text(x, v * 1.07, str(b['n']), ha='center', fontsize=7)
+    axes[0].grid(alpha=0.3, axis='y', which='both')
     axes[1].bar(mids, [b['rmse'] for b in bins], width=1.4, color='#d8793b')
     axes[1].set_ylabel('RMSE (MW)')
     axes[1].set_xlabel('u (m/s)')
@@ -388,13 +410,14 @@ def make_figures(out_dir, ds, preds, metrics, meta, grad_plot=None):
     plt.close(fig)
 
     # (c) 残差 vs u
+    u_te = u[mte]
     residual = pred - true
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.scatter(u[mte], residual, s=6, alpha=0.2, edgecolors='none')
+    ax.scatter(u_te, residual, s=6, alpha=0.2, edgecolors='none')
     edges = list(U_BIN_EDGES)
     mu, mm, ms = [], [], []
     for i in range(len(edges) - 1):
-        mm_ = mte & (u >= edges[i]) & (u < edges[i + 1])
+        mm_ = (u_te >= edges[i]) & (u_te < edges[i + 1])
         if np.any(mm_):
             mu.append(0.5 * (edges[i] + edges[i + 1]))
             mm.append(float(np.mean(residual[mm_])))
@@ -467,8 +490,9 @@ def make_figures(out_dir, ds, preds, metrics, meta, grad_plot=None):
         r2s = [metrics['per_family'][f]['r2'] for f in fams]
         rmses = [metrics['per_family'][f]['rmse'] for f in fams]
         fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
-        axes[0].bar(fams, r2s, color='#3b7dd8')
-        axes[0].set_ylabel('R²')
+        axes[0].bar(fams, [max(1.0 - r, 1e-10) for r in r2s], color='#3b7dd8')
+        axes[0].set_yscale('log')
+        axes[0].set_ylabel('1 − R²  (log, lower is better)')
         axes[0].set_title('real test by action family')
         axes[0].tick_params(axis='x', rotation=15)
         axes[1].bar(fams, rmses, color='#d8793b')
@@ -479,18 +503,16 @@ def make_figures(out_dir, ds, preds, metrics, meta, grad_plot=None):
         plt.close(fig)
 
     # (g) online-target 差
-    if 'test' in metrics['online_target_gap']:
-        mte_pred = preds['test']
-        # 用 metrics 里的均/最大值画不了分布；重算 target 预测
-        # （target 网络在 evaluate_all 里已有，但没传进来；这里只用摘要文本）
-        fig, ax = plt.subplots(figsize=(7, 4))
-        txt = ('online vs target (test)\n'
-               'mean|ΔP| = %.5f MW\nmax|ΔP| = %.5f MW\nRMSE = %.5f MW'
-               % (metrics['online_target_gap']['test']['mean_abs'],
-                  metrics['online_target_gap']['test']['max_abs'],
-                  metrics['online_target_gap']['test']['rmse']))
-        ax.text(0.05, 0.5, txt, fontsize=12, va='center')
-        ax.axis('off')
+    if 'test' in metrics['online_target_gap'] and 'test_target' in preds:
+        gap = preds['test_target'] - preds['test']
+        fig, ax = plt.subplots(figsize=(8, 4.5))
+        ax.hist(gap, bins=80, color='#6a8caf', alpha=0.9)
+        ax.axvline(0.0, color='k', lw=0.8)
+        ax.set_xlabel('P̂_target − P̂_online (MW)')
+        ax.set_ylabel('count')
+        ax.set_title('online vs target critic on test  (mean|Δ|=%.5f MW)'
+                     % metrics['online_target_gap']['test']['mean_abs'])
+        ax.grid(alpha=0.3)
         fig.tight_layout()
         fig.savefig(os.path.join(pdir, 'online_target.png'), dpi=140)
         plt.close(fig)
