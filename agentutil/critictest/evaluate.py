@@ -87,8 +87,9 @@ def _grad_cmp(gt, gp):
 
 
 def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
-                   seed=123, out_dir=None):
-    """autograd ∂P/∂a vs aifflor 中心差分。"""
+                   seed=123, out_dir=None, phys=None, norm=None):
+    """autograd ∂P5/∂a vs aifflor 中心差分（window=1 时即 ∂P/∂a）。"""
+    window = int(meta.get('window', 1))
     u, a = ds['u'].astype(np.float64), ds['a'].astype(np.float64)
     a_eff, p = ds['a_eff'].astype(np.float64), ds['p'].astype(np.float64)
     split = ds['split']
@@ -102,12 +103,18 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
     sel = rng.choice(idx, size=min(int(n_grad), idx.size), replace=False)
 
     u_g, ae_g = u[sel], a_eff[sel]
+    norm_g = (np.asarray(norm, dtype=np.float64).reshape(-1)[sel]
+              if norm is not None else None)
+    u_seq_g = (ds['u_seq'][sel].astype(np.float64)
+               if window > 1 else None)
     dm = meta.get('data_meta', {})
     pm = dm.get('physics', {}) if isinstance(dm, dict) else {}
-    phys = C.build_physics(calibrated=bool(pm.get('calibrated', False)),
-                           power_scale=float(pm.get('power_scale', C.AT.LEVEL_COEF)))
+    if phys is None:
+        phys = C.build_physics(calibrated=bool(pm.get('calibrated', False)),
+                               power_scale=float(pm.get('power_scale', C.AT.LEVEL_COEF)))
 
     gt = np.zeros((sel.size, C.NT), dtype=np.float64)
+    gt_single = np.zeros((sel.size, C.NT), dtype=np.float64)
     lo = np.full_like(ae_g, C.A_PHYS_LO)
     for j in range(C.NT):
         # ⚠ 只扰动第 j 维（不能 ap = ae_g + delta，那是"五维同时动"的方向导数）
@@ -115,9 +122,20 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
         am = ae_g.copy()
         ap[:, j] = np.clip(ae_g[:, j] + delta, lo[:, j], C.A_HI)
         am[:, j] = np.clip(ae_g[:, j] - delta, lo[:, j], C.A_HI)
-        pp, _ = C.power_of(phys, u_g, ap, chunk=4096)
-        pm_, _ = C.power_of(phys, u_g, am, chunk=4096)
+        if window > 1:
+            pp, _ = C.power_window(phys, u_seq_g, ap, chunk=4096, window=window)
+            pm_, _ = C.power_window(phys, u_seq_g, am, chunk=4096, window=window)
+        else:
+            pp, _ = C.power_of(phys, u_g, ap, chunk=4096)
+            pm_, _ = C.power_of(phys, u_g, am, chunk=4096)
         gt[:, j] = (pp - pm_) / (ap[:, j] - am[:, j])
+        # 单步梯度：给"条件期望 oracle"用（window=1 时就是同一个量）
+        if window > 1:
+            ps_p, _ = C.power_of(phys, u_g, ap, chunk=4096)
+            ps_m, _ = C.power_of(phys, u_g, am, chunk=4096)
+            gt_single[:, j] = (ps_p - ps_m) / (ap[:, j] - am[:, j])
+        else:
+            gt_single[:, j] = gt[:, j]
 
     x = torch.as_tensor(C.state_features(u_g, feature))
     A = torch.as_tensor(ae_g.astype(np.float32)).requires_grad_(True)
@@ -130,6 +148,18 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
     elif target == 'log':
         p_pred = C.predict_power(q, u_g, ae_g, target=target, feature=feature)
         gp = g_t * p_pred[:, None]
+    elif target == 'sp5':
+        gp = g_t * window * np.power(u_g, 3)[:, None] / C.S_SCALE
+    elif target == 'p5':
+        gp = g_t * C.P5_SCALE
+    elif target == 'logp5':
+        p_pred = C.predict_power(q, u_g, ae_g, target=target, feature=feature,
+                                 window=window)
+        gp = g_t * p_pred[:, None]
+    elif target == 'sp5n':
+        if norm_g is None:
+            raise ValueError('target=sp5n 需要 norm')
+        gp = g_t * norm_g[:, None] * window * np.power(u_g, 3)[:, None] / C.S_SCALE
     else:
         raise ValueError(target)
 
@@ -144,8 +174,11 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
         am = ae_g[:nfd].copy()
         ap[:, j] = np.clip(ae_g[:nfd, j] + self_d, lo[:nfd, j], C.A_HI)
         am[:, j] = np.clip(ae_g[:nfd, j] - self_d, lo[:nfd, j], C.A_HI)
-        pp = C.predict_power(q, u_g[:nfd], ap, target=target, feature=feature)
-        pm_ = C.predict_power(q, u_g[:nfd], am, target=target, feature=feature)
+        _n = norm_g[:nfd] if norm_g is not None else None
+        pp = C.predict_power(q, u_g[:nfd], ap, target=target, feature=feature,
+                             window=window, norm=_n)
+        pm_ = C.predict_power(q, u_g[:nfd], am, target=target, feature=feature,
+                              window=window, norm=_n)
         net_fd[:, j] = (pp - pm_) / (ap[:, j] - am[:, j])
     if nfd:
         _sd = np.abs(net_fd - gp[:nfd])
@@ -160,16 +193,44 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
     for j in range(C.NT):
         dims['dim%d' % j] = _grad_cmp(gt[:, j], gp[:, j])
     pooled = _grad_cmp(gt.reshape(-1), gp.reshape(-1))
+
+    # ---- 条件期望梯度（5 步任务）：∂/∂a [s(a)·E[Σu³|u1]/1000] ----
+    # 网络只看到 u1，它的 autograd 对应"条件期望"的梯度；用实际 5 步序列的
+    # gt 会额外混入风速实现噪声。这里用单步真值 × E[Σu³|u1]/u1³ 作为 oracle。
+    cond = None
+    g_cond = None
+    if window > 1:
+        u1_all = ds['u_seq'][:, 0].astype(np.float64)
+        sumu3_all = C.u3_sum(ds['u_seq'].astype(np.float64))
+        edges = np.arange(C.U_MIN, C.U_MAX + 0.5, 0.5)
+        _, means = C.conditional_bin_mean(u1_all[split == 0],
+                                          sumu3_all[split == 0], edges)
+        e_sum = C.bin_lookup(u_g, edges, means)
+        g_cond = gt_single * e_sum[:, None] / np.power(u_g, 3)[:, None]
+        cdims = {}
+        for j in range(C.NT):
+            cdims['dim%d' % j] = _grad_cmp(g_cond[:, j], gp[:, j])
+        cpooled = _grad_cmp(g_cond.reshape(-1), gp.reshape(-1))
+        cond = dict(pooled=cpooled, dims=cdims,
+                    true_abs_median=float(np.median(np.abs(g_cond))),
+                    pred_abs_median=float(np.median(np.abs(gp))),
+                    true_abs_p90=float(np.percentile(np.abs(g_cond), 90)),
+                    pred_abs_p90=float(np.percentile(np.abs(gp), 90)))
+
     keep = min(200, sel.size)
+    plot = dict(gt=gt[:keep].tolist(), gp=gp[:keep].tolist())
+    if g_cond is not None:
+        plot['gt_cond'] = g_cond[:keep].tolist()
+        plot['gp_cond'] = gp[:keep].tolist()
     res = dict(n=int(sel.size), delta=float(delta),
                autograd_vs_netfd=autograd_selfcheck,
-               pooled=pooled, dims=dims,
+               pooled=pooled, dims=dims, conditional=cond,
                true_abs_median=float(np.median(np.abs(gt))),
                pred_abs_median=float(np.median(np.abs(gp))),
                true_abs_p90=float(np.percentile(np.abs(gt), 90)),
                pred_abs_p90=float(np.percentile(np.abs(gp), 90)),
                # 只给画图用；evaluate_all 会在写 JSON 前 pop 掉
-               plot=dict(gt=gt[:keep].tolist(), gp=gp[:keep].tolist()))
+               plot=plot)
     if out_dir:
         with open(os.path.join(out_dir, 'gradient.csv'), 'w', newline='',
                   encoding='utf-8') as f:
@@ -181,7 +242,46 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
                             v['median_rel'], v['sign_agree'], v['mae']])
             w.writerow(['pooled', pooled['n'], pooled['pearson'], pooled['slope'],
                         pooled['median_rel'], pooled['sign_agree'], pooled['mae']])
+    if cond is not None and out_dir:
+        with open(os.path.join(out_dir, 'gradient_conditional.csv'), 'w',
+                  newline='', encoding='utf-8') as f:
+            w = csv.writer(f)
+            w.writerow(['dim', 'n', 'pearson', 'slope', 'median_rel',
+                        'sign_agree', 'mae'])
+            for k, v in cond['dims'].items():
+                w.writerow([k, v['n'], v['pearson'], v['slope'],
+                            v['median_rel'], v['sign_agree'], v['mae']])
+            cp = cond['pooled']
+            w.writerow(['pooled', cp['n'], cp['pearson'], cp['slope'],
+                        cp['median_rel'], cp['sign_agree'], cp['mae']])
     return res
+
+
+def oracle_metrics(ds, window, split, phys, groups):
+    """五步任务的"条件期望 oracle"：`s(u1,a)·E[Σu³|u1]/1000`。
+
+    它只用 `u1` 与动作（和网络一样），但**知道**真实单步出力响应 `s(u1,a)`
+    与风速分布 `E[Σu³|u1]`。给定 `u1` 后风速窗口的不可约波动决定了它的
+    RMSE —— 这是任何只看 `u1` 的模型能达到的近似天花板。
+    """
+    u1_all = ds['u_seq'][:, 0].astype(np.float64)
+    sumu3_all = C.u3_sum(ds['u_seq'].astype(np.float64))
+    edges = np.arange(C.U_MIN, C.U_MAX + 0.5, 0.5)
+    _, means = C.conditional_bin_mean(u1_all[split == 0],
+                                      sumu3_all[split == 0], edges)
+    out = {}
+    for name, m in groups:
+        u = ds['u'][m].astype(np.float64)
+        a = ds['a'][m].astype(np.float64)
+        p = ds['p'][m].astype(np.float64)
+        p_single, _ = C.power_of(phys, u, a, chunk=4096)
+        s_single = C.S_SCALE * p_single / np.power(u, 3)
+        e_sum = C.bin_lookup(u, edges, means)
+        pred = s_single * e_sum / 1000.0
+        out[name] = C.regression_metrics(pred, p)
+    out['edges'] = edges.tolist()
+    out['means'] = means.tolist()
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -194,31 +294,34 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
     dm = json.loads(str(ds['meta']))
     q, qt, meta = load_checkpoint(ckpt_path)
     target, feature = meta['target'], meta['feature']
+    window = int(meta.get('window', dm.get('window', 1)))
     u, a, a_eff, p = (ds['u'].astype(np.float64), ds['a'].astype(np.float64),
                       ds['a_eff'].astype(np.float64), ds['p'].astype(np.float64))
     s_true = ds['s'].astype(np.float64)
     split = ds['split']
     family = ds['family']
+    pname = 'P5' if window > 1 else 'P'
+    r_norm = C.window_norm(ds, window=window) if target == 'sp5n' else None
 
     print('\n' + '=' * 108)
     print('critictest 评价：%s' % os.path.abspath(ckpt_path))
-    print('target=%s | state_feat=%s | 结构 %d→%d→%d ∥ %d → 80 → 50 → 1 | 参数量 %s'
-          % (target, feature, meta['ns'], meta['hidden1'], meta['hidden2'],
-             C.NT, meta.get('n_params', '?')))
+    print('target=%s | window=%d | state_feat=%s | 结构 %d→%d→%d ∥ %d → 80 → 50 → 1 | 参数量 %s'
+          % (target, window, feature, meta['ns'], meta['hidden1'],
+             meta['hidden2'], C.NT, meta.get('n_params', '?')))
     print('=' * 108)
 
     metrics = dict(checkpoint=os.path.abspath(ckpt_path),
                    data=os.path.abspath(data_path),
-                   target=target, feature=feature,
+                   target=target, feature=feature, window=window,
                    structure=dict(ns=meta['ns'], na=meta['na'],
                                   hidden1=meta['hidden1'],
                                   hidden2=meta['hidden2'],
                                   n_params=meta.get('n_params')),
                    splits={}, per_u_bin=[], per_family={},
-                   analytic_baseline={}, online_target_gap={})
+                   analytic_baseline={}, oracle={}, online_target_gap={})
 
     # ---------------- 1. 各 split ----------------
-    print('\n[1] 出力拟合（P，单位 MW）')
+    print('\n[1] 出力拟合（%s，单位 MW）' % pname)
     print('  %-6s %8s %12s %10s %10s %10s %10s' %
           ('split', 'n', 'R²', 'RMSE', 'MAE', 'MAPE%', 'max|e|'))
     preds = {}
@@ -226,10 +329,13 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
         m = split == code
         if not np.any(m):
             continue
-        pred = C.predict_power(q, u[m], a[m], target=target, feature=feature)
-        tpred = C.predict_power(qt, u[m], a[m], target=target, feature=feature)
-        # s 指标一律由**预测的 P** 反算（p/log 臂的原始输出不是 s，不能直接比）
-        pred_s = C.S_SCALE * pred / np.power(u[m], 3)
+        _n = r_norm[m] if r_norm is not None else None
+        pred = C.predict_power(q, u[m], a[m], target=target, feature=feature,
+                               window=window, norm=_n)
+        tpred = C.predict_power(qt, u[m], a[m], target=target, feature=feature,
+                                window=window, norm=_n)
+        # s 指标一律由**预测的出力**反算（p/log 臂的原始输出不是 s，不能直接比）
+        pred_s = C.S_SCALE * pred / (window * np.power(u[m], 3))
         mP = C.regression_metrics(pred, p[m])
         mT = C.regression_metrics(tpred, p[m])
         mS = C.regression_metrics(pred_s, s_true[m], mape_floor=0.01)
@@ -292,11 +398,29 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
             w.writerow([fam, rec['n'], rec['r2'], rec['rmse'], rec['mae'],
                         rec['mape'], rec['bias'], rec['mean_true']])
 
+    # ---------------- 3b. 条件期望 oracle ----------------
+    dm_ph = dm.get('physics', {})
+    phys = C.build_physics(calibrated=bool(dm_ph.get('calibrated', False)),
+                           power_scale=float(dm_ph.get('power_scale',
+                                                       C.AT.LEVEL_COEF)))
+    if window > 1:
+        orc = oracle_metrics(ds, window, split, phys,
+                             (('test', mte), ('real', mre)))
+        metrics['oracle'] = orc
+        print('\n[3b] 条件均值参考 oracle（只用 u1；知道真实 s(u1,a) 与 E[Σu³|u1]）')
+        print('      ⚠ 它是**近似参考**，不是严格上界：分箱 + s 取 u1 会让它略差于'
+              '真正的条件均值。')
+        for name in ('test', 'real'):
+            r = orc[name]
+            print('  %-6s n=%6d R²=%.5f RMSE=%.4f MAPE=%.2f%%  ← 条件均值参考'
+                  % (name, r['n'], r['r2'], r['rmse'], r['mape']))
+
     # ---------------- 4. 动作梯度 ----------------
-    print('\n[4] 动作梯度 ∂P/∂a（autograd vs aifflor 中心差分，%d 点，δ=%.3f）'
-          % (n_grad, delta))
+    gname = '∂P5/∂a' if window > 1 else '∂P/∂a'
+    print('\n[4] 动作梯度 %s（autograd vs aifflor 中心差分，%d 点，δ=%.3f）'
+          % (gname, n_grad, delta))
     gc = gradient_check(q, ds, meta, target, feature, n_grad=n_grad,
-                        delta=delta, out_dir=out_dir)
+                        delta=delta, out_dir=out_dir, phys=phys, norm=r_norm)
     grad_plot = gc.pop('plot', None)
     metrics['gradient'] = gc
     _sc = gc['autograd_vs_netfd']
@@ -316,20 +440,39 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
     print('  |g| 中位: 真值 %.3f vs 网络 %.3f | p90: %.3f vs %.3f'
           % (gc['true_abs_median'], gc['pred_abs_median'],
              gc['true_abs_p90'], gc['pred_abs_p90']))
+    if gc.get('conditional'):
+        c = gc['conditional']
+        print('  --- 条件期望梯度 oracle（单步真值 × E[Σu³|u1]/u1³）---')
+        print('  %-8s %6s %10s %10s %12s %10s' %
+              ('dim', 'n', 'pearson', 'slope', 'median_rel', 'sign_agree'))
+        for j in range(C.NT):
+            g = c['dims']['dim%d' % j]
+            print('  dim%-5d %6d %10.4f %10.4f %12.4f %10.4f'
+                  % (j, g['n'], g['pearson'], g['slope'],
+                     g['median_rel'], g['sign_agree']))
+        cp = c['pooled']
+        print('  pooled   %6d %10.4f %10.4f %12.4f %10.4f'
+              % (cp['n'], cp['pearson'], cp['slope'], cp['median_rel'],
+                 cp['sign_agree']))
 
     # ---------------- 5. 解析代理基线 ----------------
-    mtr = split == 0
-    k = C.fit_analytic_k(u[mtr], a_eff[mtr], p[mtr])
-    proxy = k * C.analytic_proxy_x(u, a_eff)
-    for name, m in (('train', mtr), ('test', mte), ('real', mre)):
-        metrics['analytic_baseline'][name] = C.regression_metrics(proxy[m], p[m])
-    print('\n[5] 解析代理基线  P≈k·u³·Σ4a(1−a)²（k=%.6f，train 最小二乘；忽略尾流）'
-          % k)
-    for name in ('train', 'test', 'real'):
-        r = metrics['analytic_baseline'][name]
-        print('  %-6s n=%6d R²=%.5f RMSE=%.4f MAPE=%.2f%%'
-              % (name, r['n'], r['r2'], r['rmse'], r['mape']))
-    metrics['analytic_baseline']['k'] = k
+    if window == 1:
+        mtr = split == 0
+        k = C.fit_analytic_k(u[mtr], a_eff[mtr], p[mtr])
+        proxy = k * C.analytic_proxy_x(u, a_eff)
+        for name, m in (('train', mtr), ('test', mte), ('real', mre)):
+            metrics['analytic_baseline'][name] = C.regression_metrics(proxy[m], p[m])
+        print('\n[5] 解析代理基线  P≈k·u³·Σ4a(1−a)²（k=%.6f，train 最小二乘；忽略尾流）'
+              % k)
+        for name in ('train', 'test', 'real'):
+            r = metrics['analytic_baseline'][name]
+            print('  %-6s n=%6d R²=%.5f RMSE=%.4f MAPE=%.2f%%'
+                  % (name, r['n'], r['r2'], r['rmse'], r['mape']))
+        metrics['analytic_baseline']['k'] = k
+    else:
+        metrics['analytic_baseline'] = dict(
+            note='window>1：只用 u1 的解析代理不再适用；天花板见 oracle')
+        print('\n[5] 解析代理基线：五步任务跳过（见 [3b] oracle）')
 
     # ---------------- 6. 图 / 汇总 ----------------
     if make_plots:
@@ -464,24 +607,35 @@ def make_figures(out_dir, ds, preds, metrics, meta, grad_plot=None):
     # (e) 梯度对照（真值 vs autograd）
     gc = metrics['gradient']
     if grad_plot is not None:
-        gt = np.asarray(grad_plot['gt'], dtype=np.float64)
-        gp = np.asarray(grad_plot['gp'], dtype=np.float64)
+        c = gc.get('conditional')
+        if c is not None and 'gt_cond' in grad_plot:
+            gt = np.asarray(grad_plot['gt_cond'], dtype=np.float64)
+            gp = np.asarray(grad_plot['gp_cond'], dtype=np.float64)
+            stats = c['dims']
+            gname = '∂P5/∂a (conditional oracle)'
+            fname = 'gradient_parity_conditional.png'
+        else:
+            gt = np.asarray(grad_plot['gt'], dtype=np.float64)
+            gp = np.asarray(grad_plot['gp'], dtype=np.float64)
+            stats = gc['dims']
+            gname = '∂P/∂a (realized)'
+            fname = 'gradient_parity.png'
         fig, axes = plt.subplots(1, C.NT, figsize=(4 * C.NT, 4), sharex=False)
         for j, ax in enumerate(axes):
-            g = gc['dims']['dim%d' % j]
+            g = stats['dim%d' % j]
             ax.scatter(gt[:, j], gp[:, j], s=12, alpha=0.55, edgecolors='none')
             lo = min(gt[:, j].min(), gp[:, j].min())
             hi = max(gt[:, j].max(), gp[:, j].max())
             ax.plot([lo, hi], [lo, hi], 'k--', lw=1)
             ax.set_title('dim%d  r=%.3f  slope=%.3f'
                          % (j, g['pearson'], g['slope']), fontsize=9)
-            ax.set_xlabel('aifflor ∂P/∂a (MW/unit)')
+            ax.set_xlabel('aifflor %s (MW/unit)' % gname)
             if j == 0:
-                ax.set_ylabel('critic ∂P/∂a (MW/unit)')
+                ax.set_ylabel('critic %s (MW/unit)' % gname)
             ax.grid(alpha=0.3)
         fig.suptitle('action-gradient parity on test (n=%d)' % gc['n'])
         fig.tight_layout()
-        fig.savefig(os.path.join(pdir, 'gradient_parity.png'), dpi=140)
+        fig.savefig(os.path.join(pdir, fname), dpi=140)
         plt.close(fig)
 
     # (f) 真实动作族
@@ -526,8 +680,9 @@ def build_summary(metrics, meta):
     L.append('critictest 结果汇总')
     L.append('=' * 100)
     L.append('checkpoint : %s' % metrics['checkpoint'])
-    L.append('target     : %s（sp = 1000·P/u³ 后乘回 u³；p = P/10；log = log P）'
-             % metrics['target'])
+    L.append('target     : %s | window=%d（sp/sp5 后乘 u³；p/p5 后乘常数；'
+             'log 取 exp；sp5n 再乘 E[R|u1]）'
+             % (metrics['target'], metrics.get('window', 1)))
     L.append('state_feat : %s' % metrics['feature'])
     L.append('structure  : %d → %d → %d ∥ %d → 80 → 50 → 1，参数量 %s'
              % (meta['ns'], meta['hidden1'], meta['hidden2'], C.NT,
@@ -559,17 +714,43 @@ def build_summary(metrics, meta):
              % (g['pooled']['pearson'], g['pooled']['slope'],
                 g['pooled']['median_rel'], g['pooled']['sign_agree']))
     L.append('')
-    L.append('解析代理基线（k=%.6f，只作参照，不含尾流）' % metrics['analytic_baseline']['k'])
-    for name in ('train', 'test', 'real'):
-        r = metrics['analytic_baseline'][name]
-        L.append('  %-6s R²=%.5f RMSE=%.4f MAPE=%.2f%%'
-                 % (name, r['r2'], r['rmse'], r['mape']))
+    if g.get('conditional'):
+        c = g['conditional']
+        L.append('条件期望梯度 oracle（单步真值 × E[Σu³|u1]/u1³）')
+        for j in range(C.NT):
+            q = c['dims']['dim%d' % j]
+            L.append('  dim%-5d pearson %.4f  slope %.4f  median_rel %.4f  sign %.4f'
+                     % (j, q['pearson'], q['slope'], q['median_rel'],
+                        q['sign_agree']))
+        cp = c['pooled']
+        L.append('  pooled   pearson %.4f  slope %.4f  median_rel %.4f  sign %.4f'
+                 % (cp['pearson'], cp['slope'], cp['median_rel'],
+                    cp['sign_agree']))
+        L.append('')
+    if metrics.get('oracle'):
+        L.append('条件均值参考 oracle（只用 u1；近似参考，非严格上界）')
+        for name in ('test', 'real'):
+            if name in metrics['oracle']:
+                r = metrics['oracle'][name]
+                L.append('  %-6s R²=%.5f RMSE=%.4f MAPE=%.2f%%'
+                         % (name, r['r2'], r['rmse'], r['mape']))
+        L.append('')
+    ab = metrics.get('analytic_baseline', {})
+    if 'k' in ab:
+        L.append('解析代理基线（k=%.6f，只作参照，不含尾流）' % ab['k'])
+        for name in ('train', 'test', 'real'):
+            r = ab[name]
+            L.append('  %-6s R²=%.5f RMSE=%.4f MAPE=%.2f%%'
+                     % (name, r['r2'], r['rmse'], r['mape']))
+    else:
+        L.append('解析代理基线：window>1 时跳过（只用 u1 不适用）')
     L.append('')
     L.append('结论口径：')
-    L.append('  * R²/RMSE 在 **P（MW）** 上算；sp 臂的 s 指标另存 metrics.json。')
-    L.append('  * 覆盖集是 u~U(3.5,25)、a~U(0,0.5)^5；real 用实测风速 + 5 种动作族。')
+    L.append('  * R²/RMSE 在 **P/P5（MW）** 上算；s 指标另存 metrics.json。')
+    L.append('  * window>1 时，u2..u5 不喂网络 ⇒ 存在不可约风速噪声；'
+             'oracle 行是近似参考（分箱/s 取 u1），模型可能小幅优于它。')
     L.append('  * 梯度斜率≈1 且 r 高才说明 critic 可用于"按 a 寻优"；'
-             'R² 高但梯度差只能说明它拟合了 u³ 的趋势。')
+             'R² 高但梯度差只能说明它拟合了风速趋势。')
     return '\n'.join(L)
 
 

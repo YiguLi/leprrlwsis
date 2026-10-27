@@ -116,12 +116,22 @@ def main():
     print('=' * 104)
     ds = np.load(args.data, allow_pickle=False)
     meta_data = json.loads(str(ds['meta']))
+    window = int(meta_data.get('window', 1))
+    target = str(args.target)
+    if target in C.WINDOW5_KINDS and window != C.WINDOW:
+        raise SystemExit('target=%s 需要 window=%d 的数据集（当前 window=%d）'
+                         % (target, C.WINDOW, window))
+    if target not in C.WINDOW5_KINDS and window != 1:
+        raise SystemExit('window=%d 的数据集请用 --target sp5/p5/logp5（当前 %s）'
+                         % (window, target))
     m_tr, m_va, m_te, m_re = _split(ds)
     u, a, p = ds['u'], ds['a'], ds['p']
-    s_np = C.target_transform(p, u, args.target)
-    print('数据 %s' % os.path.abspath(args.data))
-    print('  train %d / val %d / test %d / real %d | P=[%.3f, %.3f] MW'
-          % (m_tr.sum(), m_va.sum(), m_te.sum(), m_re.sum(), p.min(), p.max()))
+    r_norm = C.window_norm(ds, window=window) if target == 'sp5n' else None
+    s_np = C.target_transform(p, u, target, window=window, norm=r_norm)
+    pname = 'P5' if window > 1 else 'P'
+    print('数据 %s  (window=%d)' % (os.path.abspath(args.data), window))
+    print('  train %d / val %d / test %d / real %d | %s=[%.3f, %.3f] MW'
+          % (m_tr.sum(), m_va.sum(), m_te.sum(), m_re.sum(), pname, p.min(), p.max()))
     print('  目标 %s：train mean=%.5f  sd=%.5f'
           % (args.target, float(s_np[m_tr].mean()), float(s_np[m_tr].std())))
 
@@ -144,8 +154,9 @@ def main():
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(
             opt, T_max=max(1, args.steps), eta_min=args.eta_min)
 
-    def val_eval(model, uu, aa, pp, feature, target, batch=8192):
-        pred = C.predict_power(model, uu, aa, target=target, feature=feature, batch=batch)
+    def val_eval(model, uu, aa, pp, feature, target, norm=None, batch=8192):
+        pred = C.predict_power(model, uu, aa, target=target, feature=feature,
+                               batch=batch, window=window, norm=norm)
         return C.regression_metrics(pred, pp), pred
 
     hist = []
@@ -172,8 +183,11 @@ def main():
             C.hard_update(qt, q)
 
         if step % args.eval_every == 0 or step == args.steps:
-            mva, _ = val_eval(q, u_va, a[m_va], p_va, args.state_feat, args.target)
-            mvt, _ = val_eval(qt, u_va, a[m_va], p_va, args.state_feat, args.target)
+            nva = r_norm[m_va] if r_norm is not None else None
+            mva, _ = val_eval(q, u_va, a[m_va], p_va, args.state_feat,
+                              args.target, norm=nva)
+            mvt, _ = val_eval(qt, u_va, a[m_va], p_va, args.state_feat,
+                              args.target, norm=nva)
             lr_now = opt.param_groups[0]['lr']
             gap = abs(mvt['rmse'] - mva['rmse'])
             hist.append(dict(step=step, lr=lr_now,
@@ -189,7 +203,7 @@ def main():
                 save_checkpoint(os.path.join(args.out, 'critic_best.pt'), q, qt,
                                 meta=dict(
                                     target=args.target, feature=args.state_feat,
-                                    ns=ns, na=C.NT,
+                                    window=window, ns=ns, na=C.NT,
                                     hidden1=args.hidden1, hidden2=args.hidden2,
                                     init_w=3e-3, bias0=bias0, n_params=n_par,
                                     best_step=step, best_val_rmse_mw=mva['rmse'],
@@ -222,7 +236,8 @@ def main():
     if not os.path.exists(ckpt):
         # 极端情况（steps<eval_every 且从未 eval）也保存一次
         save_checkpoint(ckpt, q, qt, meta=dict(
-            target=args.target, feature=args.state_feat, ns=ns, na=C.NT,
+            target=args.target, feature=args.state_feat, window=window,
+            ns=ns, na=C.NT,
             hidden1=args.hidden1, hidden2=args.hidden2, init_w=3e-3,
             bias0=bias0, n_params=n_par, best_step=step,
             best_val_rmse_mw=float('nan'), data=os.path.abspath(args.data),

@@ -63,11 +63,14 @@ A_PHYS_LO = float(AT.A_PHYS_LO)   # 0.025：aifflor 物理安全下界
 
 S_SCALE = 1000.0             # s = S_SCALE · P / u³
 P_SCALE = 10.0               # 直接拟合 P 时的目标缩放（消融臂用）
+P5_SCALE = 100.0             # 五步功率和 P5 的目标缩放（消融臂用）
 P_MAPE_FLOOR = 0.05          # MW：MAPE 分母下限（低风速 P→0 时防爆）
 
+WINDOW = 5                   # 五步功率和窗口
 WIND_CSV = os.path.join(ROOT, 'FFC_speed_noise_1.csv')
 
-TARGET_KINDS = ('sp', 'p', 'log')
+TARGET_KINDS = ('sp', 'p', 'log', 'sp5', 'p5', 'logp5', 'sp5n')
+WINDOW5_KINDS = ('sp5', 'p5', 'logp5', 'sp5n')
 FEATURE_KINDS = ('u10', 'u3')
 
 
@@ -171,6 +174,126 @@ def power_of(physics, u, a, chunk=4096, verbose=False):
 
 
 # ---------------------------------------------------------------------------
+# 五步窗口：从 FFC 实测风速序列取连续 5 步
+# ---------------------------------------------------------------------------
+def wind_window_pool(window=WINDOW, path=None):
+    """枚举 `FFC_speed_noise_1.csv` 里所有合法的连续 `window` 步窗口。
+
+    合法性：窗口内 5 个风速都落在 `[U_MIN, U_MAX] = [3.5, 25]`。
+    返回 `(days, starts, cols)`：
+      * `days`   : (1440, n_days) 风速矩阵（列 = 天）；
+      * `starts` : (n_valid,) 窗口起始行号；
+      * `cols`   : (n_valid,) 窗口所在列（天）。
+    把 `starts/cols` 打乱后切片即可得到互不重叠的 train/val/test。
+    """
+    path = path or WIND_CSV
+    df = pd.read_csv(path)
+    days = df.iloc[:, 1:].values.astype(np.float64)
+    n_starts = days.shape[0] - int(window) + 1
+    if n_starts <= 0:
+        raise ValueError('window=%d 超过序列长度 %d' % (window, days.shape[0]))
+    ok = np.ones((n_starts, days.shape[1]), dtype=bool)
+    for k in range(int(window)):
+        seg = days[k:k + n_starts]
+        ok &= (seg >= U_MIN) & (seg <= U_MAX)
+    starts, cols = np.nonzero(ok)
+    if starts.size == 0:
+        raise RuntimeError('%s 里没有合法的 %d 步窗口' % (path, window))
+    return days, starts.astype(np.int64), cols.astype(np.int64)
+
+
+def windows_from_pool(days, starts, cols, window=WINDOW):
+    """按 `(starts, cols)` 取出 `(N, window)` 的风速窗口。"""
+    starts = np.asarray(starts, dtype=np.int64).reshape(-1)
+    cols = np.asarray(cols, dtype=np.int64).reshape(-1)
+    off = np.arange(int(window), dtype=np.int64)
+    u_seq = days[starts[:, None] + off[None, :], cols[:, None]]
+    return np.asarray(u_seq, dtype=np.float64)
+
+
+def power_steps(physics, u_seq, a, chunk=4096, verbose=False, window=WINDOW):
+    """同一动作 `a` 在 `window` 个连续风速上的逐点功率。
+
+    返回 `(p_steps (N, window), a_eff (N, NT))`，单位 MW。
+    动作在每个窗口内保持不变（本实验的口径）。
+    """
+    window = int(window)
+    u_seq = np.asarray(u_seq, dtype=np.float64).reshape(-1, window)
+    a = np.asarray(a, dtype=np.float64).reshape(-1, NT)
+    n = u_seq.shape[0]
+    if a.shape[0] != n:
+        raise ValueError('u_seq 与 a 行数不一致: %d vs %d' % (n, a.shape[0]))
+    a_eff = np.empty_like(a)
+    for i, row in enumerate(a):
+        a_eff[i] = physics.a_clip(row)
+    # 每个样本的同一动作重复 window 次；u_seq 按行主序展开
+    acts = np.repeat(a_eff, window, axis=0)
+    p_flat, _ = power_of(physics, u_seq.reshape(-1), acts, chunk=chunk,
+                         verbose=verbose)
+    return p_flat.reshape(n, window), a_eff
+
+
+def power_window(physics, u_seq, a, chunk=4096, verbose=False, window=WINDOW):
+    """五步功率和 [MW]（`Σ_t P(u_t, a)`）。"""
+    p_steps, a_eff = power_steps(physics, u_seq, a, chunk=chunk,
+                                 verbose=verbose, window=window)
+    return p_steps.sum(axis=1), a_eff
+
+
+def u3_sum(u_seq):
+    """`Σ_t u_t³`（用于把五步和拆成 `s(a)·Σu³/1000` 的口径）。"""
+    u_seq = np.asarray(u_seq, dtype=np.float64)
+    return np.power(u_seq, 3).sum(axis=1)
+
+
+def conditional_bin_mean(x, y, edges):
+    """按 `x` 分箱求 `y` 的均值；空箱用线性插值补。
+
+    返回 `(centers, means)`，配合 `bin_lookup` 使用。用于估计
+    `E[Σu³ | u1]`（oracle / 归一化特征），只依赖 u1 的边缘分布。
+    """
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
+    y = np.asarray(y, dtype=np.float64).reshape(-1)
+    edges = np.asarray(edges, dtype=np.float64)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    idx = np.clip(np.digitize(x, edges) - 1, 0, centers.size - 1)
+    means = np.full(centers.size, np.nan, dtype=np.float64)
+    for b in range(centers.size):
+        m = idx == b
+        if np.any(m):
+            means[b] = float(np.mean(y[m]))
+    good = np.isfinite(means)
+    if good.sum() >= 2:
+        means = np.interp(centers, centers[good], means[good])
+    elif good.sum() == 1:
+        means[:] = means[good][0]
+    else:
+        means[:] = float(np.mean(y))
+    return centers, means
+
+
+def bin_lookup(x, edges, means):
+    """按 `(edges, means)` 查表（`conditional_bin_mean` 的配套）。"""
+    edges = np.asarray(edges, dtype=np.float64)
+    means = np.asarray(means, dtype=np.float64)
+    idx = np.clip(np.digitize(np.asarray(x, dtype=np.float64), edges) - 1,
+                  0, means.size - 1)
+    return means[idx]
+
+
+def window_norm(ds, window=WINDOW, edges=None):
+    """每个样本的 `E[R|u1]`（`R=Σu³/(window·u1³)`）；只用 train split 估计。"""
+    u1 = ds['u_seq'][:, 0].astype(np.float64)
+    sumu3 = u3_sum(ds['u_seq'].astype(np.float64))
+    r = sumu3 / (window * np.power(u1, 3))
+    if edges is None:
+        edges = np.arange(U_MIN, U_MAX + 0.5, 0.5)
+    split = ds['split']
+    _, means = conditional_bin_mean(u1[split == 0], r[split == 0], edges)
+    return bin_lookup(u1, edges, means)
+
+
+# ---------------------------------------------------------------------------
 # 采样
 # ---------------------------------------------------------------------------
 def sample_iid(n, rng):
@@ -255,29 +378,60 @@ def state_features(u, kind='u10'):
     raise ValueError('未知 state_feat %r' % (kind,))
 
 
-def target_transform(p, u, kind='sp'):
-    """训练目标（网络直接回归的量）。"""
+def target_transform(p, u, kind='sp', window=1, norm=None):
+    """训练目标（网络直接回归的量）。
+
+    `window=1` 的三种是单步目标；`sp5/p5/logp5/sp5n` 是五步功率和
+    `P5=Σ_t P(u_t,a)` 的目标，`u` 只给窗口首步 `u1`。
+    `sp5n` 额外除以 `E[R|u1]`（`R=Σu³/(window·u1³)`），即把风速窗口的
+    平均乘性波动先去掉；`norm` 必须是每个样本的 `E[R|u1]`。
+    """
     p = np.asarray(p, dtype=np.float64).reshape(-1)
     u = np.asarray(u, dtype=np.float64).reshape(-1)
+    window = int(window)
     if kind == 'sp':
         return (S_SCALE * p / np.power(u, 3)).astype(np.float32)
     if kind == 'p':
         return (p / P_SCALE).astype(np.float32)
     if kind == 'log':
         return np.log(p).astype(np.float32)
+    if kind == 'sp5':
+        # 平均 specific power：P5 = window · s5 · u1³ / S_SCALE
+        return (S_SCALE * p / (window * np.power(u, 3))).astype(np.float32)
+    if kind == 'p5':
+        return (p / P5_SCALE).astype(np.float32)
+    if kind == 'logp5':
+        return np.log(p).astype(np.float32)
+    if kind == 'sp5n':
+        if norm is None:
+            raise ValueError('target=sp5n 需要 norm=E[R|u1]')
+        norm = np.asarray(norm, dtype=np.float64).reshape(-1)
+        return (S_SCALE * p / (window * np.power(u, 3) * norm)).astype(np.float32)
     raise ValueError('未知 target %r' % (kind,))
 
 
-def target_to_power(out, u, kind='sp'):
-    """把网络输出还原成风场出力 P [MW]（评价/部署都用这条）。"""
+def target_to_power(out, u, kind='sp', window=1, norm=None):
+    """把网络输出还原成风场出力（单步 P 或五步和 P5）[MW]。"""
     out = np.asarray(out, dtype=np.float64).reshape(-1)
     u = np.asarray(u, dtype=np.float64).reshape(-1)
+    window = int(window)
     if kind == 'sp':
         return out * np.power(u, 3) / S_SCALE
     if kind == 'p':
         return out * P_SCALE
     if kind == 'log':
         return np.exp(out)
+    if kind == 'sp5':
+        return out * window * np.power(u, 3) / S_SCALE
+    if kind == 'p5':
+        return out * P5_SCALE
+    if kind == 'logp5':
+        return np.exp(out)
+    if kind == 'sp5n':
+        if norm is None:
+            raise ValueError('target=sp5n 需要 norm=E[R|u1]')
+        norm = np.asarray(norm, dtype=np.float64).reshape(-1)
+        return out * norm * window * np.power(u, 3) / S_SCALE
     raise ValueError('未知 target %r' % (kind,))
 
 
@@ -311,8 +465,9 @@ def make_critic_pair(ns, na=NT, hidden1=16, hidden2=100, init_w=3e-3,
     return q, qt
 
 
-def predict_power(model, u, a, target='sp', feature='u10', batch=8192):
-    """用 critic 预测风场出力 [MW]（eval / no_grad）。"""
+def predict_power(model, u, a, target='sp', feature='u10', batch=8192,
+                  window=1, norm=None):
+    """用 critic 预测风场出力（单步 P 或五步和 P5）[MW]（eval / no_grad）。"""
     model.eval()
     u = np.asarray(u, dtype=np.float64).reshape(-1)
     a = np.asarray(a, dtype=np.float64).reshape(-1, NT)
@@ -323,7 +478,7 @@ def predict_power(model, u, a, target='sp', feature='u10', batch=8192):
             x = torch.as_tensor(state_features(u[s:e], feature))
             aa = torch.as_tensor(a[s:e].astype(np.float32))
             out[s:e] = model([x, aa]).cpu().numpy().reshape(-1)
-    return target_to_power(out, u, target)
+    return target_to_power(out, u, target, window=window, norm=norm)
 
 
 def predict_target(model, u, a, feature='u10', batch=8192):

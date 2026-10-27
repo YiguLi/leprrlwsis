@@ -86,11 +86,18 @@
 | `critictest/make_dataset.py` | 用 **aifflor/FLORIS** 生成 `(u,a)→P` 数据集：40k/5k/5k 的 `u~U(3.5,25)`、`a~U(0,0.5)^5` 覆盖集 + 3k 实测风速/结构化动作的 real 集；同时保存 `s=1000·P/u³` | `python agentutil/critictest/make_dataset.py` |
 | `critictest/train_critic.py` | 与 PER **逐层相同**的 critic（`1→16→100 ∥ 5→80→50→1`，14 313 参数）+ target（`τ=1e-3` 软更新）做监督拟合；主目标 `s`，`--target p` 为直接拟合 P 的消融 | `python agentutil/critictest/train_critic.py --target sp --out agentutil/critictest/results/sp` |
 | `critictest/evaluate.py` | 四个 split 的 R²/RMSE/MAPE、分风速段、5 种真实动作族、`∂P/∂a` autograd vs aifflor 中心差分、online-target 一致性、图 | `python agentutil/critictest/evaluate.py --ckpt ... --out ...` |
+| `critictest/make_dataset5.py` | **五步功率和**任务：从 `FFC_speed_noise_1.csv` 取连续 5 步窗口，只把首步 `u1` 给网络、`a` 五步恒定，标签 `P5=Σ_t P(u_t,a)`；40k/5k/5k+3k，窗口级不重叠 | `python agentutil/critictest/make_dataset5.py` |
+| `critictest/README_5step.md` | 五步任务的探索：`p5/sp5/sp5n/factorized`、16/100 vs 64/256、oracle 参考、配对 bootstrap、最佳方法 | — |
+| `critictest/compare_5step.py` | 五步任务对照：`sp5n`（直接五步 critic）vs `factorized`（单步 s × `E[Σu³|u1]`）+ test 配对 bootstrap | `python agentutil/critictest/compare_5step.py` |
 
-结论（详见 [critictest/README.md](critictest/README.md)）：主臂 test `R²=0.999916` /
-`RMSE=0.131 MW` / `MAPE=0.548%`，动作梯度 pooled `r=0.966`、斜率 `0.999`；
-直接拟合 `P` 的消融臂 `MAPE=2.95%`、动作响应 `s` 的 R² 仅 0.416
-⇒ 准稳态下的 `u³` 因子应提出到网络外。**不启 MATLAB**。
+结论（详见 [critictest/README.md](critictest/README.md)）：单步主臂 test
+`R²=0.999916` / `RMSE=0.131 MW` / `MAPE=0.548%`，动作梯度 pooled `r=0.966`、
+斜率 `0.999`；直接拟合 `P` 的消融臂 `MAPE=2.95%`、动作响应 `s` 的 R² 仅 0.416
+⇒ 准稳态下的 `u³` 因子应提出到网络外。
+**五步扩展**（详见 [critictest/README_5step.md](critictest/README_5step.md)）：
+只给 `u1` 时不可约风速噪声把 R² 天花板压到约 0.887；最佳纯拟合是 `sp5n`
+（test RMSE 5.618 MW / R² 0.88726），最佳梯度是 factorized 分解
+（pooled r 0.957 / 斜率 0.984）。**不启 MATLAB**。
 
 ## 研究笔记（非脚本）
 

@@ -1,5 +1,8 @@
 # critictest —— 用 PER 结构的 critic-target 拟合风场出力 `P(u, a)`
 
+> **扩展**：五步功率和任务（`window=5`，只给窗口首步 `u1`）的探索与最佳方法见
+> [README_5step.md](README_5step.md)。
+
 ## 一句话结论
 
 **PER 的 critic 结构（`1→16→100 ∥ 5 → 80 → 50 → 1`，14 313 参数）可以很好地拟合
