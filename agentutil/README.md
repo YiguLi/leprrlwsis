@@ -95,8 +95,9 @@
 斜率 `0.999`；直接拟合 `P` 的消融臂 `MAPE=2.95%`、动作响应 `s` 的 R² 仅 0.416
 ⇒ 准稳态下的 `u³` 因子应提出到网络外。
 **五步扩展**（详见 [critictest/README_5step.md](critictest/README_5step.md)）：
-只给 `u1` 时不可约风速噪声把 R² 天花板压到约 0.887；最佳纯拟合是 `sp5n`
-（test RMSE 5.618 MW / R² 0.88726），最佳梯度是 factorized 分解
+只给 `u1` 时不可约风速噪声把 R² 天花板压到约 0.887；test 上最佳纯拟合是 `sp5n`
+（16/100 RMSE 5.618 MW / R² 0.88726；64/256 RMSE 5.6169，统计打平），
+real 上 factorized 与 `sp5n`64 打平；最佳梯度是 factorized 分解
 （pooled r 0.957 / 斜率 0.984）。**不启 MATLAB**。
 
 ## 研究笔记（非脚本）
