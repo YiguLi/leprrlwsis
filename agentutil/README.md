@@ -89,6 +89,9 @@
 | `critictest/make_dataset5.py` | **五步功率和**任务：从 `FFC_speed_noise_1.csv` 取连续 5 步窗口，只把首步 `u1` 给网络、`a` 五步恒定，标签 `P5=Σ_t P(u_t,a)`；40k/5k/5k+3k，窗口级不重叠 | `python agentutil/critictest/make_dataset5.py` |
 | `critictest/README_5step.md` | 五步任务的探索：`p5/sp5/sp5n/factorized`、16/100 vs 64/256、oracle 参考、配对 bootstrap、最佳方法 | — |
 | `critictest/compare_5step.py` | 五步任务对照：`sp5n`（直接五步 critic）vs `factorized`（单步 s × `E[Σu³|u1]`）+ test 配对 bootstrap | `python agentutil/critictest/compare_5step.py` |
+| `critictest/make_dataset_fluct.py` | **五步功率波动和**：`F5=|P1−P0|+Σ|P_t−P_{t−1}|`，窗口 + 前一行 `u0`，只把 `u1` 给网络、`a` 在 `u0..u5` 恒定 | `python agentutil/critictest/make_dataset_fluct.py` |
+| `critictest/compare_fluct.py` | 五步波动任务对照：`f5/f5u3/f5n`、三模型平均、`E[F5|u1]` 基线 + 配对 bootstrap | `python agentutil/critictest/compare_fluct.py` |
+| `critictest/README_fluct.md` | 五步波动任务的探索、结果、最佳方法与局限 | — |
 
 结论（详见 [critictest/README.md](critictest/README.md)）：单步主臂 test
 `R²=0.999916` / `RMSE=0.131 MW` / `MAPE=0.548%`，动作梯度 pooled `r=0.966`、
@@ -98,7 +101,12 @@
 只给 `u1` 时不可约风速噪声把 R² 天花板压到约 0.887；test 上最佳纯拟合是 `sp5n`
 （16/100 RMSE 5.618 MW / R² 0.88726；64/256 RMSE 5.6169，统计打平），
 real 上 factorized 与 `sp5n`64 打平；最佳梯度是 factorized 分解
-（pooled r 0.957 / 斜率 0.984）。**不启 MATLAB**。
+（pooled r 0.957 / 斜率 0.984）。
+**五步波动扩展**（详见 [critictest/README_fluct.md](critictest/README_fluct.md)）：
+`F5=Σ|ΔP|` 的 R² 约 0.49（风速逐点差异主导）；`f5/f5u3/f5n` 三个 16/100
+臂统计打平（test RMSE 3.0787–3.0844），但都显著优于 `E[F5|u1]` 基线
+（3.1458，约 −0.067 MW / 2%）；动作梯度最好的是 `f5n`（r 0.823 / 符号 0.817）；
+64/256 与三模型集成均无显著收益。**不启 MATLAB**。
 
 ## 研究笔记（非脚本）
 

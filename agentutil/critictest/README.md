@@ -1,7 +1,10 @@
 # critictest —— 用 PER 结构的 critic-target 拟合风场出力 `P(u, a)`
 
-> **扩展**：五步功率和任务（`window=5`，只给窗口首步 `u1`）的探索与最佳方法见
-> [README_5step.md](README_5step.md)。
+> **扩展**：
+> * 五步功率和任务（`window=5`，只给窗口首步 `u1`）见
+>   [README_5step.md](README_5step.md)。
+> * 五步功率**波动和**任务（`F5=Σ|ΔP|`，只给 `u1`）见
+>   [README_fluct.md](README_fluct.md)。
 
 ## 一句话结论
 

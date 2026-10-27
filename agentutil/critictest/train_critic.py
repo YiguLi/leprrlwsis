@@ -122,13 +122,22 @@ def main():
         raise SystemExit('target=%s 需要 window=%d 的数据集（当前 window=%d）'
                          % (target, C.WINDOW, window))
     if target not in C.WINDOW5_KINDS and window != 1:
-        raise SystemExit('window=%d 的数据集请用 --target sp5/p5/logp5（当前 %s）'
-                         % (window, target))
+        raise SystemExit('window=%d 的数据集请用 --target sp5/p5/logp5 或 '
+                         'f5/f5n/f5u3/logf5（当前 %s）' % (window, target))
+    if target in C.FLUCT_KINDS and 'f5' not in ds.files:
+        raise SystemExit('target=%s 需要五步波动数据集（含 f5 列）' % target)
+    if target in ('sp5', 'p5', 'logp5', 'sp5n') and 'f5' in ds.files:
+        raise SystemExit('这是五步波动数据集，请用 --target f5/f5n/f5u3/logf5')
     m_tr, m_va, m_te, m_re = _split(ds)
     u, a, p = ds['u'], ds['a'], ds['p']
-    r_norm = C.window_norm(ds, window=window) if target == 'sp5n' else None
+    if target == 'sp5n':
+        r_norm = C.window_norm(ds, window=window)
+    elif target == 'f5n':
+        r_norm = C.window_fluct_norm(ds)
+    else:
+        r_norm = None
     s_np = C.target_transform(p, u, target, window=window, norm=r_norm)
-    pname = 'P5' if window > 1 else 'P'
+    pname = 'F5' if target in C.FLUCT_KINDS else ('P5' if window > 1 else 'P')
     print('数据 %s  (window=%d)' % (os.path.abspath(args.data), window))
     print('  train %d / val %d / test %d / real %d | %s=[%.3f, %.3f] MW'
           % (m_tr.sum(), m_va.sum(), m_te.sum(), m_re.sum(), pname, p.min(), p.max()))

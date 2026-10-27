@@ -64,13 +64,16 @@ A_PHYS_LO = float(AT.A_PHYS_LO)   # 0.025：aifflor 物理安全下界
 S_SCALE = 1000.0             # s = S_SCALE · P / u³
 P_SCALE = 10.0               # 直接拟合 P 时的目标缩放（消融臂用）
 P5_SCALE = 100.0             # 五步功率和 P5 的目标缩放（消融臂用）
+F5_SCALE = 10.0              # 五步功率波动和 F5 的目标缩放
 P_MAPE_FLOOR = 0.05          # MW：MAPE 分母下限（低风速 P→0 时防爆）
 
 WINDOW = 5                   # 五步功率和窗口
 WIND_CSV = os.path.join(ROOT, 'FFC_speed_noise_1.csv')
 
-TARGET_KINDS = ('sp', 'p', 'log', 'sp5', 'p5', 'logp5', 'sp5n')
-WINDOW5_KINDS = ('sp5', 'p5', 'logp5', 'sp5n')
+TARGET_KINDS = ('sp', 'p', 'log', 'sp5', 'p5', 'logp5', 'sp5n',
+                'f5', 'f5n', 'f5u3', 'logf5')
+WINDOW5_KINDS = ('sp5', 'p5', 'logp5', 'sp5n', 'f5', 'f5n', 'f5u3', 'logf5')
+FLUCT_KINDS = ('f5', 'f5n', 'f5u3', 'logf5')
 FEATURE_KINDS = ('u10', 'u3')
 
 
@@ -240,6 +243,34 @@ def power_window(physics, u_seq, a, chunk=4096, verbose=False, window=WINDOW):
     return p_steps.sum(axis=1), a_eff
 
 
+def power_fluct(physics, u0, u_seq, a, chunk=4096, verbose=False,
+                window=WINDOW):
+    """五步功率**波动之和** [MW]。
+
+    口径（与 env 的块级 `P_F` 一致，去掉 c1 折点）：
+        F5 = |P(u1,a) − P(u0,a)|
+             + Σ_{t=2..5} |P(u_t,a) − P(u_{t-1},a)|
+    其中 `u0` 是窗口前一步的风速（只用于标签，**不喂网络**），动作在
+    `u0..u5` 上保持同一个 `a`（本实验的受控口径）。
+
+    返回 `(f5, f4, p_steps, p_prev, a_eff)`：
+      * `f5`  : 5 项波动和；
+      * `f4`  : 窗口内 4 项波动和（不含 `u0` 项，作对照）；
+      * `p_steps`, `p_prev` 供诊断/真值梯度用。
+    """
+    window = int(window)
+    p_steps, a_eff = power_steps(physics, u_seq, a, chunk=chunk,
+                                 verbose=verbose, window=window)
+    u0 = np.asarray(u0, dtype=np.float64).reshape(-1)
+    if u0.size != p_steps.shape[0]:
+        raise ValueError('u0 与 u_seq 行数不一致: %d vs %d'
+                         % (u0.size, p_steps.shape[0]))
+    p_prev, _ = power_of(physics, u0, a_eff, chunk=chunk)
+    d = np.abs(np.diff(p_steps, axis=1)).sum(axis=1)
+    f5 = np.abs(p_steps[:, 0] - p_prev) + d
+    return f5, d, p_steps, p_prev, a_eff
+
+
 def u3_sum(u_seq):
     """`Σ_t u_t³`（用于把五步和拆成 `s(a)·Σu³/1000` 的口径）。"""
     u_seq = np.asarray(u_seq, dtype=np.float64)
@@ -290,6 +321,17 @@ def window_norm(ds, window=WINDOW, edges=None):
         edges = np.arange(U_MIN, U_MAX + 0.5, 0.5)
     split = ds['split']
     _, means = conditional_bin_mean(u1[split == 0], r[split == 0], edges)
+    return bin_lookup(u1, edges, means)
+
+
+def window_fluct_norm(ds, edges=None):
+    """每个样本的 `E[F5|u1]`（只用 train split 的 F5 标签估计）。"""
+    u1 = ds['u_seq'][:, 0].astype(np.float64)
+    f5 = ds['f5'].astype(np.float64)
+    if edges is None:
+        edges = np.arange(U_MIN, U_MAX + 0.5, 0.5)
+    split = ds['split']
+    _, means = conditional_bin_mean(u1[split == 0], f5[split == 0], edges)
     return bin_lookup(u1, edges, means)
 
 
@@ -407,6 +449,17 @@ def target_transform(p, u, kind='sp', window=1, norm=None):
             raise ValueError('target=sp5n 需要 norm=E[R|u1]')
         norm = np.asarray(norm, dtype=np.float64).reshape(-1)
         return (S_SCALE * p / (window * np.power(u, 3) * norm)).astype(np.float32)
+    if kind == 'f5':
+        return (p / F5_SCALE).astype(np.float32)
+    if kind == 'f5n':
+        if norm is None:
+            raise ValueError('target=f5n 需要 norm=E[F5|u1]')
+        norm = np.asarray(norm, dtype=np.float64).reshape(-1)
+        return (p / norm).astype(np.float32)
+    if kind == 'f5u3':
+        return (S_SCALE * p / (window * np.power(u, 3))).astype(np.float32)
+    if kind == 'logf5':
+        return np.log(p).astype(np.float32)
     raise ValueError('未知 target %r' % (kind,))
 
 
@@ -432,6 +485,17 @@ def target_to_power(out, u, kind='sp', window=1, norm=None):
             raise ValueError('target=sp5n 需要 norm=E[R|u1]')
         norm = np.asarray(norm, dtype=np.float64).reshape(-1)
         return out * norm * window * np.power(u, 3) / S_SCALE
+    if kind == 'f5':
+        return out * F5_SCALE
+    if kind == 'f5n':
+        if norm is None:
+            raise ValueError('target=f5n 需要 norm=E[F5|u1]')
+        norm = np.asarray(norm, dtype=np.float64).reshape(-1)
+        return out * norm
+    if kind == 'f5u3':
+        return out * window * np.power(u, 3) / S_SCALE
+    if kind == 'logf5':
+        return np.exp(out)
     raise ValueError('未知 target %r' % (kind,))
 
 

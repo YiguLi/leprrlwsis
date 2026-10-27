@@ -90,6 +90,7 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
                    seed=123, out_dir=None, phys=None, norm=None):
     """autograd ∂P5/∂a vs aifflor 中心差分（window=1 时即 ∂P/∂a）。"""
     window = int(meta.get('window', 1))
+    fluct = 'f5' in ds.files
     u, a = ds['u'].astype(np.float64), ds['a'].astype(np.float64)
     a_eff, p = ds['a_eff'].astype(np.float64), ds['p'].astype(np.float64)
     split = ds['split']
@@ -107,6 +108,7 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
               if norm is not None else None)
     u_seq_g = (ds['u_seq'][sel].astype(np.float64)
                if window > 1 else None)
+    u0_g = ds['u0'][sel].astype(np.float64) if fluct else None
     dm = meta.get('data_meta', {})
     pm = dm.get('physics', {}) if isinstance(dm, dict) else {}
     if phys is None:
@@ -122,7 +124,12 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
         am = ae_g.copy()
         ap[:, j] = np.clip(ae_g[:, j] + delta, lo[:, j], C.A_HI)
         am[:, j] = np.clip(ae_g[:, j] - delta, lo[:, j], C.A_HI)
-        if window > 1:
+        if fluct:
+            pp, _, _, _, _ = C.power_fluct(phys, u0_g, u_seq_g, ap,
+                                           chunk=4096, window=window)
+            pm_, _, _, _, _ = C.power_fluct(phys, u0_g, u_seq_g, am,
+                                            chunk=4096, window=window)
+        elif window > 1:
             pp, _ = C.power_window(phys, u_seq_g, ap, chunk=4096, window=window)
             pm_, _ = C.power_window(phys, u_seq_g, am, chunk=4096, window=window)
         else:
@@ -130,7 +137,7 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
             pm_, _ = C.power_of(phys, u_g, am, chunk=4096)
         gt[:, j] = (pp - pm_) / (ap[:, j] - am[:, j])
         # 单步梯度：给"条件期望 oracle"用（window=1 时就是同一个量）
-        if window > 1:
+        if window > 1 and not fluct:
             ps_p, _ = C.power_of(phys, u_g, ap, chunk=4096)
             ps_m, _ = C.power_of(phys, u_g, am, chunk=4096)
             gt_single[:, j] = (ps_p - ps_m) / (ap[:, j] - am[:, j])
@@ -160,6 +167,18 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
         if norm_g is None:
             raise ValueError('target=sp5n 需要 norm')
         gp = g_t * norm_g[:, None] * window * np.power(u_g, 3)[:, None] / C.S_SCALE
+    elif target == 'f5':
+        gp = g_t * C.F5_SCALE
+    elif target == 'f5n':
+        if norm_g is None:
+            raise ValueError('target=f5n 需要 norm')
+        gp = g_t * norm_g[:, None]
+    elif target == 'f5u3':
+        gp = g_t * window * np.power(u_g, 3)[:, None] / C.S_SCALE
+    elif target == 'logf5':
+        p_pred = C.predict_power(q, u_g, ae_g, target=target, feature=feature,
+                                 window=window)
+        gp = g_t * p_pred[:, None]
     else:
         raise ValueError(target)
 
@@ -199,7 +218,7 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
     # gt 会额外混入风速实现噪声。这里用单步真值 × E[Σu³|u1]/u1³ 作为 oracle。
     cond = None
     g_cond = None
-    if window > 1:
+    if window > 1 and not fluct:
         u1_all = ds['u_seq'][:, 0].astype(np.float64)
         sumu3_all = C.u3_sum(ds['u_seq'].astype(np.float64))
         edges = np.arange(C.U_MIN, C.U_MAX + 0.5, 0.5)
@@ -265,11 +284,24 @@ def oracle_metrics(ds, window, split, phys, groups):
     RMSE —— 这是任何只看 `u1` 的模型能达到的近似天花板。
     """
     u1_all = ds['u_seq'][:, 0].astype(np.float64)
-    sumu3_all = C.u3_sum(ds['u_seq'].astype(np.float64))
     edges = np.arange(C.U_MIN, C.U_MAX + 0.5, 0.5)
+    if 'f5' in ds.files:
+        # 波动任务：只用 u1 的 E[F5|u1] 基线（动作无关）
+        f5_all = ds['f5'].astype(np.float64)
+        _, means = C.conditional_bin_mean(u1_all[split == 0],
+                                          f5_all[split == 0], edges)
+        out = {'kind': 'E[F5|u1]'}
+        for name, m in groups:
+            pred = C.bin_lookup(u1_all[m], edges, means)
+            out[name] = C.regression_metrics(pred, f5_all[m])
+        out['edges'] = edges.tolist()
+        out['means'] = means.tolist()
+        return out
+
+    sumu3_all = C.u3_sum(ds['u_seq'].astype(np.float64))
     _, means = C.conditional_bin_mean(u1_all[split == 0],
                                       sumu3_all[split == 0], edges)
-    out = {}
+    out = {'kind': 's(u1,a)·E[Σu³|u1]'}
     for name, m in groups:
         u = ds['u'][m].astype(np.float64)
         a = ds['a'][m].astype(np.float64)
@@ -295,13 +327,19 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
     q, qt, meta = load_checkpoint(ckpt_path)
     target, feature = meta['target'], meta['feature']
     window = int(meta.get('window', dm.get('window', 1)))
+    fluct = 'f5' in ds.files
     u, a, a_eff, p = (ds['u'].astype(np.float64), ds['a'].astype(np.float64),
                       ds['a_eff'].astype(np.float64), ds['p'].astype(np.float64))
-    s_true = ds['s'].astype(np.float64)
+    s_true = ds['s'].astype(np.float64) if 's' in ds.files else p
     split = ds['split']
     family = ds['family']
-    pname = 'P5' if window > 1 else 'P'
-    r_norm = C.window_norm(ds, window=window) if target == 'sp5n' else None
+    pname = 'F5' if fluct else ('P5' if window > 1 else 'P')
+    if target == 'sp5n':
+        r_norm = C.window_norm(ds, window=window)
+    elif target == 'f5n':
+        r_norm = C.window_fluct_norm(ds)
+    else:
+        r_norm = None
 
     print('\n' + '=' * 108)
     print('critictest 评价：%s' % os.path.abspath(ckpt_path))
@@ -313,6 +351,7 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
     metrics = dict(checkpoint=os.path.abspath(ckpt_path),
                    data=os.path.abspath(data_path),
                    target=target, feature=feature, window=window,
+                   quantity=pname,
                    structure=dict(ns=meta['ns'], na=meta['na'],
                                   hidden1=meta['hidden1'],
                                   hidden2=meta['hidden2'],
@@ -334,11 +373,14 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
                                window=window, norm=_n)
         tpred = C.predict_power(qt, u[m], a[m], target=target, feature=feature,
                                 window=window, norm=_n)
-        # s 指标一律由**预测的出力**反算（p/log 臂的原始输出不是 s，不能直接比）
-        pred_s = C.S_SCALE * pred / (window * np.power(u[m], 3))
         mP = C.regression_metrics(pred, p[m])
         mT = C.regression_metrics(tpred, p[m])
-        mS = C.regression_metrics(pred_s, s_true[m], mape_floor=0.01)
+        if fluct:
+            mS = None
+        else:
+            # s 指标一律由**预测的出力**反算（p/log 臂的原始输出不是 s，不能直接比）
+            pred_s = C.S_SCALE * pred / (window * np.power(u[m], 3))
+            mS = C.regression_metrics(pred_s, s_true[m], mape_floor=0.01)
         metrics['splits'][name] = dict(power=mP, target_power=mT, specific_power=mS)
         preds[name] = pred
         preds[name + '_target'] = tpred
@@ -407,16 +449,20 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
         orc = oracle_metrics(ds, window, split, phys,
                              (('test', mte), ('real', mre)))
         metrics['oracle'] = orc
-        print('\n[3b] 条件均值参考 oracle（只用 u1；知道真实 s(u1,a) 与 E[Σu³|u1]）')
-        print('      ⚠ 它是**近似参考**，不是严格上界：分箱 + s 取 u1 会让它略差于'
-              '真正的条件均值。')
+        if fluct:
+            print('\n[3b] 只用 u1 的 E[F5|u1] 基线（动作无关，作为参考）')
+        else:
+            print('\n[3b] 条件均值参考 oracle（只用 u1；知道真实 s(u1,a) 与 E[Σu³|u1]）')
+            print('      ⚠ 它是**近似参考**，不是严格上界：分箱 + s 取 u1 会让它略差于'
+                  '真正的条件均值。')
         for name in ('test', 'real'):
             r = orc[name]
-            print('  %-6s n=%6d R²=%.5f RMSE=%.4f MAPE=%.2f%%  ← 条件均值参考'
-                  % (name, r['n'], r['r2'], r['rmse'], r['mape']))
+            label = 'E[F5|u1] 基线' if fluct else '条件均值参考'
+            print('  %-6s n=%6d R²=%.5f RMSE=%.4f MAPE=%.2f%%  ← %s'
+                  % (name, r['n'], r['r2'], r['rmse'], r['mape'], label))
 
     # ---------------- 4. 动作梯度 ----------------
-    gname = '∂P5/∂a' if window > 1 else '∂P/∂a'
+    gname = '∂%s/∂a' % pname
     print('\n[4] 动作梯度 %s（autograd vs aifflor 中心差分，%d 点，δ=%.3f）'
           % (gname, n_grad, delta))
     gc = gradient_check(q, ds, meta, target, feature, n_grad=n_grad,
@@ -504,6 +550,7 @@ def make_figures(out_dir, ds, preds, metrics, meta, grad_plot=None):
 
     pdir = os.path.join(out_dir, 'plots')
     os.makedirs(pdir, exist_ok=True)
+    qname = metrics.get('quantity', 'P')
     u = ds['u'].astype(np.float64)
     p = ds['p'].astype(np.float64)
     split = ds['split']
@@ -518,8 +565,8 @@ def make_figures(out_dir, ds, preds, metrics, meta, grad_plot=None):
         lo = min(true.min(), pred.min())
         hi = max(true.max(), pred.max())
         ax.plot([lo, hi], [lo, hi], 'k--', lw=1)
-        ax.set_xlabel('aifflor P (MW)')
-        ax.set_ylabel('critic P̂ (MW)')
+        ax.set_xlabel('aifflor %s (MW)' % qname)
+        ax.set_ylabel('critic %ŝ (MW)' % qname)
         ax.set_title('test: R²=%.6f, RMSE=%.4f MW' % (m['r2'], m['rmse']))
         if log:
             ax.set_xscale('log')
@@ -569,7 +616,7 @@ def make_figures(out_dir, ds, preds, metrics, meta, grad_plot=None):
                 capsize=3, label='bin mean ± sd')
     ax.axhline(0, color='k', lw=0.8)
     ax.set_xlabel('u (m/s)')
-    ax.set_ylabel('P̂ − P (MW)')
+    ax.set_ylabel('%ŝ − %s (MW)' % (qname, qname))
     ax.set_title('test residual vs wind speed')
     ax.grid(alpha=0.3)
     ax.legend()
@@ -612,13 +659,13 @@ def make_figures(out_dir, ds, preds, metrics, meta, grad_plot=None):
             gt = np.asarray(grad_plot['gt_cond'], dtype=np.float64)
             gp = np.asarray(grad_plot['gp_cond'], dtype=np.float64)
             stats = c['dims']
-            gname = '∂P5/∂a (conditional oracle)'
+            gname = '∂%s/∂a (conditional oracle)' % qname
             fname = 'gradient_parity_conditional.png'
         else:
             gt = np.asarray(grad_plot['gt'], dtype=np.float64)
             gp = np.asarray(grad_plot['gp'], dtype=np.float64)
             stats = gc['dims']
-            gname = '∂P/∂a (realized)'
+            gname = '∂%s/∂a (realized)' % qname
             fname = 'gradient_parity.png'
         fig, axes = plt.subplots(1, C.NT, figsize=(4 * C.NT, 4), sharex=False)
         for j, ax in enumerate(axes):
@@ -680,9 +727,10 @@ def build_summary(metrics, meta):
     L.append('critictest 结果汇总')
     L.append('=' * 100)
     L.append('checkpoint : %s' % metrics['checkpoint'])
-    L.append('target     : %s | window=%d（sp/sp5 后乘 u³；p/p5 后乘常数；'
-             'log 取 exp；sp5n 再乘 E[R|u1]）'
-             % (metrics['target'], metrics.get('window', 1)))
+    L.append('target     : %s | window=%d | quantity=%s'
+             '（sp/sp5 后乘 u³；p/p5 后乘常数；log 取 exp；sp5n/f5n 再乘 E[·|u1]）'
+             % (metrics['target'], metrics.get('window', 1),
+                metrics.get('quantity', 'P')))
     L.append('state_feat : %s' % metrics['feature'])
     L.append('structure  : %d → %d → %d ∥ %d → 80 → 50 → 1，参数量 %s'
              % (meta['ns'], meta['hidden1'], meta['hidden2'], C.NT,
@@ -728,7 +776,8 @@ def build_summary(metrics, meta):
                     cp['sign_agree']))
         L.append('')
     if metrics.get('oracle'):
-        L.append('条件均值参考 oracle（只用 u1；近似参考，非严格上界）')
+        okind = metrics['oracle'].get('kind', '条件均值参考')
+        L.append('参考基线：%s（只用 u1）' % okind)
         for name in ('test', 'real'):
             if name in metrics['oracle']:
                 r = metrics['oracle'][name]
@@ -748,7 +797,9 @@ def build_summary(metrics, meta):
     L.append('结论口径：')
     L.append('  * R²/RMSE 在 **P/P5（MW）** 上算；s 指标另存 metrics.json。')
     L.append('  * window>1 时，u2..u5 不喂网络 ⇒ 存在不可约风速噪声；'
-             'oracle 行是近似参考（分箱/s 取 u1），模型可能小幅优于它。')
+             'oracle/基线行只作参考（分箱，可能略差于真正条件均值）。')
+    L.append('  * 波动任务（quantity=F5）的标签是 5 项 |ΔP| 之和；'
+             'E[F5|u1] 基线与模型对比才说明动作是否真的带来信息。')
     L.append('  * 梯度斜率≈1 且 r 高才说明 critic 可用于"按 a 寻优"；'
              'R² 高但梯度差只能说明它拟合了风速趋势。')
     return '\n'.join(L)
