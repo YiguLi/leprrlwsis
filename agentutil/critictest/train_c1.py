@@ -38,6 +38,7 @@ import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 import common as C  # noqa: E402
+from model import Critic  # noqa: E402
 
 C1_SCALE = 10.0
 STATE_KINDS = ('obs', 'useq', 'useq6')
@@ -83,6 +84,22 @@ def inverse_of(out, kind):
     raise ValueError(kind)
 
 
+def make_pair(ns, na, arch, seed, bias0, hidden1=16, hidden2=100):
+    """v1 用 PER 原结构；v6 用 `model.Critic(arch='v6')`（固定 V6_DIMS）。"""
+    if arch == 'v6':
+        if seed is not None:
+            torch.manual_seed(int(seed))
+        q = Critic(int(ns), int(na), arch='v6')
+        qt = Critic(int(ns), int(na), arch='v6')
+        if bias0 is not None:
+            with torch.no_grad():
+                q.out.bias.fill_(float(bias0))
+                qt.out.bias.fill_(float(bias0))
+        C.hard_update(qt, q)
+        return q, qt
+    return C.make_critic_pair(ns, na, hidden1, hidden2, seed=seed, bias=bias0)
+
+
 def predict(model, state, a, kind, batch=8192):
     model.eval()
     out = np.empty(state.shape[0], dtype=np.float64)
@@ -105,6 +122,7 @@ def main():
     ap.add_argument('--bsize', type=int, default=256)
     ap.add_argument('--lr', type=float, default=1e-3)
     ap.add_argument('--eta_min', type=float, default=1e-4)
+    ap.add_argument('--arch', default='v1', choices=('v1', 'v6'))
     ap.add_argument('--hidden1', type=int, default=16)
     ap.add_argument('--hidden2', type=int, default=100)
     ap.add_argument('--tau', type=float, default=1e-3)
@@ -139,10 +157,11 @@ def main():
 
     ns = state.shape[1]
     bias0 = float(yt[m_tr].mean())
-    q, qt = C.make_critic_pair(ns, 1, args.hidden1, args.hidden2,
-                               seed=args.seed, bias=bias0)
+    q, qt = make_pair(ns, 1, args.arch, args.seed, bias0,
+                      args.hidden1, args.hidden2)
     n_par = sum(p.numel() for p in q.parameters())
-    print('state_dim=%d | 参数 %d | bias0=%.5f' % (ns, n_par, bias0))
+    print('arch=%s | state_dim=%d | 参数 %d | bias0=%.5f'
+          % (args.arch, ns, n_par, bias0))
     opt = torch.optim.Adam(q.parameters(), lr=args.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(
         opt, T_max=max(1, args.steps), eta_min=args.eta_min)
@@ -185,6 +204,7 @@ def main():
                 best = dict(rmse=r['rmse'], step=step)
                 since = 0
                 meta = dict(state_kind=args.state, target_kind=args.target,
+                            arch=args.arch,
                             c1_scale=C1_SCALE, state_dim=ns,
                             hidden1=args.hidden1, hidden2=args.hidden2,
                             n_params=n_par, bias0=bias0, best_step=step,
@@ -211,6 +231,7 @@ def main():
     ckpt = os.path.join(args.out, 'c1_best.pt')
     if not os.path.exists(ckpt):
         meta = dict(state_kind=args.state, target_kind=args.target,
+                    arch=args.arch,
                     c1_scale=C1_SCALE, state_dim=ns,
                     hidden1=args.hidden1, hidden2=args.hidden2,
                     n_params=n_par, bias0=bias0, best_step=step,

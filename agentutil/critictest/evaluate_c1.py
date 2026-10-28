@@ -29,6 +29,7 @@ import torch  # noqa: E402
 
 import common as C  # noqa: E402
 import evaluate as E0  # noqa: E402
+from model import Critic
 from train_c1 import C1_SCALE, build_state, c1_from_steps, inverse_of, predict
 
 SPLIT_NAMES = ('train', 'val', 'test', 'real')
@@ -38,8 +39,11 @@ U_EDGES = (3.5, 5.0, 7.0, 9.0, 11.0, 13.0, 16.0, 20.0, 25.001)
 def load_ckpt(path):
     ck = torch.load(path, map_location='cpu', weights_only=False)
     m = ck['meta']
-    q = C.make_critic(m['state_dim'], 1, m.get('hidden1', 16),
-                      m.get('hidden2', 100), seed=None, bias=m.get('bias0'))
+    if m.get('arch', 'v1') == 'v6':
+        q = Critic(m['state_dim'], 1, arch='v6')
+    else:
+        q = C.make_critic(m['state_dim'], 1, m.get('hidden1', 16),
+                          m.get('hidden2', 100), seed=None, bias=m.get('bias0'))
     q.load_state_dict(ck['model'])
     q.eval()
     return q, m
@@ -188,12 +192,14 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
 
     print('\n' + '=' * 108)
     print('五步 C1 critic 评价：%s' % os.path.abspath(ckpt_path))
-    print('state=%s | target=%s | 参数 %s | C1 = Σ[PF+20(PF−3)+]'
-          % (ck['state_kind'], ck['target_kind'], ck.get('n_params')))
+    print('arch=%s | state=%s | target=%s | 参数 %s | C1 = Σ[PF+20(PF−3)+]'
+          % (ck.get('arch', 'v1'), ck['state_kind'], ck['target_kind'],
+             ck.get('n_params')))
     print('=' * 108)
 
     metrics = dict(checkpoint=os.path.abspath(ckpt_path),
                    data=os.path.abspath(data_path),
+                   arch=ck.get('arch', 'v1'),
                    state_kind=ck['state_kind'], target_kind=ck['target_kind'],
                    n_params=ck.get('n_params'), splits={}, per_u_bin=[],
                    per_family={}, baseline={}, detection={}, gradient={})
