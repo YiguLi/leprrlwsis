@@ -127,11 +127,12 @@ R²→**0.938**（RMSE 3.03→1.13 MW）；再加 `u0` 后 R²→**0.996**（RMS
 逐台逐点有效风速（25/30 维）没有额外收益（R² 0.939/0.995），且依赖动作、
 是 oracle 特征（其 autograd 不是真实 ∂F5/∂a）⇒ 可部署的强特征是 `useq/useq6`。
 **单步 PF**（详见 [critictest/README_pf.md](critictest/README_pf.md)）：
-给定 `(u_prev,u_cur,a)` 时 PF 是确定性的；PER critic（14k）test
-`R²=0.9996 / RMSE=0.027 MW`，`PF>3` 检出 `AUC=1.0 / F1=0.993`；
-`u2` 状态的 `∂PF/∂a` 为 `r=0.955 / 斜率=1.045 / 符号=0.96 / 余弦 0.88`。
-⚠ 若状态加 `P_prev`（动作相关），成本仍 0.9996 但梯度塌成 `r=0.025 / 斜率=0.002`
-—— 动作相关特征会制造 shortcut，做 cost critic 时按“是否要梯度”选状态。
+真实口径 `PF=|P(u_cur,a)-P(u_prev,a_prev)|`，`a_prev` 独立、`P_prev` 是固定过去量。
+`u2p=(u_prev,u_cur,P_prev)` 的 PER critic（14k）test **R²=0.998857 / RMSE=0.0609 MW**，
+`PF>3` 检出 **AUC=0.9998 / F1=0.9834**；`∂PF/∂a` 为
+**r=0.9635 / 斜率=0.9643 / 符号=0.905 / 89.8% 点余弦>0.8**。
+去掉 `P_prev`（`u2`）成本掉到 R²=0.681 ⇒ `P_prev` 是必要因果状态。
+早期“u2p 梯度塌陷”是受控数据把 `a_prev` 和 `a` 设成同一个造成的假象，已更正。
 **逐步奖励分解 critic**（详见 [critictest/README_step_decomp.md](critictest/README_step_decomp.md)）：
 两个变体 —— `arch=film`（文档原宽度，183k）与 `arch=per`（用户给定 PER 隐藏层，
 14.5k）。film：test F5 RMSE 3.1005（f5n 3.0832，显著差 0.017 MW），

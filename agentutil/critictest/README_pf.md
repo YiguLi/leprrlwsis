@@ -23,7 +23,7 @@ PF = |P(u_cur, a)  −  P(u_prev, a_prev)|
 | `aifflor_pf_scalar.npz` | 与当前 `a` 相同（受控口径） | 早期对照；说明 `P_prev` 口径的影响 |
 
 两文件都是 FFC 相邻两步、按天划分 136/29/29 天、40k/5k/5k + 3k real。
-真实口径下 PF 均值 **1.851**、sd **1.914**、范围 0–20.39 MW。
+真实口径下 PF 均值 **1.838**、sd **1.890**、范围 0–20.39 MW。
 
 ## 网络
 
@@ -37,7 +37,7 @@ state (u_prev/10, u_cur/10, P_prev/5)  (3 维)
 
 - 参数量 **14,025**；target 同构、`τ=1e-3` 软更新（监督任务不参与 loss）；
 - 目标 `PF/5`；Adam `1e-3` 余弦到 `1e-4`，batch 256，40k 步；
-- 真实口径 best step=??（见 `results/pf_sep_u2p/summary.txt`）。
+- 真实口径 best step=38,000（val RMSE 0.0650 MW）。
 
 ## 主结果：真实口径（`a_prev` 独立）
 
