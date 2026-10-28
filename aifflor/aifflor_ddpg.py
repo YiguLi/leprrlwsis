@@ -44,7 +44,7 @@ class SP_TD3(object):
                  cost_critic_mode='max',
                  wt_noise=0.05, sig_noise_max=0.2, sig_noise_min=0.01,
                  wt_noise_floor=0.01,
-                 nstep=1, target_agg='min'):
+                 nstep=1, target_agg='min', critic_nb_states=None):
 
         # Determine device first
         self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -54,6 +54,12 @@ class SP_TD3(object):
             self.seed(args.seed)
 
         self.nb_states = nb_states
+        # 上层 critic 可以比 actor 多看特权风速（asymmetric critic）。
+        # None / 等于 nb_states ⇒ 与 actor 同维，历史路径逐位不变。
+        self.critic_nb_states = int(critic_nb_states or nb_states)
+        if self.critic_nb_states < self.nb_states:
+            raise ValueError('critic_nb_states(%d) < nb_states(%d)'
+                             % (self.critic_nb_states, self.nb_states))
         self.nb_actions = nb_actions
         # L 层观测标记: myfunc 测试函数用它区分 5 维规则原配料观测
         # 与 PER 基线 5 维观测 (两者 nb_states 同为 5, 无法按维度区分).
@@ -79,21 +85,21 @@ class SP_TD3(object):
 
         # ---- TD3: twin critics per channel ----
         # profit channel: critic_p / critic_p2
-        self.critic_p = Critic(self.nb_states, self.nb_actions, **critic_cfg)
-        self.critic_target_p = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_p = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_p = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_p = Adam(self.critic_p.parameters(), lr=args.rate)
 
-        self.critic_p2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
-        self.critic_target_p2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_p2 = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_p2 = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_p2 = Adam(self.critic_p2.parameters(), lr=args.rate)
 
         # cost channel: critic_c / critic_c2
-        self.critic_c = Critic(self.nb_states, self.nb_actions, **critic_cfg)
-        self.critic_target_c = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_c = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_c = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_c = Adam(self.critic_c.parameters(), lr=args.rate)
 
-        self.critic_c2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
-        self.critic_target_c2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_c2 = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_c2 = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_c2 = Adam(self.critic_c2.parameters(), lr=args.rate)
 
         hard_update(self.actor_target, self.actor)  # Make sure target is with the same weight
@@ -327,10 +333,14 @@ class SP_TD3(object):
         terminal_batch = to_tensor(terminal_batch).to(self.device)
         weights = torch.Tensor(weights).to(self.device)
 
+        # asymmetric critic: memory 里存完整 critic state；actor 只看前 nb_states 维
+        actor_state_batch = state_batch[:, :self.nb_states]
+        actor_next_state_batch = next_state_batch[:, :self.nb_states]
+
         # ---- TD3: target policy smoothing (clipped Gaussian noise,
         #      scaled per dimension by action amplitude) ----
         amp_t = torch.tensor(self.action_amp, dtype=torch.float32, device=self.device)
-        a_next = self._act(self.actor_target, next_state_batch)
+        a_next = self._act(self.actor_target, actor_next_state_batch)
         noise = torch.randn_like(a_next) * (self.policy_noise * amp_t)
         noise = noise.clamp(-self.noise_clip * amp_t, self.noise_clip * amp_t)
         a_smoothed = a_next + noise
@@ -405,8 +415,8 @@ class SP_TD3(object):
         # ---- k=1 的 1-step 监督模型: f(s,a) ≈ r1/s_p, c1/s_c（目标无 bootstrap）----
         if self.aux_model:
             self.aux_r.zero_grad(); self.aux_c.zero_grad()
-            _pr = self.aux_r([state_batch, action_batch])
-            _cc = self.aux_c([state_batch, action_batch])
+            _pr = self.aux_r([actor_state_batch, action_batch])
+            _cc = self.aux_c([actor_state_batch, action_batch])
             _lr = torch.mean(torch.mean((_pr - profit_batch) ** 2, dim=1))
             _lc = torch.mean(torch.mean((_cc - cost_batch) ** 2, dim=1))
             (_lr + _lc).backward()
@@ -426,7 +436,7 @@ class SP_TD3(object):
             # ⚠ 旧写法利润塔用 `self.actor(state_batch)`（未投影），成本塔用 `_act`（投影）
             #   ⇒ 开 --farm_level/--scalar_wt 时两条通道评估的是**不同动作**，
             #   利润梯度跑到动作流形之外。此处统一走 `_act`（未开投影时逐位等价）。
-            _a_cur = self._act(self.actor, state_batch)
+            _a_cur = self._act(self.actor, actor_state_batch)
             min_p_cur = self._pair_min(
                 self.critic_p([state_batch, _a_cur]),
                 self.critic_p2([state_batch, _a_cur]))
@@ -441,7 +451,8 @@ class SP_TD3(object):
             _crit = min_p_cur - self.lam * min_c_cur
             if self.aux_model:
                 # k=1 model-based 策略改进: 用 1-step 模型的梯度（无 bootstrap 噪声）
-                _aux = self.aux_r([state_batch, _a_cur]) - self.lam * self.aux_c([state_batch, _a_cur])
+                _aux = (self.aux_r([actor_state_batch, _a_cur])
+                        - self.lam * self.aux_c([actor_state_batch, _a_cur]))
                 # 预热: aux 前 aux_warmup 次更新不参与（避免用没学好的模型）
                 _beta = self.aux_mix * min(1.0, self.aux_count / max(1, self.aux_warmup))
                 _obj = _beta * _aux + (1.0 - _beta) * _crit

@@ -627,7 +627,9 @@ def q_cost_rate(agent, s_t, a_t=None, horizon='infinite', agg=None, gamma=None,
         a_given = (torch.as_tensor(a_np2) if dev is None
                    else torch.as_tensor(a_np2, device=dev))
     with torch.no_grad():
-        act = agent.actor(s) if a_given is None else a_given
+        # asymmetric critic: s 是完整 critic state，actor 只看前 nb_states 维
+        s_actor = s[:, :int(getattr(agent, 'nb_states', s.shape[1]))]
+        act = agent.actor(s_actor) if a_given is None else a_given
         q1 = float(agent.critic_c([s, act]).reshape(-1)[0])
         q2 = float(agent.critic_c2([s, act]).reshape(-1)[0])
     _agg = HSRL_DUAL_Q_AGG if agg is None else str(agg)
@@ -690,7 +692,8 @@ def policy_batch_cost_rate(agent, n=HSRL_DUAL_RECENT_N, horizon='infinite', agg=
     dev = getattr(agent, 'device', None)
     s = torch.as_tensor(s_np) if dev is None else torch.as_tensor(s_np, device=dev)
     with torch.no_grad():
-        act = agent.actor(s)
+        s_actor = s[:, :int(getattr(agent, 'nb_states', s.shape[1]))]
+        act = agent.actor(s_actor)
         q1 = agent.critic_c([s, act]).reshape(-1)
         q2 = agent.critic_c2([s, act]).reshape(-1)
     _agg = HSRL_DUAL_Q_AGG if agg is None else str(agg)

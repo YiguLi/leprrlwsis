@@ -126,6 +126,27 @@ import hsrl_warmup as hwarm       # warmup 调度 + 规则下层 + transition �
 RUN_TAG = 'aifflor'
 
 
+def _append_wind5_H(norm_obs, obs, env, args):
+    """上层 critic 专用：在原 obs 后追加 u2..u5（u1 已含在 obs 中）。
+
+    `--critic_wind5 0`（默认）⇒ 原样返回，历史路径逐位不变。
+    这些风速**只进入 critic**；actor 仍用原 `norm_obs`。
+    """
+    if not int(getattr(args, 'critic_wind5', 0) or 0):
+        return norm_obs
+    ups = env._upcoming_wind(4)
+    u1 = float(obs[1])
+    if ups is None:
+        ups = np.full(4, u1, dtype=float)
+    else:
+        ups = np.asarray(ups, dtype=float).reshape(-1)[:4]
+        if ups.size < 4:
+            pad = ups[-1] if ups.size else u1
+            ups = np.concatenate([ups, np.full(4 - ups.size, pad)])
+    return np.concatenate([np.asarray(norm_obs, dtype=float).reshape(-1),
+                           ups / 10.0])
+
+
 def init_wt_action_bias(agent, lo=0.05, hi=0.45, sig_value=0.0, verbose=True):
     """把 actor 输出层前 5 维 (WT 轴向诱导因子 a) 的 bias 初始化到“中性宽带”。
 
@@ -290,7 +311,8 @@ def train(num_iterations_H,
                 applied_action_H, penalty_NN_H = CheckAction(original_action_H)
             # 越界乘性系数 (每块一个 H 动作 ⇒ 块内恒定; 系数<=0 时恒 1.0 ⇒ 旧口径逐位不变)
             viol_derate = violation_derate(original_action_H, args.viol_derate)
-            norm_observation_H = norm_observation
+            norm_observation_H = _append_wind5_H(
+                norm_observation, observation, env, args)
             pw_tru = env.PowerOutput(observation[1], applied_action_H)
             # SOC 目标 (块级固定) —— 上层信号语义
             soc_signal = float(applied_action_H[5])
@@ -390,6 +412,8 @@ def train(num_iterations_H,
         norm_observation2 = Normalize_H(observation2,
                                        phase_minute_of_day(episode_steps + 1),
                                        phase_mode, phase_table)
+        norm_observation2_H = _append_wind5_H(
+            norm_observation2, observation2, env, args)
 
         # ================================================================
         # 上层 H 奖励/成本 (非分段, 与 td3perrb 同口径)
@@ -483,7 +507,7 @@ def train(num_iterations_H,
             bias_init.on_block_end(step, sum_r1, sum_c1, agent_H)
 
             agent_H.observe_jump(norm_observation_H, original_action_H,
-                                 sum_r1, sum_c1, norm_observation2, done)
+                                 sum_r1, sum_c1, norm_observation2_H, done)
             # H 层 EMA 对偶上升 —— 用块实际成本 sum_c1 更新 lam1 (与 d_block_H 同口径)
             if step > args.warmup:
                 agent_H.update_ema_cost(sum_c1)
@@ -1142,7 +1166,8 @@ def train_hsrl(num_iterations_H,
             g_raw = float(original_action_H[5])
             g_applied = float(applied_action_H[5])
             viol_derate = violation_derate(original_action_H, args.viol_derate)
-            norm_observation_H = norm_observation
+            norm_observation_H = _append_wind5_H(
+                norm_observation, observation, env, args)
             pw_tru = env.PowerOutput(observation[1], applied_action_H)
             pb_l = list()
 
@@ -1216,6 +1241,8 @@ def train_hsrl(num_iterations_H,
         norm_observation2 = Normalize_H(observation2,
                                         phase_minute_of_day(episode_steps + 1),
                                         phase_mode, phase_table)
+        norm_observation2_H = _append_wind5_H(
+            norm_observation2, observation2, env, args)
 
         # ================================================================
         # H 奖励: r1 = pr·P_G·dt − pen5 − pen6（**无 bessdeg**；**无块末 gap 罚**）
@@ -1291,7 +1318,7 @@ def train_hsrl(num_iterations_H,
         if episode_steps % 5 == 4:
             bias_init.on_block_end(step, sum_r1, sum_c1, agent_H)
             agent_H.observe_jump(norm_observation_H, original_action_H,
-                                 sum_r1, sum_c1, norm_observation2, done)
+                                 sum_r1, sum_c1, norm_observation2_H, done)
             done_L = True
         hwarm.fill_bess_transition(
             agent_L, norm_observation_L, original_action_L, r2, c2,
@@ -2001,6 +2028,9 @@ if __name__ == "__main__":
                         help='critic 输出层权重初始化: 3e3=历史(±3e-3); fanin=PyTorch 默认(±1/√fan_in≈0.14)')
     parser.add_argument('--critic_action_first', default=0, type=int,
                         help='1 => critic 的动作从第一层进网（fc1 = nb_states+nb_actions -> 4*hidden1；默认 0=旧口径）')
+    parser.add_argument('--critic_wind5', default=0, type=int,
+                        help='1 => 上层 critic 输入追加 u2..u5（u1 已在 obs；actor 仍 4 维）。'
+                             '默认 0=关闭，历史路径逐位不变')
     parser.add_argument('--diag_u', default=-1.0, type=float,
                         help='>=0 ⇒ 全训练期恒定风速 [m/s]（实验 1-S1）')
     parser.add_argument('--diag_pr', default=-1.0, type=float,
@@ -2287,9 +2317,14 @@ if __name__ == "__main__":
 
     # 上层 H: TD3 + EMA 实际成本对偶 (lam1 ∈ [3, 100], 初始 5.0) —— 与 td3perrb 一致
     nb_states_H = 4 + PHASE_DIM[int(getattr(args, 'phase_feat', 0))]
-    print('H nb_states = {} (4 base + {} phase dims, --phase_feat={})'.format(
-        nb_states_H, PHASE_DIM[int(getattr(args, 'phase_feat', 0))], args.phase_feat))
+    _wind5 = bool(int(getattr(args, 'critic_wind5', 0) or 0))
+    critic_nb_states_H = nb_states_H + (4 if _wind5 else 0)
+    print('H nb_states = {} (4 base + {} phase dims, --phase_feat={}) | '
+          'critic_nb_states = {} (--critic_wind5={})'.format(
+              nb_states_H, PHASE_DIM[int(getattr(args, 'phase_feat', 0))],
+              args.phase_feat, critic_nb_states_H, args.critic_wind5))
     agent_H = SP_TD3(nb_states=nb_states_H, nb_actions=6, args=args,
+                     critic_nb_states=critic_nb_states_H,
                      lam_max=(_HCFG['lam_max'] if _HCFG else 100.0), lam_min=(_HCFG['lam_min'] if _HCFG else 3.0),
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                      record_update_stats=True,

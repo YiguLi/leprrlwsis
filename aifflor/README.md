@@ -310,6 +310,30 @@ corr(WFSim, FLORIS 标定后) = 0.999959        ← 轨迹几乎一致
 * 若要与 WFSim 精确对齐：把观测按 FLORIS 口径归一化，或训练时把 reward/cost
   统一乘 `1/1.037`（这正是早先实测的 `COST_SCALE` 等效值 1.816→0.972 的同一件事）。
 
+### 上层 critic 五风速（`--critic_wind5 1`）
+
+默认 `--critic_wind5 0`：上层 actor/critic 都是原 4 维 `obs`，历史路径逐位不变。
+
+`--critic_wind5 1` 时：
+
+```text
+actor  state  = 原 obs (4+phase)                     # 不看未来风速
+critic state  = 原 obs + [u2,u3,u4,u5]/10            # u1 已含在 obs 中
+```
+
+- 五风速来自 `env._upcoming_wind(4)`（块首当前步 `u1` 之后的四步）；
+- 这是 **asymmetric critic**：memory 存完整 critic state；`update_policy` 里 actor 只取前
+  `nb_states` 维，critics 用完整 state；`q_cost_rate` / `policy_batch_cost_rate` 也做同样切片；
+- actor 的 `select_action`、测试函数仍只用原 `obs`，不会把未来风速带进决策；
+- 与 v6 组合示例：
+
+```powershell
+python aifflor/aifflor_main.py --critic_arch v6 --critic_wind5 1 ...
+```
+
+实现入口：`_append_wind5_H`（`aifflor_main.py`）、`SP_TD3(critic_nb_states=...)`
+（`aifflor_ddpg.py`）、`aifflor_hsrl` 的 actor 切片。
+
 ### ⚠ 两个**不能**平移的东西（别混淆）
 
 1. **`P_F` 平滑阈值（`P_F_LIMIT = 3 MW`）、`W_GAP = 10 MW`、`L_CLIP_CAP = 20 MW`
