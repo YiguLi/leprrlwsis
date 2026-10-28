@@ -9,6 +9,7 @@
 >   按 `macro_critic_step_reward_decomposition_architecture.md`）见
 >   [README_step_decomp.md](README_step_decomp.md)。
 > * **单步 PF critic**（成本判别 + 行为梯度）见 [README_pf.md](README_pf.md)。
+> * **五步块整体 C1 critic**（重尾成本 + 折点分组梯度）见 [README_c1.md](README_c1.md)。
 
 ## 一句话结论
 

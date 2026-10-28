@@ -99,6 +99,9 @@
 | `critictest/train_pf.py` | PER critic 判单步 PF（`u1/u2/u2p/u2d` 状态，`pf/pfu3` 目标） | `python agentutil/critictest/train_pf.py --state u2 --target pf` |
 | `critictest/evaluate_pf.py` | 单步 PF 成本精度、`PF>3` 检出（AUC/F1）、`∂PF/∂a` 梯度 | `python agentutil/critictest/evaluate_pf.py` |
 | `critictest/README_pf.md` | 单步 PF 任务、成本/梯度结果、`P_prev` shortcut 结论 | — |
+| `critictest/train_c1.py` | **五步块整体 C1** critic：`C1=Σ[PF+20(PF−3)+]`，`useq/useq6` 状态，`c1/logc1` 目标 | `python agentutil/critictest/train_c1.py --state useq6 --target logc1` |
+| `critictest/evaluate_c1.py` | C1 成本精度（含 log1p）、`C1>15` 检出、`∂C1/∂a` 梯度（分折点/平滑组） | `python agentutil/critictest/evaluate_c1.py` |
+| `critictest/README_c1.md` | 五步 C1 结果、重尾/目标参数化、折点分组梯度结论 | — |
 | `critictest/step_decomp.py` | **逐步奖励分解 critic**：state/action 64 编码 + FiLM + 192→256→256(残差)→128 + 共享逐步 reward 头（5 阶段嵌入）+ 终端头 + 固定 QComposer | — |
 | `critictest/train_step_decomp.py` | 训练 `L=L_sum+λ_r L_r+λ_B L_B`（纯监督无宏 TD；B 目标=0） | `python agentutil/critictest/train_step_decomp.py` |
 | `critictest/evaluate_step_decomp.py` | 评价：F5、逐步 5 阶段、B、基线/monolithic 对照、梯度逐维+余弦、图 | `python agentutil/critictest/evaluate_step_decomp.py` |
@@ -133,6 +136,14 @@ R²→**0.938**（RMSE 3.03→1.13 MW）；再加 `u0` 后 R²→**0.996**（RMS
 **r=0.9635 / 斜率=0.9643 / 符号=0.905 / 89.8% 点余弦>0.8**。
 去掉 `P_prev`（`u2`）成本掉到 R²=0.681 ⇒ `P_prev` 是必要因果状态。
 早期“u2p 梯度塌陷”是受控数据把 `a_prev` 和 `a` 设成同一个造成的假象，已更正。
+**五步块整体 C1**（详见 [critictest/README_c1.md](critictest/README_c1.md)）：
+`C1=Σ[PF+20(PF−3)+]` 是重尾成本（均值 20.4/sd 39.5，10.3% 步过 3 MW）。
+`useq6+logc1`：test R²=0.9607 / RMSE 7.91 / MAE 2.54 / log1p R²=0.985，
+`C1>15` 检出 AUC=0.9968/F1=0.9449；`∂C1/∂a` r=0.9229 / 斜率=0.965 /
+符号=0.952 / 余弦 0.885 / 94.2% 点余弦>0.8。
+严格只用块内 `u1..u5`（`useq`）时 R²=0.883、梯度 r=0.871；
+raw `c1` 目标 RMSE 更低（5.70）但梯度 r=0.927、斜率=0.796、余弦=0.530、
+23.5% 反向 ⇒ 做梯度必须用 `logc1`。
 **逐步奖励分解 critic**（详见 [critictest/README_step_decomp.md](critictest/README_step_decomp.md)）：
 两个变体 —— `arch=film`（文档原宽度，183k）与 `arch=per`（用户给定 PER 隐藏层，
 14.5k）。film：test F5 RMSE 3.1005（f5n 3.0832，显著差 0.017 MW），
