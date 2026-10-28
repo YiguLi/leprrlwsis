@@ -74,7 +74,8 @@ TARGET_KINDS = ('sp', 'p', 'log', 'sp5', 'p5', 'logp5', 'sp5n',
                 'f5', 'f5n', 'f5u3', 'logf5')
 WINDOW5_KINDS = ('sp5', 'p5', 'logp5', 'sp5n', 'f5', 'f5n', 'f5u3', 'logf5')
 FLUCT_KINDS = ('f5', 'f5n', 'f5u3', 'logf5')
-FEATURE_KINDS = ('u10', 'u3', 'useq', 'useq6', 'ueff', 'ueff6')
+FEATURE_KINDS = ('u10', 'u3', 'u01', 'causal', 'causal_nod1',
+                 'causal_hist', 'useq', 'useq6', 'ueff', 'ueff6')
 STATE_KINDS = FEATURE_KINDS
 
 
@@ -466,6 +467,37 @@ def build_state(ds, kind='u10'):
         return state_features(ds['u'], 'u10')
     if kind == 'u3':
         return state_features(ds['u'], 'u3')
+    if kind == 'u01':
+        return (np.column_stack([ds['u0'].astype(np.float64),
+                                 ds['u'].astype(np.float64)]) / 10.0
+                ).astype(np.float32)
+    if kind in ('causal', 'causal_nod1'):
+        # 决策时已知：u0/u1、P0/P1、d1=|P1-P0|；不含任何 u2..u5
+        u0 = ds['u0'].astype(np.float64)
+        u1 = ds['u'].astype(np.float64)
+        p0 = ds['p_prev'].astype(np.float64)
+        p1 = ds['p_steps'][:, 0].astype(np.float64)
+        d1 = ds['f5'].astype(np.float64) - ds['f4'].astype(np.float64)
+        parts = [u0 / 10.0, u1 / 10.0, (u1 - u0) / 10.0,
+                 p0 / 5.0, p1 / 5.0]
+        if kind == 'causal':
+            parts.append(d1 / 5.0)
+        return np.column_stack(parts).astype(np.float32)
+    if kind == 'causal_hist':
+        # 因果：过去 history+1 步风速（含 u0,u1）+ P0/P1 + 日内相位；无未来风
+        if 'u_hist' not in ds.files or 'tod' not in ds.files:
+            raise KeyError('数据集缺少 u_hist/tod（生成时加 --history K）')
+        u0 = ds['u0'].astype(np.float64)
+        u1 = ds['u'].astype(np.float64)
+        p0 = ds['p_prev'].astype(np.float64)
+        p1 = ds['p_steps'][:, 0].astype(np.float64)
+        tod = ds['tod'].astype(np.float64)
+        ang = 2.0 * np.pi * tod
+        parts = [ds['u_hist'].astype(np.float64) / 10.0,
+                 (u1 - u0).reshape(-1, 1) / 10.0,
+                 p0.reshape(-1, 1) / 5.0, p1.reshape(-1, 1) / 5.0,
+                 np.sin(ang).reshape(-1, 1), np.cos(ang).reshape(-1, 1)]
+        return np.column_stack(parts).astype(np.float32)
     if kind == 'useq':
         return (ds['u_seq'].astype(np.float64) / 10.0).astype(np.float32)
     if kind == 'useq6':

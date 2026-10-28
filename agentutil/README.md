@@ -95,6 +95,10 @@
 | `critictest/README_fluct.md` | 五步波动任务的探索、结果、最佳方法与局限 | — |
 | `critictest/diagnose_learning.py` | **学习诊断**：数据对齐 / 预测方差校准 / kNN 条件均值 / 合成函数过拟合 / 真实子集过拟合 / label 置换 | `python agentutil/critictest/diagnose_learning.py` |
 | `critictest/add_ueff_features.py` | 给 F5 数据集补**逐台逐点有效风速** `u_eff(t,i)`（FLORIS `turbine_average_velocities`）+ `u_eff0`；动作相关 oracle 特征 | `python agentutil/critictest/add_ueff_features.py` |
+| `critictest/make_dataset_pf.py` | **单步 PF** 数据集：`PF=|P(u_cur,a)-P(u_prev,a)|`，按天划分，scalar 动作 | `python agentutil/critictest/make_dataset_pf.py` |
+| `critictest/train_pf.py` | PER critic 判单步 PF（`u1/u2/u2p/u2d` 状态，`pf/pfu3` 目标） | `python agentutil/critictest/train_pf.py --state u2 --target pf` |
+| `critictest/evaluate_pf.py` | 单步 PF 成本精度、`PF>3` 检出（AUC/F1）、`∂PF/∂a` 梯度 | `python agentutil/critictest/evaluate_pf.py` |
+| `critictest/README_pf.md` | 单步 PF 任务、成本/梯度结果、`P_prev` shortcut 结论 | — |
 | `critictest/step_decomp.py` | **逐步奖励分解 critic**：state/action 64 编码 + FiLM + 192→256→256(残差)→128 + 共享逐步 reward 头（5 阶段嵌入）+ 终端头 + 固定 QComposer | — |
 | `critictest/train_step_decomp.py` | 训练 `L=L_sum+λ_r L_r+λ_B L_B`（纯监督无宏 TD；B 目标=0） | `python agentutil/critictest/train_step_decomp.py` |
 | `critictest/evaluate_step_decomp.py` | 评价：F5、逐步 5 阶段、B、基线/monolithic 对照、梯度逐维+余弦、图 | `python agentutil/critictest/evaluate_step_decomp.py` |
@@ -122,6 +126,12 @@ R² 0.5514 / MAPE 44.56%，baseline 3.4893，改善 **0.459 MW（13%）**；
 R²→**0.938**（RMSE 3.03→1.13 MW）；再加 `u0` 后 R²→**0.996**（RMSE 0.30 MW）。
 逐台逐点有效风速（25/30 维）没有额外收益（R² 0.939/0.995），且依赖动作、
 是 oracle 特征（其 autograd 不是真实 ∂F5/∂a）⇒ 可部署的强特征是 `useq/useq6`。
+**单步 PF**（详见 [critictest/README_pf.md](critictest/README_pf.md)）：
+给定 `(u_prev,u_cur,a)` 时 PF 是确定性的；PER critic（14k）test
+`R²=0.9996 / RMSE=0.027 MW`，`PF>3` 检出 `AUC=1.0 / F1=0.993`；
+`u2` 状态的 `∂PF/∂a` 为 `r=0.955 / 斜率=1.045 / 符号=0.96 / 余弦 0.88`。
+⚠ 若状态加 `P_prev`（动作相关），成本仍 0.9996 但梯度塌成 `r=0.025 / 斜率=0.002`
+—— 动作相关特征会制造 shortcut，做 cost critic 时按“是否要梯度”选状态。
 **逐步奖励分解 critic**（详见 [critictest/README_step_decomp.md](critictest/README_step_decomp.md)）：
 两个变体 —— `arch=film`（文档原宽度，183k）与 `arch=per`（用户给定 PER 隐藏层，
 14.5k）。film：test F5 RMSE 3.1005（f5n 3.0832，显著差 0.017 MW），

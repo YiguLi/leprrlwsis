@@ -63,6 +63,12 @@ def _scalar_actions(family, m, rng):
     return np.clip(c, 0.02, C.A_HI).reshape(-1, 1)
 
 
+def _hist_windows(days, starts, cols, history):
+    """`starts-history .. starts` 的 (N, history+1) 风速历史（含 u0,u1）。"""
+    off = np.arange(-int(history), 1, dtype=np.int64)
+    return days[starts[:, None] + off[None, :], cols[:, None]]
+
+
 def _stats(name, u, a, f5, f4, p5):
     u1 = u
     return dict(
@@ -84,6 +90,8 @@ def main():
     ap.add_argument('--n_test', type=int, default=5000)
     ap.add_argument('--n_real_per_family', type=int, default=600)
     ap.add_argument('--window', type=int, default=C.WINDOW)
+    ap.add_argument('--history', type=int, default=0,
+                    help='额外保存前 history 步风速历史（含 u0,u1；因果特征用）')
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--out', default=None,
                     help='默认：5 维动作用 aifflor_ua_f5.npz，'
@@ -123,7 +131,8 @@ def main():
 
     days, starts, cols = C.wind_window_pool(window=window, path=args.wind_csv)
     # 需要前一行 u0；且 u0 也要在 env 守卫区间
-    keep = starts >= 1
+    history = int(args.history)
+    keep = starts >= max(1, history)
     u0_pool = days[np.maximum(starts - 1, 0), cols]
     keep &= (u0_pool >= C.U_MIN) & (u0_pool <= C.U_MAX)
     starts, cols = starts[keep], cols[keep]
@@ -146,12 +155,17 @@ def main():
     for name, idx in (('train', idx_tr), ('val', idx_va), ('test', idx_te)):
         u_seq = C.windows_from_pool(days, starts[idx], cols[idx], window=window)
         u0 = days[starts[idx] - 1, cols[idx]]
+        u_hist = (_hist_windows(days, starts[idx], cols[idx], history)
+                  if history > 0 else None)
+        tod = ((starts[idx] % 1440).astype(np.float64) / 1440.0
+               if history > 0 else None)
         a = rng.uniform(C.A_LO, C.A_HI, size=(u_seq.shape[0], action_dim))
         t = time.time()
         f5, f4, p_steps, p_prev, a_eff = C.power_fluct(
             phys, u0, u_seq, a, chunk=args.chunk, verbose=True, window=window)
         p5 = p_steps.sum(1)
         splits.append(dict(name=name, code=len(splits), u_seq=u_seq, u0=u0,
+                           u_hist=u_hist, tod=tod,
                            a=a, a_eff=a_eff, p_steps=p_steps, p_prev=p_prev,
                            f5=f5, f4=f4, p5=p5,
                            family=np.full(u_seq.shape[0], -1, dtype=np.int16)))
@@ -164,6 +178,10 @@ def main():
     u_seq_r = C.windows_from_pool(days, starts[idx_re], cols[idx_re],
                                   window=window)
     u0_r = days[starts[idx_re] - 1, cols[idx_re]]
+    u_hist_r = (_hist_windows(days, starts[idx_re], cols[idx_re], history)
+                if history > 0 else None)
+    tod_r = ((starts[idx_re] % 1440).astype(np.float64) / 1440.0
+             if history > 0 else None)
     a_list, fam_list = [], []
     per = int(args.n_real_per_family)
     for j, fam in enumerate(families):
@@ -176,7 +194,8 @@ def main():
     f5_r, f4_r, p_steps_r, p_prev_r, ae_r = C.power_fluct(
         phys, u0_r, u_seq_r, a_r, chunk=args.chunk, verbose=True, window=window)
     p5_r = p_steps_r.sum(1)
-    splits.append(dict(name='real', code=3, u_seq=u_seq_r, u0=u0_r, a=a_r,
+    splits.append(dict(name='real', code=3, u_seq=u_seq_r, u0=u0_r,
+                       u_hist=u_hist_r, tod=tod_r, a=a_r,
                        a_eff=ae_r, p_steps=p_steps_r, p_prev=p_prev_r,
                        f5=f5_r, f4=f4_r, p5=p5_r, family=fam_r))
     print('  real  n=%6d  用时 %5.1fs  F5=[%.3f, %.3f]  mean=%.4f sd=%.4f'
@@ -186,6 +205,10 @@ def main():
     U1 = np.concatenate([sp['u_seq'][:, 0] for sp in splits]).astype(np.float32)
     USEQ = np.concatenate([sp['u_seq'] for sp in splits]).astype(np.float32)
     U0 = np.concatenate([sp['u0'] for sp in splits]).astype(np.float32)
+    UH = (np.concatenate([sp['u_hist'] for sp in splits]).astype(np.float32)
+          if history > 0 else None)
+    TOD = (np.concatenate([sp['tod'] for sp in splits]).astype(np.float32)
+           if history > 0 else None)
     A = np.concatenate([sp['a'] for sp in splits]).astype(np.float32)
     AE = np.concatenate([sp['a_eff'] for sp in splits]).astype(np.float32)
     F5 = np.concatenate([sp['f5'] for sp in splits]).astype(np.float32)
@@ -221,6 +244,7 @@ def main():
         source='aifflor / FLORIS (quasi-steady), FFC_speed_noise_1.csv windows',
         seed=int(args.seed), window=window, fluct=True,
         action_dim=int(action_dim), scalar_action=bool(scalar),
+        history_steps=history,
         physics=pmeta, anchor_u10_a13_mw=anchor,
         target_def='F5 = |P(u1,a)-P(u0,a)| + sum_{t=2..5}|P(ut,a)-P(u(t-1),a)|; '
                    'F4 = sum_{t=2..5}|...|',
@@ -240,10 +264,14 @@ def main():
 
     out = os.path.abspath(args.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    np.savez_compressed(out, u=U1, u_seq=USEQ, u0=U0, a=A, a_eff=AE,
-                        p=F5, f5=F5, f4=F4, p5=P5, p_steps=PS, p_prev=PP,
-                        split=SPLIT, family=FAM,
-                        meta=np.array(json.dumps(meta, ensure_ascii=False)))
+    save_kw = dict(u=U1, u_seq=USEQ, u0=U0, a=A, a_eff=AE,
+                   p=F5, f5=F5, f4=F4, p5=P5, p_steps=PS, p_prev=PP,
+                   split=SPLIT, family=FAM,
+                   meta=np.array(json.dumps(meta, ensure_ascii=False)))
+    if history > 0:
+        save_kw['u_hist'] = UH
+        save_kw['tod'] = TOD
+    np.savez_compressed(out, **save_kw)
     report = os.path.splitext(out)[0] + '.json'
     C.save_json(report, meta)
     print('\n' + '=' * 100)

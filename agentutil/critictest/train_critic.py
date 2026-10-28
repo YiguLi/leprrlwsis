@@ -86,9 +86,11 @@ def main():
     ap.add_argument('--target', default='sp', choices=list(C.TARGET_KINDS),
                     help='sp=1000·P/u³（默认）| p=P/10 | log=log P')
     ap.add_argument('--state_feat', default='u10', choices=list(C.FEATURE_KINDS),
-                    help='u10=[u1/10]（默认）| u3 | useq=[u1..u5]/10 | '
-                         'useq6=[u0..u5]/10 | ueff=逐台逐点有效风速/10 | '
-                         'ueff6=含 u0 的逐台有效风速')
+                    help='u10=[u1/10]（默认）| u3 | u01=[u0,u1]/10 | '
+                         'causal=u0,u1,P0,P1,d1（无未来风）| causal_nod1 | '
+                         'causal_hist=历史风速+P0/P1+相位（无未来风）| '
+                         'useq=[u1..u5]/10 | useq6=[u0..u5]/10 | '
+                         'ueff=逐台逐点有效风速/10 | ueff6=含 u0 的逐台有效风速')
     ap.add_argument('--hidden1', type=int, default=16, help='PER 默认 16')
     ap.add_argument('--hidden2', type=int, default=100, help='PER 默认 100')
     ap.add_argument('--steps', type=int, default=40000)
