@@ -93,6 +93,7 @@
 | `critictest/make_dataset_fluct.py` | **五步功率波动和**：`F5=|P1−P0|+Σ|P_t−P_{t−1}|`，窗口 + 前一行 `u0`，只把 `u1` 给网络、`a` 在 `u0..u5` 恒定 | `python agentutil/critictest/make_dataset_fluct.py` |
 | `critictest/compare_fluct.py` | 五步波动任务对照：`f5/f5u3/f5n`、三模型平均、`E[F5|u1]` 基线 + 配对 bootstrap | `python agentutil/critictest/compare_fluct.py` |
 | `critictest/README_fluct.md` | 五步波动任务的探索、结果、最佳方法与局限 | — |
+| `critictest/diagnose_learning.py` | **学习诊断**：数据对齐 / 预测方差校准 / kNN 条件均值 / 合成函数过拟合 / 真实子集过拟合 / label 置换 | `python agentutil/critictest/diagnose_learning.py` |
 | `critictest/step_decomp.py` | **逐步奖励分解 critic**：state/action 64 编码 + FiLM + 192→256→256(残差)→128 + 共享逐步 reward 头（5 阶段嵌入）+ 终端头 + 固定 QComposer | — |
 | `critictest/train_step_decomp.py` | 训练 `L=L_sum+λ_r L_r+λ_B L_B`（纯监督无宏 TD；B 目标=0） | `python agentutil/critictest/train_step_decomp.py` |
 | `critictest/evaluate_step_decomp.py` | 评价：F5、逐步 5 阶段、B、基线/monolithic 对照、梯度逐维+余弦、图 | `python agentutil/critictest/evaluate_step_decomp.py` |

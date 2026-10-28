@@ -145,6 +145,31 @@ real 上 `f5n − base = −0.2180`（CI `[−0.2648, −0.1714]`），同样显
 `farm_opt` 0.441/3.222，`low` 0.527/2.731，`high` 0.456/3.474。
 `cp_opt` 与 `high` 最难，符合"高轴向因子/强尾流区 F5 更非线性"的直觉。
 
+### 3.5 学习诊断：弱 R² 不是网络 bug
+
+`diagnose_learning.py` 的六项检查（scalar f5n，最新结果）：
+
+| 检查 | 结果 | 说明 |
+|---|---|---|
+| 数据对齐 | `u==u_seq[:,0]`；`f5−Σ|ΔP|` max 7.6e-6；手工重算 p_steps/p_prev 差 <1e-6 | 数据/标签没有错位 |
+| 合成确定性函数 | 1D/5D 的 PER critic 都能到 train R² **0.995** | 网络/优化器/训练循环能学 |
+| 预测方差校准 | test `pred_sd=3.367` vs `sqrt(R²)·true_sd=3.358` | 条件均值模型的精确签名；没有塌缩/膨胀 |
+| 非参数 kNN | k=200 test R² **0.5458**，网络 **0.5514** | 网络已略优于同输入的非参数条件均值 |
+| 真实 512 子集过拟合 | 16/100 train 0.641 / test 0.532；64/256 train 0.637 / test 0.533 | 不是“记不住训练集”的硬 bug；宽网络也不改善 |
+| label 置换 | 打乱后 train R² **0.387**（≈E[F5|u1] 基线），真实 **0.641** | 输入确实带信息，无标签泄漏 |
+
+结论：
+
+- **没有发现导致“学习羸弱”的网络/训练硬 bug**。同一套代码能把确定性函数拟合到
+  R² 0.995；数据对齐、梯度、预测尺度都正常。
+- R² 只有 ~0.55 的原因是**信息量**：只给 `u1` 时，`F5` 的剩余方差主要是
+  `u0,u2..u5` 的风速波动；kNN 与网络几乎同分，说明已经到条件均值天花板。
+- 训练集 R² 也不是 1（0.54–0.64），因为模型收敛到条件均值而不是记住噪声；
+  64/256 也不提升，说明不是容量不足。
+- 修复了一个**潜在**代码味道：`predict_power` 原先把 model 留在 `eval()`；
+  现在用 `try/finally` 恢复原模式。当前网络没有 dropout/BatchNorm，所以历史
+  数值不受影响。
+
 ## 4. 结论：什么是最好的方法
 
 * **纯 test 拟合**：`f5u3` 的名义 RMSE 最低（3.0787 / R² 0.49186），但与
@@ -197,7 +222,12 @@ $PY = 'C:\Users\yigul\anaconda3\envs\llmenhancedwsis\python.exe'
 & $PY agentutil\critictest\compare_fluct.py `
     --out agentutil\critictest\results\compare_fluct.json
 
-# 5) 标量动作（一个 action 控五台）重测 base 与 f5n
+# 5) 学习诊断（对齐/校准/kNN/合成过拟合/子集过拟合/置换）
+& $PY agentutil\critictest\diagnose_learning.py `
+    --data agentutil\critictest\data\aifflor_ua_f5_scalar.npz `
+    --ckpt agentutil\critictest\results\f5_scalar_f5n_16\critic_best.pt
+
+# 6) 标量动作（一个 action 控五台）重测 base 与 f5n
 & $PY agentutil\critictest\make_dataset_fluct.py --scalar_action `
     --out agentutil\critictest\data\aifflor_ua_f5_scalar.npz
 & $PY agentutil\critictest\train_critic.py `

@@ -562,31 +562,39 @@ def make_critic_pair(ns, na=NT, hidden1=16, hidden2=100, init_w=3e-3,
 def predict_power(model, u, a, target='sp', feature='u10', batch=8192,
                   window=1, norm=None):
     """用 critic 预测风场出力（单步 P 或五步和 P5）[MW]（eval / no_grad）。"""
+    was_training = model.training
     model.eval()
     u = np.asarray(u, dtype=np.float64).reshape(-1)
     a = action_matrix(a, u.size)
     out = np.empty(u.size, dtype=np.float64)
-    with torch.no_grad():
-        for s in range(0, u.size, int(batch)):
-            e = min(s + int(batch), u.size)
-            x = torch.as_tensor(state_features(u[s:e], feature))
-            aa = torch.as_tensor(a[s:e].astype(np.float32))
-            out[s:e] = model([x, aa]).cpu().numpy().reshape(-1)
+    try:
+        with torch.no_grad():
+            for s in range(0, u.size, int(batch)):
+                e = min(s + int(batch), u.size)
+                x = torch.as_tensor(state_features(u[s:e], feature))
+                aa = torch.as_tensor(a[s:e].astype(np.float32))
+                out[s:e] = model([x, aa]).cpu().numpy().reshape(-1)
+    finally:
+        model.train(was_training)
     return target_to_power(out, u, target, window=window, norm=norm)
 
 
 def predict_target(model, u, a, feature='u10', batch=8192):
     """网络原始输出（目标空间；sp 臂下就是 specific power s）。"""
+    was_training = model.training
     model.eval()
     u = np.asarray(u, dtype=np.float64).reshape(-1)
     a = action_matrix(a, u.size)
     out = np.empty(u.size, dtype=np.float64)
-    with torch.no_grad():
-        for s in range(0, u.size, int(batch)):
-            e = min(s + int(batch), u.size)
-            x = torch.as_tensor(state_features(u[s:e], feature))
-            aa = torch.as_tensor(a[s:e].astype(np.float32))
-            out[s:e] = model([x, aa]).cpu().numpy().reshape(-1)
+    try:
+        with torch.no_grad():
+            for s in range(0, u.size, int(batch)):
+                e = min(s + int(batch), u.size)
+                x = torch.as_tensor(state_features(u[s:e], feature))
+                aa = torch.as_tensor(a[s:e].astype(np.float32))
+                out[s:e] = model([x, aa]).cpu().numpy().reshape(-1)
+    finally:
+        model.train(was_training)
     return out
 
 
