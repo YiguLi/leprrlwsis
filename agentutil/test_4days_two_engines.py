@@ -736,7 +736,16 @@ class Tb:
         if not self.enabled:
             return None
         if run_name not in self.writers:
-            self.writers[run_name] = self._SW(os.path.join(self.root, run_name))
+            path = os.path.join(self.root, run_name)
+            # 同一个引擎被**重跑**时：把旧 run 归档（不删），免得 TB 里新旧曲线叠在一起
+            if _has_events(path):
+                bak = '%s.old-%s' % (path, time.strftime('%Y%m%d-%H%M%S'))
+                try:
+                    os.replace(path, bak)
+                    print('  [tb] 旧 run 已归档: %s' % os.path.basename(bak))
+                except OSError:
+                    pass
+            self.writers[run_name] = self._SW(path)
         return self.writers[run_name]
 
     def scalar(self, run_name, tag, value, step):
@@ -760,8 +769,23 @@ class Tb:
         self.writers = {}
 
 
+def _has_events(run_dir):
+    """该 TB run 目录里是否已有 event 文件。"""
+    try:
+        return any(n.startswith('events.out.tfevents') for n in os.listdir(run_dir))
+    except OSError:
+        return False
+
+
 def write_wind_tb(tb, days, df_wind):
-    """四天**日内风速**（step = 一天内第几分钟）写入公共 run `_wind`。"""
+    """四天**日内风速**（step = 一天内第几分钟）写入公共 run `_wind`。
+
+    风与引擎无关 ⇒ 只写一次：若 `_wind` 里已有 event 文件（前一次调用写过），直接跳过，
+    否则"两个引擎分两次命令跑"会在同一个 run 里塞进两套 step 0..1439 的同名曲线。
+    """
+    if tb.enabled and _has_events(os.path.join(tb.root, '_wind')):
+        print('TensorBoard: `_wind` 已存在（四天日内风速已记录），跳过重写')
+        return
     for i, d in enumerate(days, start=1):
         s = df_wind.iloc[:, d['iloc']].reset_index(drop=True)
         tag = 'wind/day{}_{}'.format(i, d['tag'])
