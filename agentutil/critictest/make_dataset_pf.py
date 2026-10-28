@@ -63,6 +63,9 @@ def main():
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--out', default='agentutil/critictest/data/aifflor_pf_scalar.npz')
     ap.add_argument('--chunk', type=int, default=4096)
+    ap.add_argument('--sep_prev_action', action='store_true',
+                    help='上一步用独立的 a_prev（P_prev=P(u_prev,a_prev)）；'
+                         '默认沿用受控口径 a_prev=a')
     args = ap.parse_args()
 
     t0 = time.time()
@@ -109,11 +112,21 @@ def main():
         u_prev = days[r_, c_]
         u_cur = days[r_ + 1, c_]
         a = rng.uniform(C.A_LO, C.A_HI, size=(n, 1))
-        p_prev, a_eff = C.power_of(phys, u_prev, a, chunk=args.chunk)
-        p_cur, _ = C.power_of(phys, u_cur, a_eff, chunk=args.chunk)
+        if args.sep_prev_action:
+            a_prev = rng.uniform(C.A_LO, C.A_HI, size=(n, 1))
+            p_prev, ae_prev = C.power_of(phys, u_prev, a_prev,
+                                         chunk=args.chunk)
+            p_cur, a_eff = C.power_of(phys, u_cur, a, chunk=args.chunk)
+        else:
+            a_prev = a.copy()
+            p_prev, a_eff = C.power_of(phys, u_prev, a, chunk=args.chunk)
+            ae_prev = a_eff
+            p_cur, _ = C.power_of(phys, u_cur, a_eff, chunk=args.chunk)
         pf = np.abs(p_cur - p_prev)
         splits.append(dict(name=name, code=len(splits), u_prev=u_prev,
-                           u_cur=u_cur, a=a, a_eff=a_eff, p_prev=p_prev,
+                           u_cur=u_cur, a=a, a_prev=a_prev,
+                           a_eff=a_eff, a_eff_prev=ae_prev,
+                           p_prev=p_prev,
                            p_cur=p_cur, pf=pf,
                            day=np.full(n, -1, dtype=np.int16),
                            family=np.full(n, -1, dtype=np.int16)))
@@ -134,11 +147,20 @@ def main():
     a_r = np.vstack(a_list)
     fam_r = np.concatenate(fam_list)
     day_r = c_.astype(np.int16)
-    p_prev_r, ae_r = C.power_of(phys, u_prev_r, a_r, chunk=args.chunk)
-    p_cur_r, _ = C.power_of(phys, u_cur_r, ae_r, chunk=args.chunk)
+    if args.sep_prev_action:
+        a_prev_r = rng.uniform(C.A_LO, C.A_HI, size=(len(a_r), 1))
+        p_prev_r, ae_prev_r = C.power_of(phys, u_prev_r, a_prev_r,
+                                         chunk=args.chunk)
+        p_cur_r, ae_r = C.power_of(phys, u_cur_r, a_r, chunk=args.chunk)
+    else:
+        a_prev_r = a_r.copy()
+        p_prev_r, ae_r = C.power_of(phys, u_prev_r, a_r, chunk=args.chunk)
+        ae_prev_r = ae_r
+        p_cur_r, _ = C.power_of(phys, u_cur_r, ae_r, chunk=args.chunk)
     pf_r = np.abs(p_cur_r - p_prev_r)
     splits.append(dict(name='real', code=3, u_prev=u_prev_r, u_cur=u_cur_r,
-                       a=a_r, a_eff=ae_r, p_prev=p_prev_r, p_cur=p_cur_r,
+                       a=a_r, a_prev=a_prev_r, a_eff=ae_r,
+                       a_eff_prev=ae_prev_r, p_prev=p_prev_r, p_cur=p_cur_r,
                        pf=pf_r, day=day_r, family=fam_r))
     print('  real  n=%6d  PF mean=%.4f sd=%.4f' % (pf_r.size, pf_r.mean(), pf_r.std()))
 
@@ -146,6 +168,8 @@ def main():
     UC = np.concatenate([sp['u_cur'] for sp in splits]).astype(np.float32)
     A = np.concatenate([sp['a'] for sp in splits]).astype(np.float32)
     AE = np.concatenate([sp['a_eff'] for sp in splits]).astype(np.float32)
+    AP = np.concatenate([sp['a_prev'] for sp in splits]).astype(np.float32)
+    AEP = np.concatenate([sp['a_eff_prev'] for sp in splits]).astype(np.float32)
     PP = np.concatenate([sp['p_prev'] for sp in splits]).astype(np.float32)
     PC = np.concatenate([sp['p_cur'] for sp in splits]).astype(np.float32)
     PF = np.concatenate([sp['pf'] for sp in splits]).astype(np.float32)
@@ -175,8 +199,13 @@ def main():
     meta = dict(created=datetime.datetime.now().isoformat(timespec='seconds'),
                 source='aifflor/FLORIS, FFC adjacent pairs, scalar action',
                 seed=int(args.seed), window=1, fluct=True,
-                target_def='PF=|P(u_cur,a)-P(u_prev,a)|',
-                state_note='u_prev/u_cur 两步风速；a 在两步相同（受控口径）',
+                target_def=('PF=|P(u_cur,a)-P(u_prev,a_prev)|'
+                            if args.sep_prev_action
+                            else 'PF=|P(u_cur,a)-P(u_prev,a)|'),
+                state_note=('u_prev/u_cur 两步风速；P_prev 用独立 a_prev（因果）'
+                            if args.sep_prev_action
+                            else 'u_prev/u_cur 两步风速；a 在两步相同（受控口径）'),
+                prev_action=('independent' if args.sep_prev_action else 'same'),
                 split_note='按天划分，real 用 test 天+结构化动作',
                 action_dim=1, scalar_action=True,
                 real_families=list(FAMILIES),
@@ -184,7 +213,8 @@ def main():
                 physics=C.physics_meta(phys))
     out = os.path.abspath(args.out)
     os.makedirs(os.path.dirname(out), exist_ok=True)
-    np.savez_compressed(out, u_prev=UP, u_cur=UC, a=A, a_eff=AE,
+    np.savez_compressed(out, u_prev=UP, u_cur=UC, a=A, a_prev=AP,
+                        a_eff=AE, a_eff_prev=AEP,
                         p_prev=PP, p_cur=PC, pf=PF, split=SPLIT,
                         family=FAM, day=DAY,
                         meta=np.array(json.dumps(meta, ensure_ascii=False)))

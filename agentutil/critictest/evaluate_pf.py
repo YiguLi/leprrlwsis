@@ -107,15 +107,24 @@ def gradient_check(model, ds, meta, n=400, delta=0.01, seed=123):
     sel = rng.choice(idx, size=min(n, idx.size), replace=False)
 
     upg, ucg, aeg = up[sel], uc[sel], ae[sel]
+    p_prev_g = ds['p_prev'].astype(np.float64)[sel]
+    dm = meta.get('data_meta', {}) if isinstance(meta, dict) else {}
+    prev_indep = (dm.get('prev_action') == 'independent')
     phys = C.build_physics(calibrated=False, power_scale=C.AT.LEVEL_COEF)
     gt = np.zeros(sel.size, dtype=np.float64)
     lo, hi = C.A_PHYS_LO, C.A_HI
-    for _ in (0,):
-        ap = np.clip(aeg + delta, lo, hi)
-        am = np.clip(aeg - delta, lo, hi)
-        ppp, _ = C.power_of(phys, upg, ap)
+    ap = np.clip(aeg + delta, lo, hi)
+    am = np.clip(aeg - delta, lo, hi)
+    if prev_indep:
+        # P_prev 是固定的过去量（a_prev 产生），对当前 a 的导数为 0
         pcp, _ = C.power_of(phys, ucg, ap)
+        pcm, _ = C.power_of(phys, ucg, am)
+        gt = (np.abs(pcp - p_prev_g) - np.abs(pcm - p_prev_g)) \
+            / (ap[:, 0] - am[:, 0])
+    else:
+        ppp, _ = C.power_of(phys, upg, ap)
         ppm, _ = C.power_of(phys, upg, am)
+        pcp, _ = C.power_of(phys, ucg, ap)
         pcm, _ = C.power_of(phys, ucg, am)
         gt = (np.abs(pcp - ppp) - np.abs(pcm - ppm)) / (ap[:, 0] - am[:, 0])
 
