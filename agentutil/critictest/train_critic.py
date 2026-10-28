@@ -53,8 +53,8 @@ def _split(ds):
     return (sp == 0, sp == 1, sp == 2, sp == 3)
 
 
-def _as_tensors(u, a, s, feature, target):
-    return (torch.as_tensor(C.state_features(u, feature)),
+def _as_tensors(state, a, s):
+    return (torch.as_tensor(np.asarray(state, dtype=np.float32)),
             torch.as_tensor(a.astype(np.float32)),
             torch.as_tensor(s.astype(np.float32)).reshape(-1, 1))
 
@@ -86,7 +86,9 @@ def main():
     ap.add_argument('--target', default='sp', choices=list(C.TARGET_KINDS),
                     help='sp=1000·P/u³（默认）| p=P/10 | log=log P')
     ap.add_argument('--state_feat', default='u10', choices=list(C.FEATURE_KINDS),
-                    help='u10=[u/10]（默认）| u3=[u,u²,u³]/10 的消融')
+                    help='u10=[u1/10]（默认）| u3 | useq=[u1..u5]/10 | '
+                         'useq6=[u0..u5]/10 | ueff=逐台逐点有效风速/10 | '
+                         'ueff6=含 u0 的逐台有效风速')
     ap.add_argument('--hidden1', type=int, default=16, help='PER 默认 16')
     ap.add_argument('--hidden2', type=int, default=100, help='PER 默认 100')
     ap.add_argument('--steps', type=int, default=40000)
@@ -147,8 +149,9 @@ def main():
     print('  目标 %s：train mean=%.5f  sd=%.5f'
           % (args.target, float(s_np[m_tr].mean()), float(s_np[m_tr].std())))
 
-    Xtr, Atr, Str = _as_tensors(u[m_tr], a[m_tr], s_np[m_tr], args.state_feat, args.target)
-    Xva, Ava, Sva = _as_tensors(u[m_va], a[m_va], s_np[m_va], args.state_feat, args.target)
+    state_all = C.build_state(ds, args.state_feat)
+    Xtr, Atr, Str = _as_tensors(state_all[m_tr], a[m_tr], s_np[m_tr])
+    Xva, Ava, Sva = _as_tensors(state_all[m_va], a[m_va], s_np[m_va])
     u_va, p_va = u[m_va], p[m_va]
 
     ns = Xtr.shape[1]
@@ -166,9 +169,11 @@ def main():
         sched = torch.optim.lr_scheduler.CosineAnnealingLR(
             opt, T_max=max(1, args.steps), eta_min=args.eta_min)
 
-    def val_eval(model, uu, aa, pp, feature, target, norm=None, batch=8192):
+    def val_eval(model, state, uu, aa, pp, feature, target, norm=None,
+                 batch=8192):
         pred = C.predict_power(model, uu, aa, target=target, feature=feature,
-                               batch=batch, window=window, norm=norm)
+                               batch=batch, window=window, norm=norm,
+                               state=state)
         return C.regression_metrics(pred, pp), pred
 
     hist = []
@@ -196,10 +201,10 @@ def main():
 
         if step % args.eval_every == 0 or step == args.steps:
             nva = r_norm[m_va] if r_norm is not None else None
-            mva, _ = val_eval(q, u_va, a[m_va], p_va, args.state_feat,
-                              args.target, norm=nva)
-            mvt, _ = val_eval(qt, u_va, a[m_va], p_va, args.state_feat,
-                              args.target, norm=nva)
+            mva, _ = val_eval(q, state_all[m_va], u_va, a[m_va], p_va,
+                              args.state_feat, args.target, norm=nva)
+            mvt, _ = val_eval(qt, state_all[m_va], u_va, a[m_va], p_va,
+                              args.state_feat, args.target, norm=nva)
             lr_now = opt.param_groups[0]['lr']
             gap = abs(mvt['rmse'] - mva['rmse'])
             hist.append(dict(step=step, lr=lr_now,

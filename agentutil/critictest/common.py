@@ -74,7 +74,8 @@ TARGET_KINDS = ('sp', 'p', 'log', 'sp5', 'p5', 'logp5', 'sp5n',
                 'f5', 'f5n', 'f5u3', 'logf5')
 WINDOW5_KINDS = ('sp5', 'p5', 'logp5', 'sp5n', 'f5', 'f5n', 'f5u3', 'logf5')
 FLUCT_KINDS = ('f5', 'f5n', 'f5u3', 'logf5')
-FEATURE_KINDS = ('u10', 'u3')
+FEATURE_KINDS = ('u10', 'u3', 'useq', 'useq6', 'ueff', 'ueff6')
+STATE_KINDS = FEATURE_KINDS
 
 
 # ---------------------------------------------------------------------------
@@ -450,6 +451,44 @@ def state_features(u, kind='u10'):
     raise ValueError('未知 state_feat %r' % (kind,))
 
 
+def build_state(ds, kind='u10'):
+    """从数据集构造 critic 的状态矩阵（支持只用 u1 或加入逐点/逐台风速）。
+
+    * `u10`   : `[u1/10]`（当前主口径）
+    * `u3`    : `[u1/10, (u1/10)², (u1/10)³]`
+    * `useq`  : `[u1..u5]/10`（5 维；自由来流序列）
+    * `useq6` : `[u0,u1..u5]/10`（6 维；含 F5 第一项所需的 u0）
+    * `ueff`  : `u_eff[t,i]/10` 展平（25 维；5 步 × 5 台的**尾流后有效风速**）
+    * `ueff6` : `[u_eff0(5), u_eff(25)]/10`（30 维；含 u0 的逐台有效风速）
+    """
+    kind = str(kind)
+    if kind == 'u10':
+        return state_features(ds['u'], 'u10')
+    if kind == 'u3':
+        return state_features(ds['u'], 'u3')
+    if kind == 'useq':
+        return (ds['u_seq'].astype(np.float64) / 10.0).astype(np.float32)
+    if kind == 'useq6':
+        return (np.column_stack([ds['u0'].astype(np.float64),
+                                 ds['u_seq'].astype(np.float64)]) / 10.0
+                ).astype(np.float32)
+    if kind == 'ueff':
+        if 'u_eff' not in ds.files:
+            raise KeyError('数据集缺少 u_eff 列（先跑 add_ueff_features.py）')
+        n = ds['u_eff'].shape[0]
+        return (ds['u_eff'].astype(np.float64).reshape(n, -1) / 10.0
+                ).astype(np.float32)
+    if kind == 'ueff6':
+        if 'u_eff' not in ds.files or 'u_eff0' not in ds.files:
+            raise KeyError('数据集缺少 u_eff/u_eff0 列')
+        n = ds['u_eff'].shape[0]
+        return (np.column_stack([
+            ds['u_eff0'].astype(np.float64).reshape(n, -1),
+            ds['u_eff'].astype(np.float64).reshape(n, -1),
+        ]) / 10.0).astype(np.float32)
+    raise ValueError('未知 state_feat %r' % (kind,))
+
+
 def target_transform(p, u, kind='sp', window=1, norm=None):
     """训练目标（网络直接回归的量）。
 
@@ -560,18 +599,30 @@ def make_critic_pair(ns, na=NT, hidden1=16, hidden2=100, init_w=3e-3,
 
 
 def predict_power(model, u, a, target='sp', feature='u10', batch=8192,
-                  window=1, norm=None):
-    """用 critic 预测风场出力（单步 P 或五步和 P5）[MW]（eval / no_grad）。"""
+                  window=1, norm=None, state=None):
+    """用 critic 预测风场出力（单步 P 或五步和 P5）[MW]（eval / no_grad）。
+
+    `state` 非 None 时直接用它作为状态输入（用于 `useq/ueff` 等多维特征）；
+    否则按 `feature` 从 `u` 构造。
+    """
     was_training = model.training
     model.eval()
     u = np.asarray(u, dtype=np.float64).reshape(-1)
     a = action_matrix(a, u.size)
+    if state is not None:
+        state = np.asarray(state, dtype=np.float32)
+        if state.shape[0] != u.size:
+            raise ValueError('state 行数 %d 与 u 行数 %d 不一致'
+                             % (state.shape[0], u.size))
     out = np.empty(u.size, dtype=np.float64)
     try:
         with torch.no_grad():
             for s in range(0, u.size, int(batch)):
                 e = min(s + int(batch), u.size)
-                x = torch.as_tensor(state_features(u[s:e], feature))
+                if state is None:
+                    x = torch.as_tensor(state_features(u[s:e], feature))
+                else:
+                    x = torch.as_tensor(state[s:e])
                 aa = torch.as_tensor(a[s:e].astype(np.float32))
                 out[s:e] = model([x, aa]).cpu().numpy().reshape(-1)
     finally:
@@ -579,18 +630,23 @@ def predict_power(model, u, a, target='sp', feature='u10', batch=8192,
     return target_to_power(out, u, target, window=window, norm=norm)
 
 
-def predict_target(model, u, a, feature='u10', batch=8192):
+def predict_target(model, u, a, feature='u10', batch=8192, state=None):
     """网络原始输出（目标空间；sp 臂下就是 specific power s）。"""
     was_training = model.training
     model.eval()
     u = np.asarray(u, dtype=np.float64).reshape(-1)
     a = action_matrix(a, u.size)
+    if state is not None:
+        state = np.asarray(state, dtype=np.float32)
     out = np.empty(u.size, dtype=np.float64)
     try:
         with torch.no_grad():
             for s in range(0, u.size, int(batch)):
                 e = min(s + int(batch), u.size)
-                x = torch.as_tensor(state_features(u[s:e], feature))
+                if state is None:
+                    x = torch.as_tensor(state_features(u[s:e], feature))
+                else:
+                    x = torch.as_tensor(state[s:e])
                 aa = torch.as_tensor(a[s:e].astype(np.float32))
                 out[s:e] = model([x, aa]).cpu().numpy().reshape(-1)
     finally:

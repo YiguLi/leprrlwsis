@@ -170,6 +170,42 @@ real 上 `f5n − base = −0.2180`（CI `[−0.2648, −0.1714]`），同样显
   现在用 `try/finally` 恢复原模式。当前网络没有 dropout/BatchNorm，所以历史
   数值不受影响。
 
+### 3.6 加入逐点/逐台风速：信息上限验证
+
+在 scalar 动作（1D）的同一批窗口/标签上，只改 critic 的状态输入：
+
+| 状态特征 | 维度 | test R² | test RMSE | test MAPE | real RMSE | 梯度 r / 斜率 / 符号 | 说明 |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `u10`（仅 u1） | 1 | 0.551351 | 3.0295 | 44.56% | 3.2331 | 0.861 / 0.753 / 0.936 | 当前基线 |
+| `useq`（u1..u5） | 5 | 0.937734 | 1.1286 | 13.59% | 1.1714 | 0.911 / 0.941 / 0.947 | 自由来流 5 步 |
+| **`useq6`（u0..u5）** | **6** | **0.995732** | **0.2955** | **3.55%** | **0.4001** | 0.926 / 1.074 / 0.893 | 含第一项所需的 u0 |
+| `ueff`（逐台逐点，5×5） | 25 | 0.938664 | 1.1202 | 13.24% | 1.1841 | 0.306 / 0.071 / 0.796 | **oracle 特征，梯度无效** |
+| `ueff6`（含 u0 逐台，6×5） | 30 | 0.995431 | 0.3057 | 3.45% | 0.3867 | 0.570 / 0.056 / 0.644 | **oracle 特征，梯度无效** |
+
+关键结论：
+
+1. **加入 u2..u5 后 R² 从 0.551 → 0.938**（RMSE 3.03→1.13 MW）。
+   这证明之前的“学习羸弱”确实是**信息不足**，不是网络 bug。
+2. **再加入 u0 后 R² → 0.996**（RMSE 0.30 MW）。`F5` 的第一项
+   `|P(u1,a)−P(u0,a)|` 约占 30%，只给 `u1..u5` 时这一项不可预测；
+   给 `u0` 后几乎完全确定。
+3. **逐台逐点有效风速（25/30 维）没有比自由来流序列（5/6 维）更好**：
+   - `ueff` vs `useq`：R² 0.9387 vs 0.9377（打平）；
+   - `ueff6` vs `useq6`：R² 0.9954 vs 0.9957（打平，甚至略差）。
+   ⇒ 给定自由来流序列与动作，尾流后的逐台风速基本可由二者决定；
+   25/30 维逐台特征是**冗余**的，反而增加输入维度。
+4. **`ueff` 是 oracle 特征**：它依赖当前动作（尾流随 `a` 变），推理时换动作
+   需要重跑 FLORIS；它的 autograd 是在 `u_eff` 固定下的偏导，**不是真实的
+   `∂F5/∂a`**（真实梯度要对 `u_eff(a)` 反传），所以表里的 0.306/0.071 不可用于控制。
+   `useq/useq6` 与动作无关，梯度是有效的（r 0.91–0.93、斜率 0.94–1.07）。
+
+**可部署性**：
+
+- 只有 `u1` → 当前 `f5n`（R² 0.55）。
+- 有未来 5 步风速预报 → `useq`（R² 0.94）。
+- 还能拿到上一步 `u0`（或上一块末功率）→ `useq6`（R² 0.996）。
+- 逐台有效风速是**离线 oracle**，用于确认信息上限，不建议作为在线 critic 输入。
+
 ## 4. 结论：什么是最好的方法
 
 * **纯 test 拟合**：`f5u3` 的名义 RMSE 最低（3.0787 / R² 0.49186），但与
@@ -192,10 +228,14 @@ real 上 `f5n − base = −0.2180`（CI `[−0.2648, −0.1714]`），同样显
     （梯度最好，拟合与 f5/f5u3 打平）；只看 test RMSE 用 `f5u3`；
     只看 MAPE / real 用 `f5`。
   - 不建议 64/256 或三模型集成（收益不显著）。
-* **最重要的结论**：5D 动作下 `F5` 的 R² 只有 ~0.49，不是网络不行，而是
-  **只给 u1 时风速窗口的逐点差异不可约**；critic 能把 `E[F5|u1]` 基线再降
-  ~0.063–0.067 MW（显著，约 2%），这部分才是动作信息。换成 1D 同因子后，
-  可学习的那部分动作信息变大（13%），但 R² 仍只有 0.55，风速噪声仍是主体。
+* **信息量才是决定性因素**：只给 `u1` 时 R²≈0.55；加 **`u1..u5`** 后
+  R²→**0.938**（RMSE 3.03→1.13 MW）；再加 **`u0`** 后 R²→**0.996**
+  （RMSE 0.30 MW）。逐台逐点有效风速（25/30 维）没有额外收益，且是
+  动作相关 oracle；`useq/useq6` 才是可部署的强特征。
+* **最重要的结论**：之前 5D 动作 R² 只有 ~0.49、1D 动作 0.55，不是网络不行，
+  而是**只给 u1 时风速窗口的逐点差异不可约**。critic 能把 `E[F5|u1]` 基线
+  再降 ~0.063–0.067 MW（5D，2%）或 ~0.459 MW（1D，13%），这部分才是动作信息；
+  一旦给出 `u1..u5`/`u0`，R² 立刻到 0.94–0.996。网络容量与代码都没有问题。
 
 ---
 
@@ -238,6 +278,21 @@ $PY = 'C:\Users\yigul\anaconda3\envs\llmenhancedwsis\python.exe'
     --data agentutil\critictest\data\aifflor_ua_f5_scalar.npz `
     --out  agentutil\critictest\results\f5_scalar_f5_16 `
     --target f5 --steps 40000
+
+# 7) 加入风速序列（useq/useq6）
+& $PY agentutil\critictest\train_critic.py `
+    --data agentutil\critictest\data\aifflor_ua_f5_scalar.npz `
+    --out  agentutil\critictest\results\f5_scalar_useq6 `
+    --target f5n --state_feat useq6 --steps 30000
+
+# 8) 逐台逐点有效风速（oracle；先补特征）
+& $PY agentutil\critictest\add_ueff_features.py `
+    --data agentutil\critictest\data\aifflor_ua_f5_scalar.npz `
+    --out  agentutil\critictest\data\aifflor_ua_f5_scalar_ueff.npz
+& $PY agentutil\critictest\train_critic.py `
+    --data agentutil\critictest\data\aifflor_ua_f5_scalar_ueff.npz `
+    --out  agentutil\critictest\results\f5_scalar_ueff6 `
+    --target f5n --state_feat ueff6 --steps 30000
 ```
 
 产物：`data/aifflor_ua_f5.npz`、`results/f5_*/`（`critic_best.pt` /

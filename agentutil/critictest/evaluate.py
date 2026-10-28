@@ -87,7 +87,8 @@ def _grad_cmp(gt, gp):
 
 
 def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
-                   seed=123, out_dir=None, phys=None, norm=None):
+                   seed=123, out_dir=None, phys=None, norm=None,
+                   state_all=None):
     """autograd ∂P5/∂a vs aifflor 中心差分（window=1 时即 ∂P/∂a）。"""
     window = int(meta.get('window', 1))
     fluct = 'f5' in ds.files
@@ -148,7 +149,9 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
         else:
             gt_single[:, j] = gt[:, j]
 
-    x = torch.as_tensor(C.state_features(u_g, feature))
+    state_g = (state_all[sel] if state_all is not None
+               else C.state_features(u_g, feature))
+    x = torch.as_tensor(np.asarray(state_g, dtype=np.float32))
     A = torch.as_tensor(ae_g.astype(np.float32)).requires_grad_(True)
     out = q([x, A])
     g_t = torch.autograd.grad(out.sum(), A)[0].detach().numpy().astype(np.float64)
@@ -165,7 +168,7 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
         gp = g_t * C.P5_SCALE
     elif target == 'logp5':
         p_pred = C.predict_power(q, u_g, ae_g, target=target, feature=feature,
-                                 window=window)
+                                 window=window, state=state_g)
         gp = g_t * p_pred[:, None]
     elif target == 'sp5n':
         if norm_g is None:
@@ -181,7 +184,7 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
         gp = g_t * window * np.power(u_g, 3)[:, None] / C.S_SCALE
     elif target == 'logf5':
         p_pred = C.predict_power(q, u_g, ae_g, target=target, feature=feature,
-                                 window=window)
+                                 window=window, state=state_g)
         gp = g_t * p_pred[:, None]
     else:
         raise ValueError(target)
@@ -199,9 +202,9 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
         am[:, j] = np.clip(ae_g[:nfd, j] - self_d, lo[:nfd, j], C.A_HI)
         _n = norm_g[:nfd] if norm_g is not None else None
         pp = C.predict_power(q, u_g[:nfd], ap, target=target, feature=feature,
-                             window=window, norm=_n)
+                             window=window, norm=_n, state=state_g[:nfd])
         pm_ = C.predict_power(q, u_g[:nfd], am, target=target, feature=feature,
-                              window=window, norm=_n)
+                              window=window, norm=_n, state=state_g[:nfd])
         net_fd[:, j] = (pp - pm_) / (ap[:, j] - am[:, j])
     if nfd:
         _sd = np.abs(net_fd - gp[:nfd])
@@ -345,18 +348,25 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
         r_norm = C.window_fluct_norm(ds)
     else:
         r_norm = None
+    state_all = C.build_state(ds, feature)
 
     print('\n' + '=' * 108)
     print('critictest 评价：%s' % os.path.abspath(ckpt_path))
     print('target=%s | window=%d | state_feat=%s | 结构 %d→%d→%d ∥ %d → 80 → 50 → 1 | 参数量 %s'
           % (target, window, feature, meta['ns'], meta['hidden1'],
              meta['hidden2'], na, meta.get('n_params', '?')))
+    if feature in ('ueff', 'ueff6'):
+        print('⚠ feature=%s 是**动作相关**的 oracle 特征；下面 autograd 是在 u_eff '
+              '固定时的偏导，不是真实 ∂F5/∂a（真实梯度需对 u_eff(a) 反传）。'
+              % feature)
     print('=' * 108)
 
     metrics = dict(checkpoint=os.path.abspath(ckpt_path),
                    data=os.path.abspath(data_path),
                    target=target, feature=feature, window=window, na=na,
-                   quantity=pname,
+                   quantity=pname, feature_kind=feature,
+                   gradient_note=('u_eff 动作相关；autograd 为固定 u_eff 的偏导'
+                                  if feature in ('ueff', 'ueff6') else ''),
                    structure=dict(ns=meta['ns'], na=meta['na'],
                                   hidden1=meta['hidden1'],
                                   hidden2=meta['hidden2'],
@@ -375,9 +385,9 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
             continue
         _n = r_norm[m] if r_norm is not None else None
         pred = C.predict_power(q, u[m], a[m], target=target, feature=feature,
-                               window=window, norm=_n)
+                               window=window, norm=_n, state=state_all[m])
         tpred = C.predict_power(qt, u[m], a[m], target=target, feature=feature,
-                                window=window, norm=_n)
+                                window=window, norm=_n, state=state_all[m])
         mP = C.regression_metrics(pred, p[m])
         mT = C.regression_metrics(tpred, p[m])
         if fluct:
@@ -472,7 +482,8 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
     print('\n[4] 动作梯度 %s（autograd vs aifflor 中心差分，%d 点，δ=%.3f）'
           % (gname, n_grad, delta))
     gc = gradient_check(q, ds, meta, target, feature, n_grad=n_grad,
-                        delta=delta, out_dir=out_dir, phys=phys, norm=r_norm)
+                        delta=delta, out_dir=out_dir, phys=phys, norm=r_norm,
+                        state_all=state_all)
     grad_plot = gc.pop('plot', None)
     metrics['gradient'] = gc
     _sc = gc['autograd_vs_netfd']
@@ -809,6 +820,8 @@ def build_summary(metrics, meta):
              'oracle/基线行只作参考（分箱，可能略差于真正条件均值）。')
     L.append('  * 波动任务（quantity=F5）的标签是 5 项 |ΔP| 之和；'
              'E[F5|u1] 基线与模型对比才说明动作是否真的带来信息。')
+    if metrics.get('gradient_note'):
+        L.append('  * ⚠ %s' % metrics['gradient_note'])
     L.append('  * 梯度斜率≈1 且 r 高才说明 critic 可用于"按 a 寻优"；'
              'R² 高但梯度差只能说明它拟合了风速趋势。')
     return '\n'.join(L)
