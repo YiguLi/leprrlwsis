@@ -38,6 +38,8 @@ import torch  # noqa: E402
 import torch.nn as nn  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 
+from model import fanout_init  # noqa: E402
+
 STAGE_DIM = 16
 
 
@@ -106,6 +108,67 @@ class StepDecompCritic(nn.Module):
         step = self.reward_head(torch.cat([ze, ee], dim=-1)).squeeze(-1)  # (N,f)
         term = self.terminal_head(z).squeeze(-1)                           # (N,)
         disc = self.gamma ** torch.arange(self.f, dtype=z.dtype, device=z.device)
+        q = (step * disc[None, :]).sum(dim=1) + (self.gamma ** self.f) * term
+        return q, step, term
+
+
+class StepDecompCriticPER(nn.Module):
+    """逐步分解 + **PER 原版隐藏层** 的变体。
+
+    共享 trunk 逐层按用户给定：
+        x → Linear(1,16) → ReLU → Linear(16,100)（无激活）→
+        cat(a) 105 → Linear(105,80) → ReLU → Linear(80,50) → ReLU → h(50)
+
+    共享 trunk 之后接逐步读出（保留文档的"逐步 reward 头 + 阶段嵌入 +
+    终端头 + QComposer"）：
+        r̂_t = Linear([h; e_t])  (50+16 → 1)     ← 等价于 PER 的 50→1 读出
+        B̂   = Linear(h)         (50 → 1)
+        F5̂  = Σ_t γ^t r̂_t + γ^f B̂
+
+    这样隐藏层与 PER critic 逐层一致，参数量只有 ~14.5k。
+    """
+
+    def __init__(self, state_dim=1, action_dim=5, f=5, stage_dim=STAGE_DIM,
+                 gamma=1.0, step_bias=0.0):
+        super().__init__()
+        self.f = int(f)
+        self.gamma = float(gamma)
+        self.stage_dim = int(stage_dim)
+
+        self.fc1 = nn.Linear(state_dim, 16)
+        self.fc4 = nn.Linear(16, 100)
+        self.fc2 = nn.Linear(100 + action_dim, 80)
+        self.fc5 = nn.Linear(80, 50)
+        self.relu = nn.ReLU()
+
+        self.stage_emb = nn.Parameter(torch.randn(self.f, self.stage_dim) * 0.02)
+        self.reward_head = nn.Linear(50 + self.stage_dim, 1)
+        self.terminal_head = nn.Linear(50, 1)
+
+        # 与 PER 的 init_weights 同口径：fc1/fc2 用 fan_out；fc4/fc5 保持默认
+        self.fc1.weight.data = fanout_init(self.fc1.weight.data.size())
+        self.fc2.weight.data = fanout_init(self.fc2.weight.data.size())
+        # 读出层小初值；逐步头 bias 用步波动均值起步，终端头 bias=0
+        nn.init.uniform_(self.reward_head.weight, -3e-3, 3e-3)
+        nn.init.constant_(self.reward_head.bias, float(step_bias))
+        nn.init.uniform_(self.terminal_head.weight, -3e-3, 3e-3)
+        nn.init.zeros_(self.terminal_head.bias)
+
+    def encode(self, state, action):
+        h = self.relu(self.fc1(state))
+        h = self.fc4(h)                       # 与原版 PER 一样，没有激活
+        h = self.relu(self.fc2(torch.cat([h, action], dim=-1)))
+        h = self.relu(self.fc5(h))            # (N, 50)
+        return h
+
+    def forward(self, state, action):
+        h = self.encode(state, action)
+        n = h.shape[0]
+        he = h[:, None, :].expand(n, self.f, 50)
+        ee = self.stage_emb[None, :, :].expand(n, self.f, self.stage_dim)
+        step = self.reward_head(torch.cat([he, ee], dim=-1)).squeeze(-1)
+        term = self.terminal_head(h).squeeze(-1)
+        disc = self.gamma ** torch.arange(self.f, dtype=h.dtype, device=h.device)
         q = (step * disc[None, :]).sum(dim=1) + (self.gamma ** self.f) * term
         return q, step, term
 

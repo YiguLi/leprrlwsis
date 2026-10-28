@@ -48,6 +48,8 @@ def main():
     ap = argparse.ArgumentParser(description='逐步奖励分解 critic：五步波动和')
     ap.add_argument('--data', default='agentutil/critictest/data/aifflor_ua_f5.npz')
     ap.add_argument('--out', default='agentutil/critictest/results/f5_stepdecomp')
+    ap.add_argument('--arch', default='film', choices=('film', 'per'),
+                    help='film=文档的 FiLM/256 主体；per=用户给定的 PER 隐藏层')
     ap.add_argument('--steps', type=int, default=30000)
     ap.add_argument('--bsize', type=int, default=256)
     ap.add_argument('--lr', type=float, default=1e-3)
@@ -71,8 +73,8 @@ def main():
     os.makedirs(args.out, exist_ok=True)
 
     print('=' * 104)
-    print('step-decomp critic：五步功率波动和  γ=%.3f  λ_r=%.3f  λ_B=%.3f'
-          % (args.gamma, args.lambda_r, args.lambda_b))
+    print('step-decomp critic：五步功率波动和  arch=%s  γ=%.3f  λ_r=%.3f  λ_B=%.3f'
+          % (args.arch, args.gamma, args.lambda_r, args.lambda_b))
     print('=' * 104)
     ds = np.load(args.data, allow_pickle=False)
     if 'f5' not in ds.files:
@@ -97,10 +99,12 @@ def main():
     print('  逐步波动 σ_t = %s | 步波动均值 %.3f'
           % (np.round(sigma, 4).tolist(), step_bias))
 
-    model = SD.StepDecompCritic(state_dim=1, action_dim=5, f=5,
-                                gamma=args.gamma, step_bias=step_bias)
-    target = SD.StepDecompCritic(state_dim=1, action_dim=5, f=5,
-                                 gamma=args.gamma, step_bias=step_bias)
+    cls = (SD.StepDecompCriticPER if args.arch == 'per'
+           else SD.StepDecompCritic)
+    model = cls(state_dim=1, action_dim=5, f=5,
+                gamma=args.gamma, step_bias=step_bias)
+    target = cls(state_dim=1, action_dim=5, f=5,
+                 gamma=args.gamma, step_bias=step_bias)
     SD.hard_update(target, model)
     n_par = sum(p.numel() for p in model.parameters())
     print('  网络参数 %d（target 同构）' % n_par)
@@ -163,7 +167,8 @@ def main():
             if rq['rmse'] < best['rmse'] - args.min_delta:
                 best = dict(rmse=rq['rmse'], step=step)
                 since = 0
-                meta = dict(f=5, gamma=args.gamma, stage_dim=SD.STAGE_DIM,
+                meta = dict(arch=args.arch, f=5, gamma=args.gamma,
+                            stage_dim=SD.STAGE_DIM,
                             state_dim=1, action_dim=5, step_bias=step_bias,
                             sigma=sigma.tolist(), n_params=n_par,
                             best_step=step, best_val_rmse=rq['rmse'],
@@ -192,7 +197,8 @@ def main():
     ckpt = os.path.join(args.out, 'step_decomp_best.pt')
     if not os.path.exists(ckpt):
         torch.save({'model': model.state_dict(), 'target': target.state_dict(),
-                    'meta': dict(f=5, gamma=args.gamma, stage_dim=SD.STAGE_DIM,
+                    'meta': dict(arch=args.arch, f=5, gamma=args.gamma,
+                                 stage_dim=SD.STAGE_DIM,
                                  state_dim=1, action_dim=5, step_bias=step_bias,
                                  sigma=sigma.tolist(), n_params=n_par,
                                  best_step=step, best_val_rmse=float('nan'),

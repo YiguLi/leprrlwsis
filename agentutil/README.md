@@ -112,10 +112,12 @@ real 上 factorized 与 `sp5n`64 打平；最佳梯度是 factorized 分解
 （3.1458，约 −0.067 MW / 2%）；动作梯度最好的是 `f5n`（r 0.823 / 符号 0.817）；
 64/256 与三模型集成均无显著收益。
 **逐步奖励分解 critic**（详见 [critictest/README_step_decomp.md](critictest/README_step_decomp.md)）：
-按外部架构实现 FiLM + 共享逐步 reward 头 + 终端头 + 固定 QComposer（183k 参数），
-test F5 RMSE 3.1005（f5n 3.0832，显著差 0.017 MW），但 MAPE 41.1%
-（f5n 44.7%）与梯度方向略好（余弦 0.875/0.949 vs 0.854/0.933），
-幅度偏小（斜率 0.737）；纯 F5 拟合仍推荐 14k 的 `f5n`。**不启 MATLAB**。
+两个变体 —— `arch=film`（文档原宽度，183k）与 `arch=per`（用户给定 PER 隐藏层，
+14.5k）。film：test F5 RMSE 3.1005（f5n 3.0832，显著差 0.017 MW），
+MAPE 41.1%（f5n 44.7%），梯度方向略好（余弦 0.875/0.949 vs 0.854/0.933），
+幅度偏小（斜率 0.737）。per：14,460 参数、训练最快，但 test 3.1083、
+梯度 r 0.685、余弦 0.679/0.847 ⇒ 明显弱于 f5n 与 film 版。
+纯 F5 拟合仍推荐 14k 的 `f5n`。**不启 MATLAB**。
 
 ## 研究笔记（非脚本）
 

@@ -37,14 +37,16 @@ SPLIT_NAMES = ('train', 'val', 'test', 'real')
 def load_ckpt(path):
     ck = torch.load(path, map_location='cpu', weights_only=False)
     m = ck['meta']
-    model = SD.StepDecompCritic(state_dim=m['state_dim'], action_dim=m['action_dim'],
-                                f=m['f'], stage_dim=m['stage_dim'],
-                                gamma=m['gamma'], step_bias=m.get('step_bias', 0.0))
+    cls = (SD.StepDecompCriticPER if m.get('arch', 'film') == 'per'
+           else SD.StepDecompCritic)
+    model = cls(state_dim=m['state_dim'], action_dim=m['action_dim'],
+                f=m['f'], stage_dim=m['stage_dim'],
+                gamma=m['gamma'], step_bias=m.get('step_bias', 0.0))
     model.load_state_dict(ck['model'])
     model.eval()
-    target = SD.StepDecompCritic(state_dim=m['state_dim'], action_dim=m['action_dim'],
-                                 f=m['f'], stage_dim=m['stage_dim'],
-                                 gamma=m['gamma'], step_bias=m.get('step_bias', 0.0))
+    target = cls(state_dim=m['state_dim'], action_dim=m['action_dim'],
+                 f=m['f'], stage_dim=m['stage_dim'],
+                 gamma=m['gamma'], step_bias=m.get('step_bias', 0.0))
     target.load_state_dict(ck['target'])
     target.eval()
     return model, target, m
@@ -144,8 +146,13 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
 
     print('\n' + '=' * 108)
     print('step-decomp 评价：%s' % os.path.abspath(ckpt_path))
-    print('f=5 | γ=%.3f | 参数 %s | 结构 state64/action64 → FiLM → 192→256→256→128'
-          % (meta['gamma'], meta.get('n_params', '?')))
+    arch = meta.get('arch', 'film')
+    print('f=5 | γ=%.3f | 参数 %s | arch=%s' %
+          (meta['gamma'], meta.get('n_params', '?'), arch))
+    if arch == 'per':
+        print('结构: 1→16→100（无激活）→ cat(a) 105→80→50 → [h;e_t]→1 ×5 + h→1')
+    else:
+        print('结构: state64/action64 → FiLM → 192→256→256→128 → 逐步头/终端头')
     print('=' * 108)
 
     metrics = dict(checkpoint=os.path.abspath(ckpt_path),
