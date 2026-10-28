@@ -29,9 +29,7 @@ import torch  # noqa: E402
 
 import common as C  # noqa: E402
 import evaluate as E0  # noqa: E402
-from train_c1 import C1_SCALE, c1_from_steps, inverse_of, predict
-
-build_state = C.build_state
+from train_c1 import C1_SCALE, build_state, c1_from_steps, inverse_of, predict
 
 SPLIT_NAMES = ('train', 'val', 'test', 'real')
 U_EDGES = (3.5, 5.0, 7.0, 9.0, 11.0, 13.0, 16.0, 20.0, 25.001)
@@ -110,12 +108,20 @@ def gradient_check(model, ds, ck, n=400, delta=0.01, seed=123):
     lo, hi = C.A_PHYS_LO, C.A_HI
     ap = np.clip(aeg + delta, lo, hi)
     am = np.clip(aeg - delta, lo, hi)
-    _f5p, _f4p, psp, ppp, _ = C.power_fluct(
-        phys, u0g, usg, ap, window=5)
-    _f5m, _f4m, psm, ppm, _ = C.power_fluct(
-        phys, u0g, usg, am, window=5)
-    c1p, _ = _c1_of(psp, ppp)
-    c1m, _ = _c1_of(psm, ppm)
+    if ck['state_kind'] == 'obs':
+        # 初始 obs 口径：P_G_prev 是实测过去量，固定；只对当前块功率求导
+        p_prev_g = ds['p_prev'].astype(np.float64)[sel]
+        psp, _ = C.power_steps(phys, usg, ap, window=5)
+        psm, _ = C.power_steps(phys, usg, am, window=5)
+        c1p, _ = _c1_of(psp, p_prev_g)
+        c1m, _ = _c1_of(psm, p_prev_g)
+    else:
+        _f5p, _f4p, psp, ppp, _ = C.power_fluct(
+            phys, u0g, usg, ap, window=5)
+        _f5m, _f4m, psm, ppm, _ = C.power_fluct(
+            phys, u0g, usg, am, window=5)
+        c1p, _ = _c1_of(psp, ppp)
+        c1m, _ = _c1_of(psm, ppm)
     gt = (c1p - c1m) / (ap[:, 0] - am[:, 0])
 
     x = torch.as_tensor(state[sel])

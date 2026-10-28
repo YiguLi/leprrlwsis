@@ -40,7 +40,7 @@ import torch  # noqa: E402
 import common as C  # noqa: E402
 
 C1_SCALE = 10.0
-STATE_KINDS = ('useq', 'useq6')
+STATE_KINDS = ('obs', 'useq', 'useq6')
 TARGET_KINDS = ('c1', 'logc1')
 
 
@@ -52,6 +52,17 @@ def c1_from_steps(p_steps, p_prev):
                           np.abs(np.diff(ps, axis=1))])
     c1s = pf + 20.0 * np.maximum(0.0, pf - 3.0)
     return c1s.sum(1), pf
+
+
+def build_state(ds, kind):
+    """`obs` = 初始 obs 的 `P_G_prev,u1` + 直接拼 `u2..u5`（无 encoder）。"""
+    if kind == 'obs':
+        return np.column_stack([
+            ds['p_prev'].astype(np.float64) / 5.0,
+            ds['u'].astype(np.float64) / 10.0,
+            ds['u_seq'][:, 1:].astype(np.float64) / 10.0,
+        ]).astype(np.float32)
+    return C.build_state(ds, kind)
 
 
 def target_of(c1, kind):
@@ -110,7 +121,7 @@ def main():
     split = ds['split']
     a = ds['a'].astype(np.float64)
     c1, pf_steps = c1_from_steps(ds['p_steps'], ds['p_prev'])
-    state = C.build_state(ds, args.state)
+    state = build_state(ds, args.state)
     y = target_of(c1, args.target)
 
     m_tr, m_va = split == 0, split == 1

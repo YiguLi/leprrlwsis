@@ -144,6 +144,9 @@ R²→**0.938**（RMSE 3.03→1.13 MW）；再加 `u0` 后 R²→**0.996**（RMS
 严格只用块内 `u1..u5`（`useq`）时 R²=0.883、梯度 r=0.871；
 raw `c1` 目标 RMSE 更低（5.70）但梯度 r=0.927、斜率=0.796、余弦=0.530、
 23.5% 反向 ⇒ 做梯度必须用 `logc1`。
+直接把 `u2..u5` 拼到初始 obs（`P_G_prev+u1..u5`）R²=0.9435 / RMSE 9.49，
+梯度 r=0.781 / 余弦=0.655 / 17.2% 反向，**不如 `useq6`**；说明直接拼可行但不是最优，
+应补 `Δu/Σu³` 或加小 encoder。
 **逐步奖励分解 critic**（详见 [critictest/README_step_decomp.md](critictest/README_step_decomp.md)）：
 两个变体 —— `arch=film`（文档原宽度，183k）与 `arch=per`（用户给定 PER 隐藏层，
 14.5k）。film：test F5 RMSE 3.1005（f5n 3.0832，显著差 0.017 MW），
