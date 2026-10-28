@@ -59,6 +59,9 @@ def main():
     ds = np.load(args.data, allow_pickle=False)
     if 'f5' not in ds.files:
         raise SystemExit('这不是五步波动数据集（缺少 f5 列）')
+    if ds['a'].ndim != 2 or ds['a'].shape[1] != C.NT:
+        raise SystemExit('compare_fluct.py 只用于 5D 独立动作；'
+                         '标量动作请直接用 evaluate.py 对比各 checkpoint')
     u = ds['u'].astype(np.float64)
     a = ds['a'].astype(np.float64)
     f5 = ds['f5'].astype(np.float64)

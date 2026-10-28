@@ -104,6 +104,10 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
     sel = rng.choice(idx, size=min(int(n_grad), idx.size), replace=False)
 
     u_g, ae_g = u[sel], a_eff[sel]
+    na = int(meta.get('na', ae_g.shape[1]))
+    if ae_g.shape[1] != na:
+        raise ValueError('动作维数 %d 与 checkpoint na=%d 不一致'
+                         % (ae_g.shape[1], na))
     norm_g = (np.asarray(norm, dtype=np.float64).reshape(-1)[sel]
               if norm is not None else None)
     u_seq_g = (ds['u_seq'][sel].astype(np.float64)
@@ -115,10 +119,10 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
         phys = C.build_physics(calibrated=bool(pm.get('calibrated', False)),
                                power_scale=float(pm.get('power_scale', C.AT.LEVEL_COEF)))
 
-    gt = np.zeros((sel.size, C.NT), dtype=np.float64)
-    gt_single = np.zeros((sel.size, C.NT), dtype=np.float64)
+    gt = np.zeros((sel.size, na), dtype=np.float64)
+    gt_single = np.zeros((sel.size, na), dtype=np.float64)
     lo = np.full_like(ae_g, C.A_PHYS_LO)
-    for j in range(C.NT):
+    for j in range(na):
         # ⚠ 只扰动第 j 维（不能 ap = ae_g + delta，那是"五维同时动"的方向导数）
         ap = ae_g.copy()
         am = ae_g.copy()
@@ -185,10 +189,10 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
     # autograd vs 网络自身的中心差分（证明梯度计算口径没写错）。
     # ⚠ 用 δ=1e-3 而不是外层 1e-2：ReLU 网络是分段线性，1e-2 的割线会跨多个
     #   折点，和"局部 autograd 导数"本来就不该逐点相等（那是折点效应，不是 bug）。
-    net_fd = np.zeros((min(20, sel.size), C.NT), dtype=np.float64)
+    net_fd = np.zeros((min(20, sel.size), na), dtype=np.float64)
     nfd = sel.size and min(20, sel.size)
     self_d = 1e-3
-    for j in range(C.NT):
+    for j in range(na):
         ap = ae_g[:nfd].copy()
         am = ae_g[:nfd].copy()
         ap[:, j] = np.clip(ae_g[:nfd, j] + self_d, lo[:nfd, j], C.A_HI)
@@ -209,7 +213,7 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
                                   max=float('nan'), delta=self_d)
 
     dims = {}
-    for j in range(C.NT):
+    for j in range(na):
         dims['dim%d' % j] = _grad_cmp(gt[:, j], gp[:, j])
     pooled = _grad_cmp(gt.reshape(-1), gp.reshape(-1))
 
@@ -227,7 +231,7 @@ def gradient_check(q, ds, meta, target, feature, n_grad=400, delta=0.01,
         e_sum = C.bin_lookup(u_g, edges, means)
         g_cond = gt_single * e_sum[:, None] / np.power(u_g, 3)[:, None]
         cdims = {}
-        for j in range(C.NT):
+        for j in range(na):
             cdims['dim%d' % j] = _grad_cmp(g_cond[:, j], gp[:, j])
         cpooled = _grad_cmp(g_cond.reshape(-1), gp.reshape(-1))
         cond = dict(pooled=cpooled, dims=cdims,
@@ -327,6 +331,7 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
     q, qt, meta = load_checkpoint(ckpt_path)
     target, feature = meta['target'], meta['feature']
     window = int(meta.get('window', dm.get('window', 1)))
+    na = int(meta.get('na', C.NT))
     fluct = 'f5' in ds.files
     u, a, a_eff, p = (ds['u'].astype(np.float64), ds['a'].astype(np.float64),
                       ds['a_eff'].astype(np.float64), ds['p'].astype(np.float64))
@@ -345,12 +350,12 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
     print('critictest 评价：%s' % os.path.abspath(ckpt_path))
     print('target=%s | window=%d | state_feat=%s | 结构 %d→%d→%d ∥ %d → 80 → 50 → 1 | 参数量 %s'
           % (target, window, feature, meta['ns'], meta['hidden1'],
-             meta['hidden2'], C.NT, meta.get('n_params', '?')))
+             meta['hidden2'], na, meta.get('n_params', '?')))
     print('=' * 108)
 
     metrics = dict(checkpoint=os.path.abspath(ckpt_path),
                    data=os.path.abspath(data_path),
-                   target=target, feature=feature, window=window,
+                   target=target, feature=feature, window=window, na=na,
                    quantity=pname,
                    structure=dict(ns=meta['ns'], na=meta['na'],
                                   hidden1=meta['hidden1'],
@@ -423,7 +428,8 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
     print('  %-10s %7s %12s %10s %10s %10s' %
           ('family', 'n', 'R²', 'RMSE', 'MAPE%', 'mean P'))
     pred_real = preds.get('real')
-    for j, fam in enumerate(C.REAL_FAMILIES):
+    real_fams = dm.get('real_families', list(C.REAL_FAMILIES))
+    for j, fam in enumerate(real_fams):
         m = mre & (family == j)
         if not np.any(m):
             continue
@@ -474,7 +480,7 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
           % (_sc['delta'], _sc['median'], _sc['p90'], _sc['max']))
     print('  %-8s %6s %10s %10s %12s %10s %10s' %
           ('dim', 'n', 'pearson', 'slope', 'median_rel', 'sign_agree', 'MAE'))
-    for j in range(C.NT):
+    for j in range(na):
         g = gc['dims']['dim%d' % j]
         print('  dim%-5d %6d %10.4f %10.4f %12.4f %10.4f %10.4f'
               % (j, g['n'], g['pearson'], g['slope'], g['median_rel'],
@@ -491,7 +497,7 @@ def evaluate_all(ckpt_path, data_path, out_dir, n_grad=400, delta=0.01,
         print('  --- 条件期望梯度 oracle（单步真值 × E[Σu³|u1]/u1³）---')
         print('  %-8s %6s %10s %10s %12s %10s' %
               ('dim', 'n', 'pearson', 'slope', 'median_rel', 'sign_agree'))
-        for j in range(C.NT):
+        for j in range(na):
             g = c['dims']['dim%d' % j]
             print('  dim%-5d %6d %10.4f %10.4f %12.4f %10.4f'
                   % (j, g['n'], g['pearson'], g['slope'],
@@ -667,7 +673,9 @@ def make_figures(out_dir, ds, preds, metrics, meta, grad_plot=None):
             stats = gc['dims']
             gname = '∂%s/∂a (realized)' % qname
             fname = 'gradient_parity.png'
-        fig, axes = plt.subplots(1, C.NT, figsize=(4 * C.NT, 4), sharex=False)
+        na = len(gc['dims'])
+        fig, axes = plt.subplots(1, na, figsize=(4 * na, 4), sharex=False)
+        axes = np.atleast_1d(axes)
         for j, ax in enumerate(axes):
             g = stats['dim%d' % j]
             ax.scatter(gt[:, j], gp[:, j], s=12, alpha=0.55, edgecolors='none')
@@ -732,8 +740,9 @@ def build_summary(metrics, meta):
              % (metrics['target'], metrics.get('window', 1),
                 metrics.get('quantity', 'P')))
     L.append('state_feat : %s' % metrics['feature'])
+    na = int(metrics.get('na', len(metrics['gradient']['dims'])))
     L.append('structure  : %d → %d → %d ∥ %d → 80 → 50 → 1，参数量 %s'
-             % (meta['ns'], meta['hidden1'], meta['hidden2'], C.NT,
+             % (meta['ns'], meta['hidden1'], meta['hidden2'], na,
                 metrics['structure'].get('n_params')))
     L.append('')
     L.append('%-6s %8s %12s %10s %10s %10s' %
@@ -753,7 +762,7 @@ def build_summary(metrics, meta):
              % (metrics['gradient']['n'], metrics['gradient']['delta']))
     L.append('  %-8s %10s %10s %12s %10s' %
              ('dim', 'pearson', 'slope', 'median_rel', 'sign'))
-    for j in range(C.NT):
+    for j in range(na):
         g = metrics['gradient']['dims']['dim%d' % j]
         L.append('  dim%-5d %10.4f %10.4f %12.4f %10.4f'
                  % (j, g['pearson'], g['slope'], g['median_rel'], g['sign_agree']))
@@ -765,7 +774,7 @@ def build_summary(metrics, meta):
     if g.get('conditional'):
         c = g['conditional']
         L.append('条件期望梯度 oracle（单步真值 × E[Σu³|u1]/u1³）')
-        for j in range(C.NT):
+        for j in range(na):
             q = c['dims']['dim%d' % j]
             L.append('  dim%-5d pearson %.4f  slope %.4f  median_rel %.4f  sign %.4f'
                      % (j, q['pearson'], q['slope'], q['median_rel'],

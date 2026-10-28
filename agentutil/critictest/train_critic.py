@@ -130,6 +130,9 @@ def main():
         raise SystemExit('这是五步波动数据集，请用 --target f5/f5n/f5u3/logf5')
     m_tr, m_va, m_te, m_re = _split(ds)
     u, a, p = ds['u'], ds['a'], ds['p']
+    na = int(a.shape[1])
+    if na not in (1, C.NT):
+        raise SystemExit('动作维数必须是 1 或 %d，收到 %d' % (C.NT, na))
     if target == 'sp5n':
         r_norm = C.window_norm(ds, window=window)
     elif target == 'f5n':
@@ -150,11 +153,11 @@ def main():
 
     ns = Xtr.shape[1]
     bias0 = float(Str.mean())
-    q, qt = C.make_critic_pair(ns, C.NT, args.hidden1, args.hidden2,
+    q, qt = C.make_critic_pair(ns, na, args.hidden1, args.hidden2,
                                seed=args.seed, bias=bias0)
     n_par = sum(x.numel() for x in q.parameters())
     print('\n网络: state %d → %d → %d ∥ action %d → cat %d → 80 → 50 → 1'
-          % (ns, args.hidden1, args.hidden2, C.NT, args.hidden2 + C.NT))
+          % (ns, args.hidden1, args.hidden2, na, args.hidden2 + na))
     print('      参数量 %d（online；target 同构）| 输出层 bias 初值 %.5f' % (n_par, bias0))
 
     opt = torch.optim.Adam(q.parameters(), lr=args.lr)
@@ -212,7 +215,7 @@ def main():
                 save_checkpoint(os.path.join(args.out, 'critic_best.pt'), q, qt,
                                 meta=dict(
                                     target=args.target, feature=args.state_feat,
-                                    window=window, ns=ns, na=C.NT,
+                                    window=window, ns=ns, na=na,
                                     hidden1=args.hidden1, hidden2=args.hidden2,
                                     init_w=3e-3, bias0=bias0, n_params=n_par,
                                     best_step=step, best_val_rmse_mw=mva['rmse'],
@@ -246,7 +249,7 @@ def main():
         # 极端情况（steps<eval_every 且从未 eval）也保存一次
         save_checkpoint(ckpt, q, qt, meta=dict(
             target=args.target, feature=args.state_feat, window=window,
-            ns=ns, na=C.NT,
+            ns=ns, na=na,
             hidden1=args.hidden1, hidden2=args.hidden2, init_w=3e-3,
             bias0=bias0, n_params=n_par, best_step=step,
             best_val_rmse_mw=float('nan'), data=os.path.abspath(args.data),

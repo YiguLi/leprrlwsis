@@ -111,6 +111,10 @@ real 上 factorized 与 `sp5n`64 打平；最佳梯度是 factorized 分解
 臂统计打平（test RMSE 3.0787–3.0844），但都显著优于 `E[F5|u1]` 基线
 （3.1458，约 −0.067 MW / 2%）；动作梯度最好的是 `f5n`（r 0.823 / 符号 0.817）；
 64/256 与三模型集成均无显著收益。
+**标量动作**（一个 action 控五台，1D action）：`f5n` test RMSE 3.0295 /
+R² 0.5514 / MAPE 44.56%，baseline 3.4893，改善 **0.459 MW（13%）**；
+梯度 r 0.861 / 符号 0.936 ⇒ 比 5D 独立动作（改善 2%、符号 0.817）容易学得多，
+是当前综合最好的配置。
 **逐步奖励分解 critic**（详见 [critictest/README_step_decomp.md](critictest/README_step_decomp.md)）：
 两个变体 —— `arch=film`（文档原宽度，183k）与 `arch=per`（用户给定 PER 隐藏层，
 14.5k）。film：test F5 RMSE 3.1005（f5n 3.0832，显著差 0.017 MW），

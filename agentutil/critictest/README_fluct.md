@@ -6,7 +6,7 @@
 |---|---|
 | 标签 | `F5 = |P(u1,a) − P(u0,a)| + Σ_{t=2..5} |P(u_t,a) − P(u_{t-1},a)|` |
 | 风速输入 | **只有窗口首步 `u1`**；`u0, u2..u5` 不喂网络 |
-| 动作 | `a∈[0,0.5]^5`，`u0..u5` 上**同一个 `a`**（受控口径） |
+| 动作 | 两种口径：**5D 独立**（默认）或 **1D 同因子**（`--scalar_action`，`a_i=a0`）；`u0..u5` 上同一个动作 |
 | 风速来源 | `FFC_speed_noise_1.csv` 同一列连续 5 行 + **前一行 `u0`** |
 | 参考对照 | `F4 = Σ_{t=2..5}|…|`（窗口内 4 项，不含 `u0`） |
 
@@ -29,6 +29,8 @@
 | real | 3,000 | 独立窗口 + 5 种结构化动作族 |
 
 * 合法窗口（`u0..u5` 全部在 `[3.5,25]`）：**273,971** 个。
+* 两个数据文件：`aifflor_ua_f5.npz`（5D 独立动作）与
+  `aifflor_ua_f5_scalar.npz`（1D 同因子，`--scalar_action`）。
 * `F5∈[0.10, 45.08] MW`，均值 **6.84**、sd **4.38**；`F4` 均值 5.47；
   `F5/F4` 均值 **1.302**（第一项相对 `u0` 的波动约占 30%）。
 * FLORIS 层 **0 坏点 / 0 兜底**。
@@ -104,6 +106,45 @@ critic 抓到了那一点点动作信息**。
 
 ---
 
+### 3.4 标量动作：一个 action 控五台（`--scalar_action`）
+
+把动作改成 **1 维 `a0`，广播到 5 台**（`a_i=a0`），数据用
+`make_dataset_fluct.py --scalar_action` 重新生成；网络 fc2 变成 `101→80`，
+参数量 **13,993**。base=`f5`、`f5n` 各 40k 步重训。
+
+| 方法（1D action） | test R² | test RMSE | test MAPE | real R² | real RMSE | real MAPE | 梯度 r / 斜率 / 符号 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| base `f5` | 0.549135 | 3.0370 | 46.32% | **0.506331** | **3.2223** | 45.38% | 0.8265 / 0.7084 / 0.8601 |
+| **`f5n`** | **0.551351** | **3.0295** | **44.56%** | 0.503030 | 3.2331 | **44.16%** | **0.8610 / 0.7530 / 0.9364** |
+| baseline `E[F5|u1]` | 0.404846 | 3.4893 | 61.81% | 0.433906 | 3.4506 | 46.84% | — |
+
+test 配对 bootstrap：
+
+```text
+RMSE(f5)  − RMSE(f5n)  = +0.0076  [−0.0044, +0.0206]   ⇒ 打平
+RMSE(f5n) − RMSE(base) = −0.4594  [−0.5029, −0.4158]   ⇒ 动作信息显著
+RMSE(f5)  − RMSE(base) = −0.4526  [−0.4990, −0.4059]   ⇒ 动作信息显著
+```
+
+real 上 `f5n − base = −0.2180`（CI `[−0.2648, −0.1714]`），同样显著。
+
+**和 5 维动作对比（注意：动作空间不同，不能逐样本配对）**：
+
+| 项 | 5D 独立动作 | 1D 同因子 |
+|---|---:|---:|
+| `f5n` test RMSE / R² | 3.0832 / 0.4904 | **3.0295 / 0.5514** |
+| baseline test RMSE | 3.1458 | 3.4893 |
+| f5n 相对 baseline 的 RMSE 改善 | 0.0628 MW（2.0%） | **0.4594 MW（13.2%）** |
+| f5n 梯度 r / 斜率 / 符号 | 0.823 / 0.831 / 0.817 | **0.861 / 0.753 / 0.936** |
+
+⇒ **一个动作控五台时，动作对 F5 的影响变得更"相干"、更容易学**：
+相对基线的改善从 2% 提到 13%，梯度符号一致率从 0.817 提到 0.936。
+代价是幅度估计更保守（斜率 0.753，5D 是 0.831），做梯度步仍需放大。
+
+逐族（f5n，1D）：`level` R²=0.521/RMSE 3.168，`cp_opt` 0.495/3.509，
+`farm_opt` 0.441/3.222，`low` 0.527/2.731，`high` 0.456/3.474。
+`cp_opt` 与 `high` 最难，符合"高轴向因子/强尾流区 F5 更非线性"的直觉。
+
 ## 4. 结论：什么是最好的方法
 
 * **纯 test 拟合**：`f5u3` 的名义 RMSE 最低（3.0787 / R² 0.49186），但与
@@ -114,14 +155,22 @@ critic 抓到了那一点点动作信息**。
   `∂F5/∂a` 做寻优，推荐 `f5n`。
 * **容量**：64/256 没带来收益（test RMSE 3.0901，比 16/100 的 3.0832 还差），
   这个任务的瓶颈是风速噪声，不是网络容量。
+* **动作空间比目标参数化更重要**：把 5 维独立动作换成 **1 个动作控五台**
+  后，`f5n` 相对 baseline 的 RMSE 改善从 **0.063 MW（2%）变成 0.459 MW（13%）**，
+  test R² 从 0.490 提到 **0.551**，梯度符号从 0.817 提到 **0.936**。
+  原因是一个共同轴向因子对五台/尾流是“相干”影响，比 5 维独立动作更容易学。
 * **推荐**：
-  - 要一个**综合最稳**的直接 F5 critic → **`f5n` 16/100**（梯度最好，拟合打平）。
-  - 只看 test RMSE → **`f5u3` 16/100**（名义最好，但优势不显著）。
-  - 只看 MAPE / real → **`f5` 16/100**。
+  - 若实际控制允许“五台同因子” → 用 **1D action + `f5n`**：
+    test RMSE 3.0295 / R² 0.5514 / MAPE 44.56%，梯度 r 0.861、符号 0.936；
+    这是本任务目前**综合最好**的配置。
+  - 若必须 5 维独立动作 → 要一个综合最稳的直接 F5 critic 用 `f5n` 16/100
+    （梯度最好，拟合与 f5/f5u3 打平）；只看 test RMSE 用 `f5u3`；
+    只看 MAPE / real 用 `f5`。
   - 不建议 64/256 或三模型集成（收益不显著）。
-* **最重要的结论**：`F5` 的 R² 只有 ~0.49，不是网络不行，而是**只给 u1 时
-  风速窗口的逐点差异不可约**；critic 能把 `E[F5|u1]` 基线再降 ~0.063–0.067 MW
-  （显著，约 2%），这部分才是动作信息。
+* **最重要的结论**：5D 动作下 `F5` 的 R² 只有 ~0.49，不是网络不行，而是
+  **只给 u1 时风速窗口的逐点差异不可约**；critic 能把 `E[F5|u1]` 基线再降
+  ~0.063–0.067 MW（显著，约 2%），这部分才是动作信息。换成 1D 同因子后，
+  可学习的那部分动作信息变大（13%），但 R² 仍只有 0.55，风速噪声仍是主体。
 
 ---
 
@@ -147,6 +196,18 @@ $PY = 'C:\Users\yigul\anaconda3\envs\llmenhancedwsis\python.exe'
 # 4) 对照 + 配对 bootstrap
 & $PY agentutil\critictest\compare_fluct.py `
     --out agentutil\critictest\results\compare_fluct.json
+
+# 5) 标量动作（一个 action 控五台）重测 base 与 f5n
+& $PY agentutil\critictest\make_dataset_fluct.py --scalar_action `
+    --out agentutil\critictest\data\aifflor_ua_f5_scalar.npz
+& $PY agentutil\critictest\train_critic.py `
+    --data agentutil\critictest\data\aifflor_ua_f5_scalar.npz `
+    --out  agentutil\critictest\results\f5_scalar_f5n_16 `
+    --target f5n --steps 40000
+& $PY agentutil\critictest\train_critic.py `
+    --data agentutil\critictest\data\aifflor_ua_f5_scalar.npz `
+    --out  agentutil\critictest\results\f5_scalar_f5_16 `
+    --target f5 --steps 40000
 ```
 
 产物：`data/aifflor_ua_f5.npz`、`results/f5_*/`（`critic_best.pt` /

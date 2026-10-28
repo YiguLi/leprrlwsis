@@ -43,6 +43,26 @@ import numpy as np  # noqa: E402
 import common as C  # noqa: E402
 
 
+SCALAR_FAMILIES = ('level', 'cp_opt', 'farm_opt', 'low', 'high')
+
+
+def _scalar_actions(family, m, rng):
+    """单动作（五台同因子）的真实工况族；返回 (m,1)。"""
+    if family == 'level':
+        c = rng.uniform(0.05, 0.45, size=m)
+    elif family == 'cp_opt':
+        c = 1.0 / 3.0 + rng.normal(0.0, 0.04, size=m)
+    elif family == 'farm_opt':
+        c = 0.20 + rng.normal(0.0, 0.04, size=m)
+    elif family == 'low':
+        c = rng.uniform(0.025, 0.20, size=m)
+    elif family == 'high':
+        c = rng.uniform(0.30, 0.48, size=m)
+    else:
+        raise ValueError('未知标量动作族 %r' % (family,))
+    return np.clip(c, 0.02, C.A_HI).reshape(-1, 1)
+
+
 def _stats(name, u, a, f5, f4, p5):
     u1 = u
     return dict(
@@ -65,7 +85,11 @@ def main():
     ap.add_argument('--n_real_per_family', type=int, default=600)
     ap.add_argument('--window', type=int, default=C.WINDOW)
     ap.add_argument('--seed', type=int, default=0)
-    ap.add_argument('--out', default='agentutil/critictest/data/aifflor_ua_f5.npz')
+    ap.add_argument('--out', default=None,
+                    help='默认：5 维动作用 aifflor_ua_f5.npz，'
+                         '标量动作用 aifflor_ua_f5_scalar.npz')
+    ap.add_argument('--scalar_action', action='store_true',
+                    help='一个动作控制五台（a_i=a0，动作输入 1 维）')
     ap.add_argument('--calibrated', action='store_true')
     ap.add_argument('--power_scale', type=float, default=None)
     ap.add_argument('--chunk', type=int, default=4096)
@@ -75,13 +99,18 @@ def main():
     window = int(args.window)
     if window != C.WINDOW:
         raise SystemExit('本脚本固定 window=%d' % C.WINDOW)
+    scalar = bool(args.scalar_action)
+    action_dim = 1 if scalar else C.NT
+    if args.out is None:
+        args.out = ('agentutil/critictest/data/aifflor_ua_f5_scalar.npz'
+                    if scalar else 'agentutil/critictest/data/aifflor_ua_f5.npz')
     t0 = time.time()
     C.set_seeds(args.seed)
     rng = np.random.RandomState(args.seed)
 
     print('=' * 100)
-    print('critictest 五步功率波动和数据集：aifflor / FLORIS   window=%d  seed=%d'
-          % (window, args.seed))
+    print('critictest 五步功率波动和数据集：aifflor / FLORIS   window=%d  %s  seed=%d'
+          % (window, 'scalar action (1D)' if scalar else '5D action', args.seed))
     print('=' * 100)
     phys = C.build_physics(calibrated=args.calibrated,
                            power_scale=args.power_scale)
@@ -101,7 +130,8 @@ def main():
     print('合法窗口（含 u0）%d；来自 %d 天 × %d 步'
           % (starts.size, days.shape[1], days.shape[0]))
 
-    n_real = int(args.n_real_per_family) * len(C.REAL_FAMILIES)
+    families = SCALAR_FAMILIES if scalar else C.REAL_FAMILIES
+    n_real = int(args.n_real_per_family) * len(families)
     need = int(args.n_train) + int(args.n_val) + int(args.n_test) + n_real
     if need > starts.size:
         raise SystemExit('需要 %d 个窗口，但只有 %d 个合法窗口' % (need, starts.size))
@@ -116,7 +146,7 @@ def main():
     for name, idx in (('train', idx_tr), ('val', idx_va), ('test', idx_te)):
         u_seq = C.windows_from_pool(days, starts[idx], cols[idx], window=window)
         u0 = days[starts[idx] - 1, cols[idx]]
-        a = rng.uniform(C.A_LO, C.A_HI, size=(u_seq.shape[0], C.NT))
+        a = rng.uniform(C.A_LO, C.A_HI, size=(u_seq.shape[0], action_dim))
         t = time.time()
         f5, f4, p_steps, p_prev, a_eff = C.power_fluct(
             phys, u0, u_seq, a, chunk=args.chunk, verbose=True, window=window)
@@ -136,8 +166,9 @@ def main():
     u0_r = days[starts[idx_re] - 1, cols[idx_re]]
     a_list, fam_list = [], []
     per = int(args.n_real_per_family)
-    for j, fam in enumerate(C.REAL_FAMILIES):
-        a_list.append(C._family_actions(fam, per, rng))
+    for j, fam in enumerate(families):
+        a_list.append(_scalar_actions(fam, per, rng) if scalar
+                      else C._family_actions(fam, per, rng))
         fam_list.append(np.full(per, j, dtype=np.int16))
     a_r = np.vstack(a_list)
     fam_r = np.concatenate(fam_list)
@@ -177,7 +208,7 @@ def main():
         per_split[sp['name']] = _stats(sp['name'], sp['u_seq'][:, 0], sp['a'],
                                        sp['f5'], sp['f4'], sp['p5'])
     per_family = {}
-    for j, fam in enumerate(C.REAL_FAMILIES):
+    for j, fam in enumerate(families):
         m = FAM == j
         if np.any(m):
             per_family[fam] = dict(
@@ -189,17 +220,21 @@ def main():
         created=datetime.datetime.now().isoformat(timespec='seconds'),
         source='aifflor / FLORIS (quasi-steady), FFC_speed_noise_1.csv windows',
         seed=int(args.seed), window=window, fluct=True,
+        action_dim=int(action_dim), scalar_action=bool(scalar),
         physics=pmeta, anchor_u10_a13_mw=anchor,
         target_def='F5 = |P(u1,a)-P(u0,a)| + sum_{t=2..5}|P(ut,a)-P(u(t-1),a)|; '
                    'F4 = sum_{t=2..5}|...|',
         u_note='u 只给 u1；u0/u_seq 只用于标签/真值梯度，不喂网络',
-        a_note='动作在 u0..u5 上保持同一个 a（受控口径）',
+        a_note=('一个动作控制五台：a_i=a0，动作输入 1 维' if scalar
+                else '动作在 u0..u5 上保持同一个 5 维 a（受控口径）'),
+        action_note=('scalar action：a0 广播到 5 台' if scalar
+                     else 'independent 5D action'),
         wind_note='同一列连续 %d 行 + 前一行 u0；全部在 [%.1f,%.1f]'
                   % (window, C.U_MIN, C.U_MAX),
         splits=dict(train=int(args.n_train), val=int(args.n_val),
                     test=int(args.n_test), real=int(n_real)),
         split_codes=dict(train=0, val=1, test=2, real=3),
-        real_families=list(C.REAL_FAMILIES),
+        real_families=list(families),
         per_split=per_split, per_family=per_family,
     )
 

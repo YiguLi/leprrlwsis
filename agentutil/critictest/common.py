@@ -137,6 +137,31 @@ def physics_meta(physics):
     )
 
 
+def action_matrix(a, n, nt=NT):
+    """把动作整理成 `(n, action_dim)`；`action_dim=1` 表示五台同因子。
+
+    * `(n, 5)` / `(n, 1)` 原样；
+    * 长度 n 的一维数组 ⇒ 标量动作（每样本一个 a0）；
+    * 长度 5 的一维数组 ⇒ 单个 5 维动作（广播到 n 行）。
+    """
+    arr = np.asarray(a, dtype=np.float64)
+    n = int(n)
+    if arr.ndim == 1:
+        if arr.size == n:
+            arr = arr.reshape(-1, 1)
+        elif arr.size == nt:
+            arr = np.repeat(arr.reshape(1, nt), n, axis=0)
+        else:
+            raise ValueError('一维动作长度 %d 既不是 n=%d 也不是 nt=%d'
+                             % (arr.size, n, nt))
+    if arr.ndim != 2 or arr.shape[0] != n:
+        raise ValueError('动作形状 %s 与 n=%d 不匹配' % (arr.shape, n))
+    if arr.shape[1] not in (1, nt):
+        raise ValueError('动作维数必须是 1 或 %d，收到 %d'
+                         % (nt, arr.shape[1]))
+    return arr
+
+
 def power_of(physics, u, a, chunk=4096, verbose=False):
     """批量算风场出力 [MW]；返回 `(P, a_eff)`。
 
@@ -147,19 +172,23 @@ def power_of(physics, u, a, chunk=4096, verbose=False):
       这里再断言一次有限，坏点必须显式暴露，不能静默进入数据集。
     """
     u = np.asarray(u, dtype=np.float64).reshape(-1)
-    a = np.asarray(a, dtype=np.float64).reshape(-1, NT)
+    a = action_matrix(a, u.size)
     if u.size != a.shape[0]:
         raise ValueError('u 与 a 行数不一致: %d vs %d' % (u.size, a.shape[0]))
 
     a_eff = np.empty_like(a)
     for i, row in enumerate(a):
-        a_eff[i] = physics.a_clip(row)
+        c = physics.a_clip(row)          # 标量动作时 a_clip 内部广播成 5 维
+        a_eff[i, 0] = c[0]
+        if a.shape[1] == NT:
+            a_eff[i] = c
+    a_phys = (np.repeat(a_eff, NT, axis=1) if a_eff.shape[1] == 1 else a_eff)
 
     stat0 = AT.stats()
     out = np.empty(u.size, dtype=np.float64)
     for s in range(0, u.size, int(chunk)):
         e = min(s + int(chunk), u.size)
-        farm, _ = AT.eval_batch(physics.model, u[s:e], a_eff[s:e])
+        farm, _ = AT.eval_batch(physics.model, u[s:e], a_phys[s:e])
         out[s:e] = np.asarray(farm, dtype=np.float64) * float(physics.power_scale)
     stat1 = AT.stats()
 
@@ -217,18 +246,19 @@ def windows_from_pool(days, starts, cols, window=WINDOW):
 def power_steps(physics, u_seq, a, chunk=4096, verbose=False, window=WINDOW):
     """同一动作 `a` 在 `window` 个连续风速上的逐点功率。
 
-    返回 `(p_steps (N, window), a_eff (N, NT))`，单位 MW。
-    动作在每个窗口内保持不变（本实验的口径）。
+    返回 `(p_steps (N, window), a_eff (N, action_dim))`，单位 MW。
+    `action_dim=1` 时表示五台同因子（物理层广播到 5 台）。
     """
     window = int(window)
     u_seq = np.asarray(u_seq, dtype=np.float64).reshape(-1, window)
-    a = np.asarray(a, dtype=np.float64).reshape(-1, NT)
     n = u_seq.shape[0]
-    if a.shape[0] != n:
-        raise ValueError('u_seq 与 a 行数不一致: %d vs %d' % (n, a.shape[0]))
+    a = action_matrix(a, n)
     a_eff = np.empty_like(a)
     for i, row in enumerate(a):
-        a_eff[i] = physics.a_clip(row)
+        c = physics.a_clip(row)
+        a_eff[i, 0] = c[0]
+        if a.shape[1] == NT:
+            a_eff[i] = c
     # 每个样本的同一动作重复 window 次；u_seq 按行主序展开
     acts = np.repeat(a_eff, window, axis=0)
     p_flat, _ = power_of(physics, u_seq.reshape(-1), acts, chunk=chunk,
@@ -534,7 +564,7 @@ def predict_power(model, u, a, target='sp', feature='u10', batch=8192,
     """用 critic 预测风场出力（单步 P 或五步和 P5）[MW]（eval / no_grad）。"""
     model.eval()
     u = np.asarray(u, dtype=np.float64).reshape(-1)
-    a = np.asarray(a, dtype=np.float64).reshape(-1, NT)
+    a = action_matrix(a, u.size)
     out = np.empty(u.size, dtype=np.float64)
     with torch.no_grad():
         for s in range(0, u.size, int(batch)):
@@ -549,7 +579,7 @@ def predict_target(model, u, a, feature='u10', batch=8192):
     """网络原始输出（目标空间；sp 臂下就是 specific power s）。"""
     model.eval()
     u = np.asarray(u, dtype=np.float64).reshape(-1)
-    a = np.asarray(a, dtype=np.float64).reshape(-1, NT)
+    a = action_matrix(a, u.size)
     out = np.empty(u.size, dtype=np.float64)
     with torch.no_grad():
         for s in range(0, u.size, int(batch)):
