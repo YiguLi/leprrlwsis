@@ -82,8 +82,11 @@ class SP_TD3(object):
         }
         # critic 专用：--critic_action_first ⇒ 动作从第一层进网（fc1 = ns+na → 4·hidden1）
         critic_cfg = dict(net_cfg)
+        # 默认结构 = **v6**（2026-10-29 起与 `--critic_arch` 的 CLI 默认值一致；
+        # 2026-10 之前是 v2，更早是 v1）。这里只是"调用方没给 args.critic_arch 时"的回落，
+        # `aifflor_main.py` 总会传值 ⇒ 生产路径由 CLI 决定。
         critic_cfg['arch'] = ('v1af' if int(getattr(args, 'critic_action_first', 0) or 0)
-                              else str(getattr(args, 'critic_arch', 'v1') or 'v1'))
+                              else str(getattr(args, 'critic_arch', 'v6') or 'v6'))
         critic_cfg['act'] = str(getattr(args, 'critic_act', 'relu') or 'relu')
         critic_cfg['out_init'] = str(getattr(args, 'critic_out_init', '3e3') or '3e3')
         critic_cfg['feat_power'] = bool(int(getattr(args, 'critic_feat_power', 0) or 0))

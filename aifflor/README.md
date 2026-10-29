@@ -310,6 +310,22 @@ corr(WFSim, FLORIS 标定后) = 0.999959        ← 轨迹几乎一致
 * 若要与 WFSim 精确对齐：把观测按 FLORIS 口径归一化，或训练时把 reward/cost
   统一乘 `1/1.037`（这正是早先实测的 `COST_SCALE` 等效值 1.816→0.972 的同一件事）。
 
+### 上层 critic 结构（`--critic_arch`，**默认 `v6`**）
+
+`--critic_arch` 的**默认值 = `v6`**（2026-10-29 起；2026-10 之前是 `v2`，更早是 `v1`）：
+
+```text
+v6 : s→32→32 ∥ a→64→64 → [32+64]=96 → 128→256→256→128→1   # 原始 a 不再重复拼入
+v2 : s: ns→hidden1→hidden2 ∥ a→32→64 → square(带残差)→128→64→1   # 旧生产默认
+v1 : fc1(x)→fc4→cat(a)→fc2→fc5→fc3                            # 历史口径
+```
+
+- 该开关同时作用于 **H 和 L 两个 critic**（HSRL 下 `agent_L` 共用同一 `args`；
+  L 的动作维 = 1，`--critic_feat_power` 会因 `nb_actions ≠ feat_nt+1` 自动关闭）。
+- 其它默认：`--critic_act relu`、`--critic_out_init fanin`、`--critic_bias_init none`。
+- **`--critic_wind5` 仍默认 0（关闭）** —— 需要 8 维 critic state 时必须显式传 1。
+- 复现 2026-10 之前的 v2 run：显式传 `--critic_arch v2`。
+
 ### 上层 critic 五风速（`--critic_wind5 1`）
 
 默认 `--critic_wind5 0`：上层 actor/critic 都是原 4 维 `obs`，历史路径逐位不变。
@@ -325,7 +341,7 @@ critic state  = 原 obs + [u2,u3,u4,u5]/10            # u1 已含在 obs 中
 - 这是 **asymmetric critic**：memory 存完整 critic state；`update_policy` 里 actor 只取前
   `nb_states` 维，critics 用完整 state；`q_cost_rate` / `policy_batch_cost_rate` 也做同样切片；
 - actor 的 `select_action`、测试函数仍只用原 `obs`，不会把未来风速带进决策；
-- 与 v6 组合示例：
+- 与 v6 组合示例（`v6` 已是默认，这个 flag 现在可省；保留是为了显式可读）：
 
 ```powershell
 python aifflor/aifflor_main.py --critic_arch v6 --critic_wind5 1 ...

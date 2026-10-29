@@ -551,6 +551,10 @@ $PY = 'C:\Users\yigul\anaconda3\envs\llmenhancedwsis\python.exe'
     --run output\AIFFLOR-runNN --ckpt checkpoint_20000 --n 200 --wind5_mode day
 ```
 
+> **2026-10-29 起 `--critic_arch` 的默认值已改为 `v6`**（`--critic_wind5` 仍默认 **0**）。
+> 上面命令里的 `--critic_arch v6` 现在是**冗余但显式**的 —— 保留它便于与历史命令逐字对照；
+> 若照 §13.5 的口径想复现 run14 的 8 维 critic，仍必须显式 `--critic_wind5 1`。
+
 > **一切训练/评测命令跑之前仍须 `ask_user_question` 得到明确同意**（AGENTS.md 的强制规则）。
 
 ### 13.7 成本实测口径

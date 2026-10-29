@@ -2153,8 +2153,11 @@ if __name__ == "__main__":
     parser.add_argument('--c1_bound_coef', default=0.0, type=float,
                         help='把越界量也计入 c1（MW·step / 单位 a）: c1 += 该系数 × Σ[max(0,-a)+max(0,a-0.5)]'
                              '；让 cost critic 看到"界"（否则它会外推界内斜率、把界外估成更便宜）。0=关')
-    parser.add_argument('--critic_arch', default='v2', choices=['v1', 'v1af', 'v2', 'v3', 'v4', 'v5', 'v6'],
-                        help='critic 结构: v1=历史; v1af=动作首层; v2=双流(s16-100 ∥ a32-64 → square(残差)→128→64)')
+    parser.add_argument('--critic_arch', default='v6', choices=['v1', 'v1af', 'v2', 'v3', 'v4', 'v5', 'v6'],
+                        help='critic 结构（默认 **v6**，2026-10-29 起）: '
+                             'v6=双流(s→32→32 ∥ a→64→64)→128→256→256→128→1（原始 a 不重复拼入）; '
+                             'v1=历史; v1af=动作首层; '
+                             'v2=双流(s16-100 ∥ a32-64 → square(残差)→128→64)（2026-10 之前的生产默认）')
     parser.add_argument('--critic_act', default='relu', choices=['relu', 'leaky'],
                         help='critic 激活: relu=历史; leaky=LeakyReLU(0.01)（防死单元）')
     parser.add_argument('--critic_out_init', default='fanin', choices=['3e3', 'fanin'],
@@ -2350,9 +2353,10 @@ if __name__ == "__main__":
         prCyan('[DIAG] u={} pr={} scalar={} freeze_g={} lam_fixed={} pen_h={}'.format(
             DIAG['u'], DIAG['pr'], DIAG['scalar'], DIAG['freeze_g'],
             DIAG['lam_fixed'], DIAG['pen_h']))
-    # 生产口径的 critic 结构（v2 + 无 bias，2026-10 起为默认；--critic_arch/--critic_bias_init 可覆盖）
+    # 生产口径的 critic 结构（**v6** + 无 bias，2026-10-29 起为默认；--critic_arch/--critic_bias_init 可覆盖）
+    #   历史：2026-10 之前是 v2；`--critic_wind5` 仍**默认关闭**（0）。
     prCyan('[critic] arch={} act={} out_init={} bias_init={} rate={} cost_clip={} warmup_wt_sched={}'.format(
-        'v1af' if int(getattr(args, 'critic_action_first', 0) or 0) else getattr(args, 'critic_arch', 'v2'),
+        'v1af' if int(getattr(args, 'critic_action_first', 0) or 0) else getattr(args, 'critic_arch', 'v6'),
         getattr(args, 'critic_act', 'relu'), getattr(args, 'critic_out_init', '3e3'),
         getattr(args, 'critic_bias_init', 'none'), getattr(args, 'rate', 0.003),
         getattr(args, 'cost_clip', 1), getattr(args, 'warmup_wt_sched', 'lhs')))
@@ -2361,7 +2365,7 @@ if __name__ == "__main__":
                   '（a_i = a_0；第 1..4 维存在但无用, 梯度恒 0）；g 独立。'
                   'warmup/探索噪声之后仍强制相等。c1 平滑={} critic_arch={}'.format(
                       int(getattr(args, 'c1_smooth', 0) or 0),
-                      getattr(args, 'critic_arch', 'v2')))
+                      getattr(args, 'critic_arch', 'v6')))
     _c1b = float(getattr(args, 'c1_bound_coef', 10.0))
     if _c1b > 0.0:
         prCyan('[c1] 越界项已开启: c1 += {} × Σ[max(0,-a)+max(0,a-0.5)]  (MW·step)'.format(_c1b))
