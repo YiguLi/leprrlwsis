@@ -1938,16 +1938,21 @@ if __name__ == "__main__":
                              '(默认 0.1)')
 
     # ---- 探索噪声幅度 (逐维; 与 td3perrb 上层同口径) ----
+    parser.add_argument('--wt_noise_mode', default='wide',
+                        choices=['wide', 'legacy'],
+                        help='WT 探索噪声口径: wide=aifflor 默认，逐维幅度 U[wt_noise,wt_noise_max]、'
+                             '触边截断噪声、不衰减; legacy=旧 ε 衰减口径')
     parser.add_argument('--wt_noise', default=0.05, type=float,
-                        help='WT 5 维探索噪声幅度 (±wt_noise*eps)')
+                        help='wide: 风机维幅度下界; legacy: 起始幅度 (±wt_noise*eps)')
+    parser.add_argument('--wt_noise_max', default=0.25, type=float,
+                        help='wide: 风机维幅度上界（逐维 U[wt_noise,wt_noise_max]）')
     parser.add_argument('--sig_noise_max', default=0.2, type=float,
                         help='SOC 目标信号维探索噪声幅度上限 (±sig_noise_max*eps)')
     parser.add_argument('--sig_noise_min', default=0.0, type=float,
                         help='SOC 目标信号维探索噪声**地板** (eps 收敛到它, 不再降到 0); '
                              '0.01 ⇒ SOC 目标抖动 ±0.05 MWh = SOC_TOL(0.1) 的一半')
     parser.add_argument('--wt_noise_floor', default=0.0, type=float,
-                        help='WT 5 维探索噪声**地板** (0 = 20k 步后这些维完全不再探索); '
-                             '0.01 = 行为带 [0,0.5] 的 2%%, 折算单机功率抖动约 ±2.4%%')
+                        help='legacy 专用: WT 5 维噪声地板 (wide 模式忽略)')
 
     # ---- 24h 相位特征 (--phase_feat) ----
     parser.add_argument('--phase_feat', default=0, type=int, choices=[0, 1, 2],
@@ -2192,12 +2197,24 @@ if __name__ == "__main__":
     DIAG['pen_h'] = float(getattr(args, 'pen_h', -1.0))
     DIAG['center'] = int(getattr(args, 'diag_center_reward', 0))
     _nzs = int(getattr(args, 'noise_zero_step', 0) or 0)
-    prCyan('[train] pen_h={} wt_noise={} floor={} | 噪声日程: ε 1→0 于 step {}（warmup {} 起，跨 {} 块/{} 步）'.format(
-        getattr(args, 'pen_h', 100.0), getattr(args, 'wt_noise', 0.05),
-        getattr(args, 'wt_noise_floor', 0.0),
-        (_nzs if _nzs > 0 else '按 --epsilon={} 块'.format(getattr(args, 'epsilon', 0))),
-        getattr(args, 'warmup', None), getattr(args, 'epsilon', 0),
-        (int(getattr(args, 'epsilon', 0)) * 5)))
+    if str(getattr(args, 'wt_noise_mode', 'wide')) == 'wide':
+        prCyan('[train] pen_h={} | WT noise=wide U[{},{}]（逐维、触边截断噪声、**不衰减**）| '
+               'signal noise ε 1→0 于 {} 块'.format(
+                   getattr(args, 'pen_h', 100.0),
+                   getattr(args, 'wt_noise', 0.05),
+                   getattr(args, 'wt_noise_max', 0.25),
+                   (_nzs if _nzs > 0 else getattr(args, 'epsilon', 0))))
+    else:
+        prCyan('[train] pen_h={} wt_noise={} floor={} | 噪声日程: ε 1→0 于 step {}'
+               '（warmup {} 起，跨 {} 块/{} 步）'.format(
+                   getattr(args, 'pen_h', 100.0),
+                   getattr(args, 'wt_noise', 0.05),
+                   getattr(args, 'wt_noise_floor', 0.0),
+                   (_nzs if _nzs > 0 else '按 --epsilon={} 块'.format(
+                       getattr(args, 'epsilon', 0))),
+                   getattr(args, 'warmup', None),
+                   getattr(args, 'epsilon', 0),
+                   (int(getattr(args, 'epsilon', 0)) * 5)))
     if any([DIAG['u'] >= 0, DIAG['pr'] >= 0, DIAG['scalar'], DIAG['freeze_g'],
             DIAG['lam_fixed'] >= 0]):
         prCyan('[DIAG] u={} pr={} scalar={} freeze_g={} lam_fixed={} pen_h={}'.format(
@@ -2333,6 +2350,9 @@ if __name__ == "__main__":
                      noise_clip=args.noise_clip,
                      cost_critic_mode=args.cost_critic_mode,
                      wt_noise=args.wt_noise,
+                     wt_noise_mode=args.wt_noise_mode,
+                     wt_noise_min=args.wt_noise,
+                     wt_noise_max=args.wt_noise_max,
                      sig_noise_max=args.sig_noise_max,
                      sig_noise_min=args.sig_noise_min,
                      wt_noise_floor=args.wt_noise_floor,

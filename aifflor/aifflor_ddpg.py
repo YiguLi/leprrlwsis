@@ -44,7 +44,8 @@ class SP_TD3(object):
                  cost_critic_mode='max',
                  wt_noise=0.05, sig_noise_max=0.2, sig_noise_min=0.01,
                  wt_noise_floor=0.01,
-                 nstep=1, target_agg='min', critic_nb_states=None):
+                 nstep=1, target_agg='min', critic_nb_states=None,
+                 wt_noise_mode='wide', wt_noise_min=None, wt_noise_max=0.25):
 
         # Determine device first
         self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -258,6 +259,18 @@ class SP_TD3(object):
         self.sig_noise_max = float(sig_noise_max)
         self.sig_noise_min = float(sig_noise_min)
         self.wt_noise_floor = float(wt_noise_floor)
+        # ---- 宽动作覆盖（aifflor 默认）----
+        # 每个风机维每次决策独立抽幅度 A_i ~ U[wt_noise_min, wt_noise_max]，
+        # 噪声 ~ U[-A_i,A_i]，再按 [0,0.5] 边界**截断噪声**（不是截断动作），
+        # 且不乘 ε ⇒ 训练全程保持宽覆盖，不衰减。
+        mode = str(wt_noise_mode or 'wide').strip().lower()
+        self.wt_noise_mode = 'wide' if mode == 'wide' else 'legacy'
+        self.wt_noise_min = float(wt_noise if wt_noise_min is None
+                                  else wt_noise_min)
+        self.wt_noise_max = float(wt_noise_max)
+        if self.wt_noise_min > self.wt_noise_max:
+            self.wt_noise_min, self.wt_noise_max = (self.wt_noise_max,
+                                                    self.wt_noise_min)
         # ---- 风机探索噪声: **恒定 `wt_noise`（默认 0.05），不随 ε 衰减** ----
         #   用户口径（2026-10）: 全部风机、全部 TD3 族方法, 风机行为噪声恒为 0.05。
         #   实现 = 让 WT 维的 amp 与 floor 相等 ⇒ 凸组合
@@ -684,16 +697,37 @@ class SP_TD3(object):
     def select_action(self, s_t, decay_epsilon=True):
         action = to_numpy(self._act(self.actor, to_tensor(np.array([s_t])))).squeeze(0)
 
-        # 逐维探索噪声: 均匀 U(-amp, +amp), amp = max(amp_dim*eps, floor_dim)
-        # (信号维幅值 0.2*eps 且地板 0.05; WT 维 0.05*eps; 见 __init__)
+        # 逐维探索噪声
+        #   wide（aifflor 默认）: 风机维 A_i ~ U[wt_noise_min, wt_noise_max]，
+        #       noise_i ~ U[-A_i,A_i]，并按 [0,0.5] **截断噪声**；不乘 ε ⇒ 不衰减。
+        #   legacy: 原口径 U(-amp,amp)，amp=amp_full·ε+floor·(1−ε)。
         if self.is_training:
-            eps = max(self.epsilon, 0.0)
-            # ε 收敛到**地板**而非 0: amp = amp_full·ε + floor·(1−ε)
-            #   ε=1 ⇒ amp = explore_amp（起始幅度不变）
-            #   ε=0 ⇒ amp = explore_floor（**永不完全停止探索**）
-            #   ε 线性降到 0 的用时 = args.epsilon 决策（H=4000⇒20k 环境步）
-            amp = self.explore_amp * eps + self.explore_floor * (1.0 - eps)
-            action = action + (np.random.random(self.nb_actions) - 0.5) * 2.0 * amp
+            _wide_wt = (self.wt_noise_mode == 'wide'
+                        and self.nb_actions in (self.na_box, self.na_box + 1))
+            if _wide_wt:
+                n = min(self.na_box, self.nb_actions)
+                a_raw = np.asarray(action[:n], dtype=float)
+                amp = np.random.uniform(self.wt_noise_min,
+                                        self.wt_noise_max, size=n)
+                noise = np.random.uniform(-amp, amp)
+                # 只截断**噪声**：actor 输出本身在 [0,0.5] 内时，保证 a+noise 不越界；
+                # 若 actor 输出本来就越界，保留原动作（让 CheckAction 照常记越界罚）。
+                inside = (a_raw >= 0.0) & (a_raw <= 0.5)
+                noise = np.where(
+                    inside,
+                    np.clip(noise, 0.0 - a_raw, 0.5 - a_raw),
+                    noise)
+                action[:n] = a_raw + noise
+                if self.nb_actions > n:
+                    # 第 6 维 SOC 信号仍沿用原衰减口径（HSRL 会覆写 amp/floor）
+                    eps = max(self.epsilon, 0.0)
+                    sig_amp = (self.explore_amp[n] * eps
+                               + self.explore_floor[n] * (1.0 - eps))
+                    action[n] += (np.random.random() - 0.5) * 2.0 * sig_amp
+            else:
+                eps = max(self.epsilon, 0.0)
+                amp = self.explore_amp * eps + self.explore_floor * (1.0 - eps)
+                action = action + (np.random.random(self.nb_actions) - 0.5) * 2.0 * amp
 
         # ⚠ --scalar_wt 的**定义**是"五台风机的轴向因子必须相等" ⇒ 噪声加完之后
         #   必须再投影一次，否则实际执行的动作会散开成 5 个不同值、第 1..4 维重新

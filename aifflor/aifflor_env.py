@@ -202,6 +202,9 @@ class WindBatteryAIF(WindBattery):
     # nominal_action_value 继承自 WindBattery = 0.3333（轴向因子 1/3）
     # nominal_action = None（继承）
 
+    #: aifflor 默认：每个固定风速日重复 3 个 episode（宽动作覆盖）
+    DAY_REPEAT = 3
+
     BLOCK = 5                         # H 决策周期（步）；与 hsrl_warmup / 主循环一致
     PREFETCH_K = 5                    # 每次预取算 u_idx+1 … u_idx+K
 

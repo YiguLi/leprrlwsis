@@ -334,6 +334,39 @@ python aifflor/aifflor_main.py --critic_arch v6 --critic_wind5 1 ...
 实现入口：`_append_wind5_H`（`aifflor_main.py`）、`SP_TD3(critic_nb_states=...)`
 （`aifflor_ddpg.py`）、`aifflor_hsrl` 的 actor 切片。
 
+### 宽动作覆盖（aifflor 默认）
+
+aifflor 默认使用**宽动作覆盖**，用于 offline/在线 replay 的动作可辨识性：
+
+1. **每个固定风速日重复 3 个 episode**（`WindBatteryAIF.DAY_REPEAT = 3`）：
+   `episode 0..2 → day[0]`，`3..5 → day[1]`，依此类推；其他项目仍 `DAY_REPEAT=1`。
+2. **风机 5 维噪声**：
+   ```text
+   A_i ~ U[wt_noise, wt_noise_max]     # 默认 U[0.05, 0.25]，逐维、每次决策独立
+   noise_i ~ U[-A_i, A_i]
+   ```
+   若 `a_i + noise_i` 触到 `[0,0.5]`，只把该维**噪声**截到可行区间
+   （`noise_i ← clip(noise_i, −a_i, 0.5−a_i)`）；若 actor 输出本身越界，仍保留原动作，
+   `CheckAction` 照常记越界罚。
+3. **风机噪声不衰减**：wide 模式不乘 ε，训练全程保持宽覆盖；
+   第 6 维 SOC 信号仍沿用原 `sig_noise_max → sig_noise_min` 衰减。
+4. 口径开关：
+   ```powershell
+   # 默认 wide
+   python aifflor/aifflor_main.py ...
+   # 回到旧 ε 衰减口径
+   python aifflor/aifflor_main.py --wt_noise_mode legacy ...
+   ```
+
+相关参数：
+
+| 参数 | 默认 | 说明 |
+|---|---:|---|
+| `--wt_noise_mode` | `wide` | `wide` / `legacy` |
+| `--wt_noise` | 0.05 | wide 的幅度下界；legacy 的起始幅度 |
+| `--wt_noise_max` | 0.25 | wide 的幅度上界 |
+| `--wt_noise_floor` | 0.0 | 仅 legacy 使用 |
+
 ### ⚠ 两个**不能**平移的东西（别混淆）
 
 1. **`P_F` 平滑阈值（`P_F_LIMIT = 3 MW`）、`W_GAP = 10 MW`、`L_CLIP_CAP = 20 MW`

@@ -45,6 +45,8 @@ class WindBattery:
     # `nominal_action` 非 None 时直接用它（可给完整向量）；否则用标量铺满 nt 维。
     nominal_action_value = 0.3333
     nominal_action = None
+    #: 每个固定风速日重复使用的 episode 数（1 = 历史口径；aifflor 覆写为 3）
+    DAY_REPEAT = 1
 
     def nominal(self):
         """标称动作向量（长度 = num_turbine）。"""
@@ -99,7 +101,10 @@ class WindBattery:
         self.E = 0.25
         
         # 2. reset风速（固定随机序列，保证跨项目可比较）
-        idx = self.episode_count % len(FIXED_DAY_SEQUENCE)
+        # 每个风速日重复 DAY_REPEAT 次：episode 0..R-1 → day[0],
+        # R..2R-1 → day[1], ...（默认 R=1 = 历史逐日口径）
+        idx = (self.episode_count // max(1, int(self.DAY_REPEAT))) \
+            % len(FIXED_DAY_SEQUENCE)
         self.j = FIXED_DAY_SEQUENCE[idx]
         self.episode_count += 1
         # print(self.j)
