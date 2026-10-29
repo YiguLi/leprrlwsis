@@ -44,6 +44,9 @@ I/O 映射（**本次任务的核心**）
   与 `aifflor/README.md` §3.8；未加 `--hsrl` 时一行都不会被调用）
 * `aifflor_main.py`    —— `td3per/td3per_main.py` + 替换表（`agentutil/port_aifflor.py`）
   + `--hsrl` 分支的 `train_hsrl()`（与旧 `train()` 并列）
+* `aifflor_branch.py`  —— **新写**：同块首宽动作覆盖（branch）的全部口径
+  （块首快照/恢复、测试动作集、5 步 branch 块、触发/诊断），见 §3.9 与
+  `documentation/aifflor_branch_wide_coverage_plan.md`；默认 `--branch_every 0` 关闭
 
 克隆的**唯一真源**是 `agentutil/port_aifflor.py`（替换表 + `--check` 可逆性校验）。
 

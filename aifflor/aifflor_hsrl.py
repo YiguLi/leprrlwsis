@@ -645,12 +645,19 @@ def q_cost_rate(agent, s_t, a_t=None, horizon='infinite', agg=None, gamma=None,
     return rate
 
 
-def recent_states(agent, n=HSRL_DUAL_RECENT_N):
+def recent_states(agent, n=HSRL_DUAL_RECENT_N, source=0):
     """回放缓冲里**最近 n 条**转移的 (states, actions, costs)（按**写入顺序**）。
 
     直接读 `memory._storage` / `memory._next_idx`（`PER_buffer.ReplayBuffer` 的口径）：
     `_storage` 是列表、`_next_idx` 是环形写指针 ⇒ 未环绕时取尾部、已环绕时按模取环尾。
     **不调用 `memory.sample()`** ⇒ 不消耗随机流、不改变训练轨迹（可复现性不被破坏）。
+
+    `source`（`branch` 方案，计划 §4.4）：只取该来源的转移。口径是
+    "**回放缓冲里最近 n 条 `src == source` 的转移**"。
+    * 无元数据（`memory._src is None`，= 所有既有项目 / branch 关闭）⇒ **不过滤**，
+      行为与历史**逐位相同**；
+    * branch 开启 ⇒ 默认 `source=0`（actor）⇒ λ 的分子**永远不看 branch 样本**
+      （否则 4/5 的近端样本是随机测试动作，会把 λ 顶到上限 —— 计划 §9.1）。
     """
     mem = getattr(agent, 'memory', None)
     st = list(getattr(mem, '_storage', []) or [])
@@ -660,11 +667,21 @@ def recent_states(agent, n=HSRL_DUAL_RECENT_N):
                 np.zeros((0,), dtype=np.float32))
     k = min(max(1, int(n)), L)
     m = int(getattr(mem, '_maxsize', L) or L)
+    src_arr = getattr(mem, '_src', None)
+    use_filter = (src_arr is not None) and (source is not None)
     if L < m:                                   # 未环绕：写入顺序 == 列表顺序
-        idxs = list(range(L - k, L))
+        back = (L - 1 - i for i in range(L))
     else:                                       # 已环绕：_next_idx 指向最老的一条
         nx = int(getattr(mem, '_next_idx', 0))
-        idxs = [int((nx - k + i) % m) for i in range(k)]
+        back = (((nx - 1 - i) % m) for i in range(L))
+    idxs = []
+    for i in back:
+        if use_filter and int(src_arr[i]) != int(source):
+            continue
+        idxs.append(int(i))
+        if len(idxs) >= k:
+            break
+    idxs.reverse()                              # 由旧到新（与历史顺序一致）
     s = np.asarray([st[i][0] for i in idxs], dtype=np.float32)
     a = np.asarray([st[i][1] for i in idxs], dtype=np.float32)
     c = np.asarray([float(st[i][2 + 1]) for i in idxs], dtype=np.float32)   # 第 4 项 = cost

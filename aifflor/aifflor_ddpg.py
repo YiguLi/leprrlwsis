@@ -15,6 +15,13 @@ from util import *
 
 criterion = nn.MSELoss()
 
+#: replay 的**来源标签**（branch 分层采样用）。取值必须与 `aifflor_branch.SRC_*` /
+#: `aifflor_branch.MODE_ACTOR` **逐位一致**（`agentutil/test_aifflor_branch_contract.py`
+#: 会断言这件事）。这里刻意**不 import** `aifflor_branch`：ddpg 是纯算法层，
+#: 不该依赖"动作集/环境口径"那一层（也避免任何潜在的 import 环）。
+SRC_ACTOR, SRC_BRANCH = 0, 1
+MODE_ACTOR = 0
+
 
 class SP_TD3(object):
     """TD3 + PER + Lagrangian cost constraint.
@@ -45,7 +52,8 @@ class SP_TD3(object):
                  wt_noise=0.05, sig_noise_max=0.2, sig_noise_min=0.01,
                  wt_noise_floor=0.01,
                  nstep=1, target_agg='min', critic_nb_states=None,
-                 wt_noise_mode='wide', wt_noise_min=None, wt_noise_max=0.25):
+                 wt_noise_mode='wide', wt_noise_min=None, wt_noise_max=0.25,
+                 branch_mix=0.0, branch_sup_beta=0.0):
 
         # Determine device first
         self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -112,6 +120,23 @@ class SP_TD3(object):
         # Create replay buffer (PER reused unchanged)
         self.memory = PrioritizedReplayBuffer(size=args.rmsize,
                                               alpha=args.PER_alpha)
+
+        # ---- branch（同块首宽动作覆盖）: 来源分层采样 ----
+        #   `branch_mix` = critic 批里 **branch** 的占比（0 = 关闭 ⇒ 历史行为逐位不变）。
+        #   计划书：documentation/aifflor_branch_wide_coverage_plan.md §4.2/§4.3。
+        #   ⚠ 约束（§4.4）：branch 数据**只**允许进 critic TD（与可选的辅助监督）；
+        #     actor loss / λ / EMA / curriculum / 日志 / 测试 一律只用 actor。
+        self.branch_mix = float(min(0.5, max(0.0, float(branch_mix or 0.0))))
+        #: 可选的 branch 1-step 辅助监督权重 β（计划 §6.2；由主循环按块推进/衰减）
+        self.branch_sup_beta = float(branch_sup_beta or 0.0)
+        #: `True` ⇒ 每条转移都显式打 `src` 标签（环形缓冲会复用旧槽，必须覆盖写）
+        self._tag_replay = bool(self.branch_mix > 0.0)
+        #: 下层 BESS 的版本号（由主循环推进；只做 branch 标签过期的诊断口径）
+        self.lower_ver = 0
+        #: 诊断：上一批的 branch 占比 / 累计
+        self.last_batch_branch_frac = 0.0
+        self.n_updates_with_branch = 0
+        self.n_branch_transitions = 0
         self.random_process = OrnsteinUhlenbeckProcess(size=nb_actions,
                                                        theta=args.ou_theta,
                                                        mu=args.ou_mu,
@@ -314,15 +339,64 @@ class SP_TD3(object):
         out[..., :self.na_box] = torch.clamp(a[..., :self.na_box], 0.0, 0.5)
         return out
 
+    # ---- 采样：branch 未启用时与历史 `memory.sample(...)` 逐位相同 ------------
+    def _sample_batch(self):
+        """采一批，并返回 `(…, idxes, src)` —— `src` 是本批每条转移的来源标签。
+
+        * branch 关闭（`branch_mix == 0` 或缓冲里还没 branch）⇒ 走历史
+          `memory.sample(...)`（整池一次抽，数学与原实现逐位相同）；
+        * branch 开启 ⇒ `n_branch = round(branch_mix·bsize)`，剩下的给 actor，
+          两池各自**在池内**做优先度比例采样；branch 池内部按 mode 均衡
+          （`by_mode=True`，避免某个 mode 独占）。
+        * 池不够时**自动回退**到"能抽多少抽多少"，绝不让 batch 变形（BSIZE 恒定）。
+        """
+        mem = self.memory
+        n_branch = 0
+        n_actor = self.batch_size
+        if self.branch_mix > 0.0 and mem.n_branch > 0 and mem.n_actor > 0:
+            n_branch = int(round(self.branch_mix * self.batch_size))
+            n_branch = min(n_branch, int(mem.n_branch), self.batch_size - 1)
+            n_actor = self.batch_size - n_branch
+            if n_actor > int(mem.n_actor):
+                n_actor = int(mem.n_actor)
+                n_branch = self.batch_size - n_actor
+            if n_actor <= 0 or n_branch <= 0:
+                n_branch, n_actor = 0, self.batch_size
+
+        if n_branch <= 0:
+            out = mem.sample(self.batch_size, self.PER_beta,
+                             self.beta_increment_per_sampling)
+            src = self._src_of(out[-1])
+            self.last_batch_branch_frac = float(np.mean(src == SRC_BRANCH)) if src.size else 0.0
+            return tuple(list(out) + [src])
+
+        idxes = (mem.sample_pool(SRC_ACTOR, n_actor)
+                 + mem.sample_pool(SRC_BRANCH, n_branch, by_mode=True))
+        out = mem.sample_by_idxes(idxes, self.PER_beta)
+        src = self._src_of(out[-1])
+        self.last_batch_branch_frac = float(np.mean(src == SRC_BRANCH)) if src.size else 0.0
+        self.n_updates_with_branch += 1
+        return tuple(list(out) + [src])
+
+    def _src_of(self, idxes):
+        """下标 → 来源标签数组（无元数据 ⇒ 全 actor）。"""
+        idx = np.asarray(idxes, dtype=np.int64).reshape(-1)
+        if not self.memory.has_meta:
+            return np.zeros(idx.size, dtype=np.int8)
+        return np.asarray(self.memory._src[idx], dtype=np.int8)
+
     def update_policy(self):
         # A2: β 退火 —— 每次更新推进 self.PER_beta (0.4→1)，写回实例属性
         # (原 PER_buffer.sample 内递增是局部变量，退火永不生效；此处推进后传入)
         self.PER_beta = min(1.0, self.PER_beta + self.beta_increment_per_sampling)
 
         # Sample batch
-        state_batch, action_batch, profit_batch, cost_batch,\
-        next_state_batch, terminal_batch, weights, batch_idxes \
-        = self.memory.sample(self.batch_size, self.PER_beta, self.beta_increment_per_sampling)
+        #   branch 未启用 ⇒ `_sample_batch()` 走历史 `memory.sample(...)`，逐位不变；
+        #   branch 启用 ⇒ 按 **来源分池** 采样（计划 §4.2：actor 50–60% / branch 40–50%，
+        #   branch 内部按 mode 均衡），并额外返回本批的 `src` 标签。
+        (state_batch, action_batch, profit_batch, cost_batch,
+         next_state_batch, terminal_batch, weights, batch_idxes,
+         batch_src) = self._sample_batch()
         # reshape data
         profit_batch = profit_batch.reshape(-1, 1)
         cost_batch = cost_batch.reshape(-1, 1)
@@ -336,6 +410,21 @@ class SP_TD3(object):
         if _SC != 1.0:
             cost_batch = cost_batch / _SC
         terminal_batch = terminal_batch.reshape(-1, 1)
+
+        # ---- branch: 本批的来源掩码（计划 §4.3）----
+        #   * critic TD 用**全部**（actor + branch）；
+        #   * **actor loss 只用 actor**（branch 的动作是随机测试动作，不是策略采样，
+        #     拿它做策略梯度会把 actor 拉向"随机动作上的 Q 最大点"，且 λ 会被
+        #     branch 的高成本动作顶格 —— 正是计划 §9.1 要避免的失败模式）；
+        #   * 无 branch 时 `actor_mask is None` ⇒ 所有张量切片退化为 `[:]`，逐位不变。
+        _src_np = np.asarray(batch_src).reshape(-1)
+        if _src_np.size == self.batch_size and (_src_np == SRC_BRANCH).any():
+            actor_mask = torch.tensor(_src_np == SRC_ACTOR, dtype=torch.bool,
+                                      device=self.device)
+            branch_mask = ~actor_mask
+        else:
+            actor_mask = None
+            branch_mask = None
 
         # Ensure all tensors are on the correct device
         state_batch = to_tensor(state_batch).to(self.device)
@@ -411,6 +500,20 @@ class SP_TD3(object):
         value_loss_c2 = torch.mean(torch.mean(weights * (q_batch_c2 - target_q_batch_c) ** 2, dim=1))
 
         critic_loss = value_loss_p + value_loss_p2 + value_loss_c + value_loss_c2
+
+        # ---- 可选：branch 的 1-step 辅助监督（计划 §6.2 的 β·L_sup，默认 β=0 关闭）----
+        #   口径：在**同一尺度**（c1/s_c）上做 Huber 回归，目标**不带 bootstrap**
+        #   ⇒ 等价于"γ=0 的 cost TD"，只作用于 branch 行 ⇒ 强化"动作 → 块成本"的
+        #   直接可辨识性，而不动 actor/λ/日志。
+        #   ⚠ 若 c1 的重尾让 β 过大，会压过 TD 项（计划 §9.8）⇒ 由主循环线性衰减到 0.2·β0。
+        if self.branch_sup_beta > 0.0 and branch_mask is not None:
+            _nb = int(branch_mask.sum().item())
+            if _nb > 0:
+                _tgt_c = cost_batch[branch_mask].detach()
+                _sup = (nn.functional.smooth_l1_loss(q_batch_c[branch_mask], _tgt_c)
+                        + nn.functional.smooth_l1_loss(q_batch_c2[branch_mask], _tgt_c))
+                critic_loss = critic_loss + self.branch_sup_beta * _sup
+
         critic_loss.backward()
 
         nn.utils.clip_grad_norm_(self.critic_p.parameters(), max_norm=2.0, norm_type=2)
@@ -443,29 +546,35 @@ class SP_TD3(object):
 
         # ---- TD3: delayed policy update ----
         self.update_count += 1
-        if self.update_count % self.policy_delay == 0:
+        if self.update_count % self.policy_delay == 0 and \
+                (actor_mask is None or int(actor_mask.sum().item()) >= 2):
             self.actor.zero_grad()
             # 演员评估点 = **投影后**的确定性动作（与 select_action 一致）。
             # ⚠ 旧写法利润塔用 `self.actor(state_batch)`（未投影），成本塔用 `_act`（投影）
             #   ⇒ 开 --farm_level/--scalar_wt 时两条通道评估的是**不同动作**，
             #   利润梯度跑到动作流形之外。此处统一走 `_act`（未开投影时逐位等价）。
-            _a_cur = self._act(self.actor, actor_state_batch)
+            # branch（计划 §4.3）：actor loss **只用 actor 行** —— 无 branch 时
+            #   `_sel = slice(None)` ⇒ 与历史完全一致。
+            _sel = slice(None) if actor_mask is None else actor_mask
+            _pol_s_act = actor_state_batch[_sel]      # actor 输入（前 nb_states 维）
+            _pol_s_cri = state_batch[_sel]            # critic 输入（可能含 wind5 特权维）
+            _a_cur = self._act(self.actor, _pol_s_act)
             min_p_cur = self._pair_min(
-                self.critic_p([state_batch, _a_cur]),
-                self.critic_p2([state_batch, _a_cur]))
+                self.critic_p([_pol_s_cri, _a_cur]),
+                self.critic_p2([_pol_s_cri, _a_cur]))
             # clamp(min=0) on cost: prevents the actor from exploiting a
             # (pathological) negative cost Q inside the Lagrangian objective.
             _a_cur_c = self._clip_box(_a_cur)          # cost 塔: clip 后动作
             min_c_cur = self._aggregate_pair(
-                self.critic_c([state_batch, _a_cur_c]),
-                self.critic_c2([state_batch, _a_cur_c])).clamp(min=0.0)
+                self.critic_c([_pol_s_cri, _a_cur_c]),
+                self.critic_c2([_pol_s_cri, _a_cur_c])).clamp(min=0.0)
 
             # cost 为 +
             _crit = min_p_cur - self.lam * min_c_cur
             if self.aux_model:
                 # k=1 model-based 策略改进: 用 1-step 模型的梯度（无 bootstrap 噪声）
-                _aux = (self.aux_r([actor_state_batch, _a_cur])
-                        - self.lam * self.aux_c([actor_state_batch, _a_cur]))
+                _aux = (self.aux_r([_pol_s_act, _a_cur])
+                        - self.lam * self.aux_c([_pol_s_act, _a_cur]))
                 # 预热: aux 前 aux_warmup 次更新不参与（避免用没学好的模型）
                 _beta = self.aux_mix * min(1.0, self.aux_count / max(1, self.aux_warmup))
                 _obj = _beta * _aux + (1.0 - _beta) * _crit
@@ -519,13 +628,20 @@ class SP_TD3(object):
 
         # ---- H 层更新数据收集：本批（batch）统计，供主循环块末汇总 ----
         if self.record_update_stats:
+            # branch：`q_c_mean`/`q_c2_mean` 是 **λ1 的分子**（`--hsrl_dual_q_src update_batch`）
+            # ⇒ 必须只用 actor 行（计划 §4.4：branch 的 c1 不进对偶）。无 branch 时
+            #   这两个表达式与 `q_batch_c.mean()` 逐位相同。
+            _qcm = (float(q_batch_c.mean().item()) if actor_mask is None
+                    else float(q_batch_c[actor_mask].mean().item()))
+            _qcm2 = (float(q_batch_c2.mean().item()) if actor_mask is None
+                     else float(q_batch_c2[actor_mask].mean().item()))
             self.update_stats.append({
                 'td_p_mean': float(np.mean(td_errors_p_np)),
                 'td_c_mean': float(np.mean(td_errors_c_np)),
                 'q_p_mean': float(q_batch_p.mean().item()),
                 'q_p2_mean': float(q_batch_p2.mean().item()),
-                'q_c_mean': float(q_batch_c.mean().item()),
-                'q_c2_mean': float(q_batch_c2.mean().item()),
+                'q_c_mean': _qcm,
+                'q_c2_mean': _qcm2,
                 'min_p_next_mean': float(min_p_next.mean().item()),
                 'min_c_next_mean': float(min_c_next.mean().item()),
                 'target_p_mean': float(target_q_batch_p.mean().item()),
@@ -588,8 +704,49 @@ class SP_TD3(object):
 
     def observe(self, r_t, c_t, s_t1, done):
         if self.is_training:
+            idx = self.memory._next_idx
             self.memory.append(self.s_t, self.a_t, r_t, c_t, s_t1, done)
+            self._tag_actor(idx)
             self.s_t = s_t1
+
+    # ---- 来源标签（branch 分层采样的唯一依据；不进 critic state）--------------
+    def _tag_actor(self, idx):
+        """把刚写入的槽显式标成 **actor**。
+
+        ⚠ 必须显式覆盖写：replay 是环形缓冲，复用到的槽上一次可能是 branch
+        （`src=1`）⇒ 不覆盖就会把 actor 数据误判成 branch（actor loss 会漏掉它，
+        而 branch 池会混进 actor 样本）。
+        """
+        if not self._tag_replay:
+            return
+        self.memory.set_meta(idx, src=SRC_ACTOR, mode=MODE_ACTOR,
+                             block_id=-1, lower_ver=int(self.lower_ver))
+
+    def push_branch_transition(self, s_t, a_t, r_t, c_t, s_t1, done,
+                              mode=0, block_id=-1, lower_ver=None, boot=None):
+        """写一条 **branch** 转移（同块首的测试动作，`source=branch`）。
+
+        ⚠ 与 actor 的关键差异（计划 §4.5）：
+        * **不进 n-step 链**：不碰 `_pending`，直接写 memory；
+        * `n_boot = γ`（只有 1 个块），而不是 actor 的 `γ^n`；
+        * `done` 只影响**它自己**的 bootstrap（`boot=0` 当且仅当该 branch 块是 episode 末）。
+
+        Returns
+        -------
+        idx : int  该转移在 replay 里的下标（供诊断/断言），未写则 -1
+        """
+        if not self.is_training:
+            return -1
+        gam = float(self.discount if boot is None else boot)
+        lv = int(self.lower_ver if lower_ver is None else lower_ver)
+        idx = int(self.memory._next_idx)
+        self.memory.append(s_t, a_t, r_t, c_t, s_t1, done)
+        if self._boot is not None and 0 <= idx < len(self._boot):
+            self._boot[idx] = 0.0 if done else gam
+        self.memory.set_meta(idx, src=SRC_BRANCH, mode=int(mode),
+                             block_id=int(block_id), lower_ver=lv)
+        self.n_branch_transitions += 1
+        return idx
 
     # ---- n 步回报: 写入侧 --------------------------------------------------
     def _push_transition(self, s_t, a_t, r_t, c_t, s_t1, done, boot):
@@ -603,6 +760,7 @@ class SP_TD3(object):
         self.memory.append(s_t, a_t, r_t, c_t, s_t1, done)
         if self._boot is not None and 0 <= idx < len(self._boot):
             self._boot[idx] = boot
+        self._tag_actor(idx)
 
     def _emit_nstep(self, start, n_used):
         """把 _pending[start : start+n_used] 折叠成一条 n 步转移写入 memory。
@@ -632,7 +790,9 @@ class SP_TD3(object):
         if not self.is_training:
             return
         if self.nstep <= 1:
+            idx = self.memory._next_idx
             self.memory.append(s_t, a_t, r_t, c_t, s_t1, done)
+            self._tag_actor(idx)
             return
         self._pending.append((s_t, a_t, r_t, c_t, s_t1, done))
         # ---- 滑窗 (stride-1): 每来一个新块就结算**队首**那一条, 队列长度稳定在 n-1 ----

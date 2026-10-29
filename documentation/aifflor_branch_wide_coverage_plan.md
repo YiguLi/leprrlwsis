@@ -1,6 +1,6 @@
 # AIFFLOR 宽动作覆盖 + 同块首 branch 训练计划
 
-> 状态：**设计稿 / 未实施**
+> 状态：**已实施**（2026-10-29）—— 实施记录、与设计稿的偏差、以及"哪些地方刻意没按字面做"见文末 **§13**。
 > 基准提交：`e116e8e`（宽动作覆盖默认值）+ `8906b36`（`--critic_wind5`）
 > 适用：`aifflor` 上层 critic（v6，可选 `critic_wind5`）
 > 预算口径：总训练约 **200k env steps**
@@ -340,40 +340,45 @@ Q_c level 是否漂移
 
 ### 8.1 数据/环境
 
-- [ ] `aifflor_env.py`：提供块首 state 快照/恢复（`u_idx, E, P_G_prev, price_idx, lower state`）；
-- [ ] `aifflor_main.py`：block 开始时保存快照；
-- [ ] branch 时恢复快照，跑 5 步，不推进主 episode；
-- [ ] 下层 BESS 在 branch 中冻结/固定规则；
-- [ ] `lower_version` 记录。
+- [x] `aifflor_env.py`：提供块首 state 快照/恢复（`u_idx, E, P_G_prev, price_idx, lower state`）；
+      → 实际落在 **`aifflor/aifflor_branch.py`** 的 `snapshot_env` / `restore_env`
+      （**`aifflor_env.py` 一行未改**：这 6 个标量是 `env.WindBattery` 的公有属性，
+      在环境层再加一层封装没有收益，反而让"哪个才是真源"变模糊；见 §13.2）；
+- [x] `aifflor_main.py`：block 开始时保存快照；
+- [x] branch 时恢复快照，跑 5 步，不推进主 episode；
+- [x] 下层 BESS 在 branch 中冻结/固定规则（`--branch_freeze_lower`，默认 1 = `pb≡0`）；
+- [x] `lower_version` 记录（`agent_H.lower_ver` → replay 的 `lower_ver` 字段 + `df_branch_hsrl.csv`）。
 
 ### 8.2 Replay
 
-- [ ] replay 增加 `source/mode/block_id/lower_version/n_boot`；
-- [ ] branch transition 写入同一 replay；
-- [ ] actor/branch 分池采样 + mode 均衡；
-- [ ] PER 分池，避免 branch 高误差淹没 actor。
+- [x] replay 增加 `source/mode/block_id/lower_version/n_boot`
+      （`n_boot` 复用既有的 `SP_TD3._boot`，不新增数组）；
+- [x] branch transition 写入同一 replay；
+- [x] actor/branch 分池采样 + mode 均衡（`PER_buffer.sample_pool(..., by_mode=True)`）；
+- [x] PER 分池，避免 branch 高误差淹没 actor（**池内**仍按 priority^α 比例抽）。
 
 ### 8.3 训练/日志
 
-- [ ] `update_policy`：critic TD 全部；actor 只用 actor；
-- [ ] lower 只用 actor；
-- [ ] λ/EMA/curriculum 过滤 actor；
-- [ ] CSV/TB/test 过滤 actor；
-- [ ] nstep：branch 1-step，actor 原口径。
+- [x] `update_policy`：critic TD 全部；actor 只用 actor（掩码切片，见 `actor_mask`）；
+- [x] lower 只用 actor（`agent_L` 有**独立的** memory，branch 从不写进去 ⇒ 天然满足）；
+- [x] λ/EMA/curriculum 过滤 actor（`recent_states` 按 `src` 过滤 + `q_c_mean` 只算 actor 行）；
+- [x] CSV/TB/test 过滤 actor（branch 只写 `df_branch_hsrl.csv` 与 `branch/*` TB tag）；
+- [x] nstep：branch 1-step（`n_boot=γ`），actor 原口径。
 
 ### 8.4 动作采样
 
-- [ ] actor/prior/low/high/uniform；
-- [ ] 第 6 维 goal ±1；
-- [ ] 触边只截噪声；
-- [ ] 可选：ramp/交替/单台/折点定向。
+- [x] actor/prior/low/high/uniform（+ 可选的 `ramp`/`alt`/`single`，共 7 种生成器）；
+- [x] 第 6 维 goal ±1（`--branch_goal_pm1`，HSRL 语义下 = ±满可行量）；
+- [x] 触边只截噪声（生成器**按构造**就在 `[0,0.5]` 内 ⇒ 这一步在 branch 里不需要）；
+- [x] 可选：ramp/交替/单台（`--branch_actions prior,low,high,uniform,ramp,alt,single`）；
+      **折点定向（`P_hat` 预筛）未实现**（见 §13.4）。
 
 ### 8.5 诊断脚本
 
-- [ ] 在 `agentutil/` 新建 `probe_cost_grad_hsrl_wind5.py`（路径 bootstrap）；
-- [ ] 支持 8D critic state + smooth/hard c1；
-- [ ] 输出 sign、Pearson、折点比、K_c、actor/data 动作点；
-- [ ] 不跑仿真也能读 checkpoint/CSV 做静态分析（需要仿真时先问）。
+- [x] 在 `agentutil/` 新建 `probe_cost_grad_hsrl_wind5.py`（路径 bootstrap）；
+- [x] 支持 8D critic state + smooth/hard c1（自动推断 checkpoint 的 state 口径）；
+- [x] 输出 sign、Pearson、折点比、K_c、actor/data 动作点；
+- [x] 不跑仿真也能读 checkpoint/CSV 做静态分析（需要仿真时先问）。
 
 ---
 
@@ -452,3 +457,115 @@ $PY = 'C:\Users\yigul\anaconda3\envs\llmenhancedwsis\python.exe'
 ## 12. 一句话
 
 **每个 block 从同一完整块首 state 生成 actor + prior/low/high/uniform 四个测试动作；所有 transition 都进 replay 当正常 TD 数据，但 actor/lower/λ/EMA/日志只使用 actor source；branch 每 10 块一次起步，pilot 10k 步验证，再按 sign/折点比决定是否加密。**
+
+---
+
+## 13. 实施记录（2026-10-29）
+
+### 13.1 文件清单
+
+| 文件 | 改动 |
+|---|---|
+| **`aifflor/aifflor_branch.py`** | **新增**。branch 的**口径单一真源**：CLI（`add_branch_args`）、`parse_modes`、7 种动作生成器、`snapshot_env`/`restore_env`、`run_branch_block`（5 步推进 + `finally` 还原）、`BranchController`（触发/goal/诊断/β 衰减）、`declared_scope()` |
+| `PER_buffer.py` | **改**。`PrioritizedReplayBuffer` 增加**惰性**元数据（`src/mode/block_id/lower_ver`）、`set_meta`、`pool_idxes`、`sample_pool(pool,n,by_mode)`、`sample_by_idxes`。不调 `set_meta` 时 `sample()` 与历史**逐位相同** |
+| `aifflor/aifflor_ddpg.py` | **改**。`branch_mix`/`branch_sup_beta` kwarg；`_tag_actor`；`push_branch_transition`（1 步、`n_boot=γ`、不进 `_pending`）；`_sample_batch`（分池）+ `_src_of`；`update_policy` 的 **actor 掩码**、可选辅助监督、`q_c_mean` 只算 actor 行 |
+| `aifflor/aifflor_hsrl.py` | **改**。`recent_states(..., source=0)`：λ 的分子只在 `src==actor` 的转移里取近端 N 条（无元数据时逐位退回历史） |
+| `aifflor/aifflor_main.py` | **改**。`abr.add_branch_args(parser)`；`agent_H` 构造传 `branch_mix`；`train_hsrl` 里块首快照 → 跑 branch → 写 replay；`lower_ver` 推进；`branch/*` TB；`df_branch_hsrl.csv`；结束时打印汇总 |
+| `agentutil/test_aifflor_branch_contract.py` | **新增**。9 段契约，**28149 条断言**全绿（纯静态） |
+| `agentutil/probe_cost_grad_hsrl_wind5.py` | **新增**。`∂Q_c/∂a` vs 物理 `∂c1/∂a` 的静态探针（见 §8.5） |
+
+**`aifflor_env.py` / `env.py` / `model.py` / `hsrl_cost.py` 一行未改。**
+
+### 13.2 与设计稿的**口径换算**（重要，别照字面读 §3.2）
+
+设计稿写于"第 6 维 = SOC 目标信号 `a6 ∈ [−0.5,0.5]`"的年代。`--hsrl` 之后第 6 维是
+**块总放电量 `g` [MW·min]**（`aifflor_hsrl.HSRL_*`），所以：
+
+| 设计稿 | 实施 |
+|---|---|
+| `--branch_goal_pm1 1` ⇒ "第 6 维随机 ±1" | `g = +D_max`（满放电）/ `−C_max`（满充电），即**满可行量**的 ±；**默认关** |
+| `--branch_freeze_lower 1` ⇒ 下层冻结 | `pb ≡ 0` ⇒ `P_G = P_tur`、`E` 不变 ⇒ 块内 `c1` **只由风机动作决定**（对上层 critic 最干净的反事实） |
+| 冻结下层时的第 6 维 | **恒 0**：`pb≡0` 时 `g` 对物理没有任何作用，留着只污染动作维 |
+| `a_low = [0.05]⁵ + U[0,0.05]` | **改为逐维 `U(0.00, 0.10)`**：字面写法对 `a<0.05` 的覆盖率是 **0%**，达不到 §7 的"边界覆盖 ≥5%"；`high` 同理取 `U(0.40,0.50)` |
+| "branch 不行就加频率" | 保留 `--branch_every`/`--branch_pilot_blocks` 两个旋钮 |
+
+**默认组合 = `--branch_freeze_lower 1 --branch_goal_pm1 0`**：上下层解耦，branch 只改 5 维风机动作。
+
+### 13.3 三个实现上的**坑**（改代码前请看）
+
+1. **`restore_env` 必须在 `make_state` 之后调用。**
+   `s'` 里的 `u2..u5` 来自 `env._upcoming_wind(4)`，它读的是**块末**的 `env.count_wind`；
+   先还原再算 `s'` 就会拿到块首的 4 个风速（而且不报错，只是悄悄错）。
+   `run_branch_block` 里 `make_state(...)` 放在 `try` 内、`restore_env` 放在 `finally`。
+2. **必须先 `restore_env` 再让主循环继续，且 `restore_env` 要把 `env._pf_state` 置 `None`。**
+   `AifflorPhysics.prefetch` 是**整体替换** `_cache`（`aifflor_env.py`），branch 跑完后
+   缓存里是 branch 动作的键；只把 `_pf_state` 恢复成旧值等于撒谎（"缓存有效"这个断言是假的）
+   —— 正是 README §3.5 记载过的那类坑。置 `None` 的代价只是多一次批量求值。
+3. **replay 是环形缓冲 ⇒ actor 必须显式覆盖写 `src`。**
+   被复用到的槽上一次可能是 branch（`src=1`）；不覆盖写就会把 actor 数据误判成 branch
+   （actor loss 漏掉它、branch 池混进 actor 样本）。`_tag_actor` 就是干这个的。
+
+### 13.4 刻意**没有**做（以及为什么）
+
+1. **`aifflor_env.py` 里加 `snapshot()/restore()` 方法**：快照只有 6 个公有标量，
+   在 `aifflor_branch.py` 里做一次就够；加进 env 会让 `env.py` 的"单一真源"多一处分叉。
+2. **折点定向动作（`P_hat` 预筛）**：需要把 `model.feat_power` 的 `P_hat` 搬到 branch 生成器里，
+   且要先知道"当前 state 下哪个 a 让 `P_F≈3`"（要解方程）。现有 `low/high/uniform` 已经
+   覆盖边界；折点覆盖由 `P_F∈[2,4]` 的**实测比例**监控（`branch/cover_fold`），不够再补。
+3. **按 `lower_version` 加权采样**（§9.2）：`--branch_freeze_lower 1`（默认）时 branch 的
+   `c1` **完全不含下层策略** ⇒ 标签不会过期，加权无意义。`lower_ver` 只作诊断记录。
+4. **`actor loss` 里给 branch ≤20% 权重**（§4.3 的备选）：采用主口径"只用 actor"。
+5. **branch 写行为日志**：完全不写（§4.4 的口径），只写 `df_branch_hsrl.csv` 与 `branch/*`。
+
+### 13.5 验证证据
+
+| 项 | 结果 |
+|---|---|
+| `python agentutil/test_aifflor_branch_contract.py` | **28149 条断言全绿**（含：`run_branch_block` 的 `Σr1/Σc1` 与**独立数组重算**逐位一致、`freeze_lower` 时 SOC/pbrule 恒 0、主轨迹逐位还原、PER 环形覆盖后计数正确、`update_policy` 里 **actor 每批只吃 actor 行**、`n_boot` branch=γ/actor=γ^n、`recent_states` 只取 actor） |
+| `--branch_*` CLI | 15 个开关出现在 `--help` 的 `branch` 组里；模块 import 通过；`py_compile` 全绿 |
+| 探针在 `AIFFLOR-run14` 上的读数（n=150，wind5 用**真实**未来 4 步） | sign **51.5%**、Pearson **+0.13**、折点放大比 **0.78**（真值 **21.7 ≈ 解析 21**）、动作增量 R² **+0.0022** ⇒ 三条验收全 FAIL —— **与 §1.1 对 run14 的判断逐条吻合**，说明探针量到的正是计划要修的东西 |
+| 探针的物理侧自校验 | 折点放大比的"真值"实测 21.7，与 `c1 = P_F + 20(P_F−3)⁺` 的解析值 21 一致（偏差来自差分离散） |
+
+### 13.6 复现命令
+
+```powershell
+$PY = 'C:\Users\yigul\anaconda3\envs\llmenhancedwsis\python.exe'
+
+# 0) 契约测试（纯静态，随时可跑）
+& $PY agentutil\test_aifflor_branch_contract.py
+
+# 1) 基线读数（不跑训练）：先确认"要修的病"还在
+& $PY agentutil\probe_cost_grad_hsrl_wind5.py --run output\AIFFLOR-run14 --n 150 --wind5_mode day
+
+# 2) 阶段 A（pilot）：前 2000 块每块 branch（= 10k env steps）
+& $PY aifflor\aifflor_main.py --hsrl --critic_arch v6 --critic_wind5 1 `
+    --branch_actions prior,low,high,uniform --branch_pilot_blocks 2000 `
+    --branch_every 0 --max_steps 10000 --seed 1
+
+# 3) 阶段 B（online）：每 10 块 branch 一次
+& $PY aifflor\aifflor_main.py --hsrl --critic_arch v6 --critic_wind5 1 `
+    --branch_actions prior,low,high,uniform --branch_every 10 --seed 1
+
+# 4) 阶段 B 的 checkpoint 门控（每 5k 步，见 §6.3）
+& $PY agentutil\probe_cost_grad_hsrl_wind5.py `
+    --run output\AIFFLOR-runNN --ckpt checkpoint_20000 --n 200 --wind5_mode day
+```
+
+> **一切训练/评测命令跑之前仍须 `ask_user_question` 得到明确同意**（AGENTS.md 的强制规则）。
+
+### 13.7 成本实测口径
+
+一个 branch 块 = `len(--branch_actions) × 5` 个额外环境步（**另加 5 次下层 BESS 前向**，
+但 BESS 是纯算术、`pb≡0` 时几乎零成本）。
+
+| 配置 | 每 10 块的环境步 | 相对基线 |
+|---|---:|---:|
+| 基线（无 branch） | 50 | 1.00× |
+| `--branch_every 10`（默认 4 个测试动作） | 50 + 20 = 70 | **1.40×** |
+| `--branch_every 4` | 50 + 50 = 100 | **2.00×** |
+| `--branch_every 1`（每块） | 50 + 200 = 250 | 5.00× |
+| `--branch_pilot_blocks 2000 --branch_every 0`（只 pilot） | — | 前 2000 块 5.00× |
+
+> 设计稿 §5 的"K=10 ⇒ 1.3×"是按"每块 5 动作"的近端口径估的；**按上式实际是 1.4×**。
+> `branch_mix` 的额外算力 = 每个 critic 批多 45% 的 branch 行（同一批、同一次反向传播），
+> 不增加前向次数。

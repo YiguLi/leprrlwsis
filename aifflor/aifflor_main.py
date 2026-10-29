@@ -95,6 +95,7 @@ from aifflor import aifflor_turbine as aturb
 from aifflor.aifflor_ddpg import SP_TD3
 from model import proj_farm_level as _proj_farm_level   # 场级降载投影 (--farm_level)
 from aifflor import aifflor_hsrl as hsrl   # --hsrl 分支的全部口径 (单一真源)
+from aifflor import aifflor_branch as abr  # 同块首宽动作覆盖 (branch) 的全部口径
 from util import *
 from td3per.td3per_myfunc import (
     CheckAction, Normalize, Normalize_H,
@@ -1093,6 +1094,34 @@ def train_hsrl(num_iterations_H,
     _tag = os.path.basename(str(output).rstrip('/\\'))
     explore_mix_blocks = int(getattr(args, 'explore_mix_blocks', 0) or 0)
     _wt_lhs_rng = np.random.RandomState(int(getattr(args, 'seed', 0) or 0) + 7919)
+
+    # =================================================================
+    # 同块首宽动作覆盖（branch，计划书 documentation/aifflor_branch_wide_coverage_plan.md）
+    #   * 每个 branch 块：从**同一个块首 state** 再跑 len(modes) 个测试动作 × 5 步；
+    #   * 只写 replay（source=branch），**不推进主 episode、不写任何行为日志**；
+    #   * 随机流独立（`BranchController.rng`）⇒ 开关 branch 不改变 actor 的随机数轨迹。
+    # =================================================================
+    branch_ctl = abr.BranchController(args)
+    _branch_csv = bool(int(getattr(args, 'branch_csv', 1) or 0))
+    lower_ver = 0                      # 下层 BESS 版本（每块 L 更新后 +1；诊断口径）
+    df_branch_rows = []
+    df_branch_written = 0
+    _branch_blk_c1 = float('nan')
+    _branch_blk_r1 = float('nan')
+    _branch_enabled = bool(branch_ctl.enabled)
+
+    def _make_critic_state(_obs, _env, _minute):
+        """块末原始观测 → critic state（`Normalize_H` + 可选 `u2..u5`）。
+
+        ⚠ 必须在 env 处于**块末**时调用（`_append_wind5_H` 读 `env.count_wind`）。
+        branch 与 actor 用**同一个**构造 ⇒ 两边的 s' 口径必然一致。
+        """
+        return _append_wind5_H(Normalize_H(_obs, _minute, phase_mode, phase_table),
+                               _obs, _env, args)
+
+    if _branch_enabled:
+        prCyan(branch_ctl.summary())
+
     while step < num_iterations_H:
         prYellow('########### step:{} ###########'.format(step))
         if observation is None:
@@ -1170,6 +1199,79 @@ def train_hsrl(num_iterations_H,
                 norm_observation, observation, env, args)
             pw_tru = env.PowerOutput(observation[1], applied_action_H)
             pb_l = list()
+
+            # ============================================================
+            # 同块首宽动作覆盖（branch，计划 §3.3）
+            #   此刻 env 恰好停在**块首**（本块一步都还没推进）⇒ 这里就是 s_block。
+            #   跑完由 `run_branch_block` 的 `restore_env` 原样恢复，
+            #   `episode_steps / E / P_G_prev / count_wind / count_price` 一位不变。
+            #   ⚠ 只写 replay（source=branch）：λ/EMA/curriculum/CSV/TB/test 一律不看。
+            # ============================================================
+            if _branch_enabled and branch_ctl.trigger(step):
+                _snap = abr.snapshot_env(env)
+                # 该块末是否 episode 终止（与主循环 `done` 的判据同式）
+                _block_done = bool(
+                    max_episode_length
+                    and (episode_steps + abr.BLOCK - 1) >= max_episode_length - 1)
+                _minute_end = phase_minute_of_day(episode_steps + abr.BLOCK)
+                _blk_id = branch_ctl.begin_block()
+                _c1s, _r1s = [], []
+                for _mode in branch_ctl.modes:
+                    _a5b = branch_ctl.action(_mode)          # 独立随机流
+                    _gb = branch_ctl.goal(feas_c_max, feas_d_max)
+                    _bres = abr.run_branch_block(
+                        env, rbb_system, _a5b, _gb, _snap, _block_done,
+                        _make_critic_state, minute_end=_minute_end,
+                        freeze_lower=branch_ctl.freeze_lower,
+                        viol_derate_coef=args.viol_derate)
+                    _a6b = np.concatenate([np.asarray(_bres['a5'], dtype=float),
+                                           np.array([float(_gb)])])
+                    agent_H.push_branch_transition(
+                        norm_observation_H, _a6b, _bres['r1'], _bres['c1'],
+                        _bres['s2'], _bres['done'], mode=_mode,
+                        block_id=_blk_id, lower_ver=lower_ver)
+                    branch_ctl.note(_mode, _bres)
+                    _c1s.append(float(_bres['c1']))
+                    _r1s.append(float(_bres['r1']))
+                    prPurple('--branch-- [{}] a={} g={:.3f} | r1={:.2f} c1={:.3f} | '
+                           'P_F_mean={:.3f} max={:.3f}'.format(
+                               abr.MODE_NAME[_mode],
+                               np.round(_bres['a5'], 3), _gb, _bres['r1'],
+                               _bres['c1'], float(np.mean(_bres['P_F'])),
+                               _bres['P_F_max']))
+                    if use_csv and _branch_csv:
+                        _a5c = np.asarray(_bres['a5'], dtype=float).reshape(-1)
+                        df_branch_rows.append({
+                            'step': step, 'block_id': _blk_id,
+                            'mode': abr.MODE_NAME[_mode],
+                            **{'a{}'.format(i + 1): float(_a5c[i])
+                               for i in range(_a5c.size)},
+                            'g': float(_gb), 'r1': _bres['r1'], 'c1': _bres['c1'],
+                            'P_F_mean': float(np.mean(_bres['P_F'])),
+                            'P_F_max': _bres['P_F_max'], 'n_fold': _bres['n_fold'],
+                            'soc_start': _bres['soc_start'], 'soc_end': _bres['soc_end'],
+                            'sum_disch': _bres['sum_disch'],
+                            'lam1': float(agent_H.lam), 'lower_ver': int(lower_ver),
+                        })
+                # 注：branch 把 physics 预取缓存填成了测试动作的键，`restore_env` 已把
+                #     `_pf_state` 置 None ⇒ 下一步 `PowerOutput` 会重新预取（无状态残留）。
+                _branch_blk_c1 = float(np.mean(_c1s)) if _c1s else float('nan')
+                _branch_blk_r1 = float(np.mean(_r1s)) if _r1s else float('nan')
+                if upload:
+                    _cov = branch_ctl.coverage()
+                    writer.add_scalar('branch/c1_mean', _branch_blk_c1, step)
+                    writer.add_scalar('branch/r1_mean', _branch_blk_r1, step)
+                    writer.add_scalar('branch/n_trans', branch_ctl.n_trans, step)
+                    writer.add_scalar('branch/cover_lo', _cov['frac_lo'], step)
+                    writer.add_scalar('branch/cover_hi', _cov['frac_hi'], step)
+                    writer.add_scalar('branch/cover_fold', _cov['frac_fold'], step)
+                    writer.add_scalar('branch/buffer_n_branch', agent_H.memory.n_branch, step)
+                    writer.add_scalar('branch/buffer_frac',
+                                      (agent_H.memory.n_branch
+                                       / max(1, len(agent_H.memory))), step)
+                    writer.add_scalar('branch/batch_frac',
+                                      float(getattr(agent_H, 'last_batch_branch_frac', 0.0)),
+                                      step)
 
         prGreen('--H-- ori a_t = {} (g_raw={:.3f} MW·min)'.format(
             np.round(np.asarray(original_action_H, dtype=float), 3), g_raw))
@@ -1336,6 +1438,15 @@ def train_hsrl(num_iterations_H,
                     consecutive_satisfied_H = 0
                 for _ in range(args.utd_l):
                     agent_L.update_policy()
+                # ---- 下层 BESS 版本 +1（`lower_ver` 只是诊断口径）----
+                #   计划 §9.2 担心"branch 用冻结 lower ⇒ 旧 branch 的 c1 标签会过时"：
+                #   `--branch_freeze_lower 1`（默认）时 branch 的 `pb≡0` ⇒ 它的 c1 **完全
+                #   不含下层策略**，标签不会过期 ⇒ 不需要按版本加权采样（这里只记录版本）。
+                lower_ver += 1
+                agent_H.lower_ver = int(lower_ver)
+                if _branch_enabled:
+                    # 计划 §6.2：β 从 β0 线性降到 0.2·β0；β0=0（默认）⇒ 恒 0（关闭）
+                    agent_H.branch_sup_beta = float(branch_ctl.sup_beta(branch_ctl.n_blocks))
                 if consecutive_satisfied_H >= hc.H_CURRICULUM_BLOCKS:
                     d_block_H = max(d_block_H / 2.0, d_block_H_min)
                     consecutive_satisfied_H = 0
@@ -1571,6 +1682,11 @@ def train_hsrl(num_iterations_H,
                 df_written = flush_csv_append_batch(
                     '{}/df_hsrl.csv'.format(output), df_rows, df_written)
                 df_rows = []
+                if df_branch_rows:
+                    df_branch_written = flush_csv_append_batch(
+                        '{}/df_branch_hsrl.csv'.format(output),
+                        df_branch_rows, df_branch_written)
+                    df_branch_rows = []
 
         # ---- Periodic checkpoint ----
         if step > 0 and step % 2000 == 0:
@@ -1719,6 +1835,18 @@ def train_hsrl(num_iterations_H,
                                df_test_rows, df_test_written)
         flush_csv_append_batch('{}/update_stats_H.csv'.format(output),
                                df_update_rows, df_update_written)
+        if _branch_enabled and _branch_csv:
+            flush_csv_append_batch('{}/df_branch_hsrl.csv'.format(output),
+                                   df_branch_rows, df_branch_written)
+
+    if _branch_enabled:
+        # branch 口径汇总（只打日志，不参与任何训练量）
+        prCyan(branch_ctl.summary())
+        prCyan('[branch] replay: actor {} 条 / branch {} 条 | 含 branch 的 critic 批 {} 次 | '
+               '上一批 branch 占比 {:.1%}'.format(
+                   agent_H.memory.n_actor, agent_H.memory.n_branch,
+                   int(getattr(agent_H, 'n_updates_with_branch', 0)),
+                   float(getattr(agent_H, 'last_batch_branch_frac', 0.0))))
 
     if _progress:
         try:
@@ -2137,6 +2265,8 @@ if __name__ == "__main__":
     # aifflor 默认 warmup 风机动作 = 'unified'（一半 LHS + 一半五维统一随机升降噪声）；
     # 其余 main 不传该参数 ⇒ 共享默认仍为 'lhs'，行为逐位不变。
     hwarm.add_warmup_args(parser, wt_sched_default='unified')
+    # 同块首宽动作覆盖（branch）：默认**全关**（--branch_every 0）⇒ 历史行为逐位不变
+    abr.add_branch_args(parser)
     args = parser.parse_args()
     # ---- baseline 动作空间（--scalar_wt）：与场级射线投影互斥 ----
     #   --farm_level: 1 个自由度，但保留逐台形状 a_i = s·c_i
@@ -2340,6 +2470,15 @@ if __name__ == "__main__":
           'critic_nb_states = {} (--critic_wind5={})'.format(
               nb_states_H, PHASE_DIM[int(getattr(args, 'phase_feat', 0))],
               args.phase_feat, critic_nb_states_H, args.critic_wind5))
+    # ---- branch（同块首宽动作覆盖）：critic 批的来源分层比例 ----
+    #   计划书 §4.2：actor 50–60% / branch 40–50%。关闭时 `branch_mix=0` ⇒
+    #   `update_policy` 走历史整池采样路径（逐位不变）。
+    _branch_on = (int(getattr(args, 'branch_every', 0) or 0) > 0
+                  or int(getattr(args, 'branch_pilot_blocks', 0) or 0) > 0)
+    _branch_frac = (float(getattr(args, 'branch_critic_frac', 0.45) or 0.0)
+                    if _branch_on else 0.0)
+    _branch_beta = (float(getattr(args, 'branch_sup_beta', 0.0) or 0.0)
+                    if _branch_on else 0.0)
     agent_H = SP_TD3(nb_states=nb_states_H, nb_actions=6, args=args,
                      critic_nb_states=critic_nb_states_H,
                      lam_max=(_HCFG['lam_max'] if _HCFG else 100.0), lam_min=(_HCFG['lam_min'] if _HCFG else 3.0),
@@ -2356,10 +2495,21 @@ if __name__ == "__main__":
                      sig_noise_max=args.sig_noise_max,
                      sig_noise_min=args.sig_noise_min,
                      wt_noise_floor=args.wt_noise_floor,
-                     nstep=args.nstep, target_agg=args.target_agg)
+                     nstep=args.nstep, target_agg=args.target_agg,
+                     branch_mix=_branch_frac, branch_sup_beta=_branch_beta)
     print('[H] nstep={} target_agg={} (n 步回报: 自助传播深度 50->{:.1f}; '
           '复现历史 run1~run10 请传 --nstep 1)'.format(
               args.nstep, args.target_agg, 50.0 / max(1, args.nstep)))
+    if _branch_on:
+        prCyan(abr.declared_scope())
+        prCyan('[branch] critic 批 branch 占比 = {:.2f} | 每 {} 块一次 | pilot 前 {} 块每块 | '
+               'freeze_lower={} | goal_pm1={} | 辅助监督 β0={} (衰减 {} 块) | CSV={}'.format(
+                   _branch_frac, int(getattr(args, 'branch_every', 0) or 0),
+                   int(getattr(args, 'branch_pilot_blocks', 0) or 0),
+                   int(getattr(args, 'branch_freeze_lower', 1) or 0),
+                   int(getattr(args, 'branch_goal_pm1', 0) or 0),
+                   _branch_beta, int(getattr(args, 'branch_sup_blocks', 20000) or 20000),
+                   int(getattr(args, 'branch_csv', 1) or 0)))
     if args.viol_derate > 0:
         print('[H] 越界乘性惩罚 c={:.2f}: r1 的风机收益 × exp(-{:.2f}·Σ前5维越界量); '
               '记录列(revenue/turbine_profit/degradation/profit)不变'.format(

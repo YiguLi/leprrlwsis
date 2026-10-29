@@ -852,3 +852,106 @@ aifflor 用回 `--env TD3PER`。
 | 输出目录 | **`output/AIFFLOR-runNN`** ✅（产物 `df_aifflor.csv` + tfevents；`--hsrl` 时为 `df_hsrl.csv` 等，见 §3.8） |
 | 外部验证（6 随机日 × 100 分钟，每步随机动作） | 非有限值 **0** 条 |
 | `u=10, a=1/3` 单点 | **3.294116 MW**（标定后现值，作为回归锚） |
+
+---
+
+## 3.9 `--branch_*`：同块首宽动作覆盖（2026-10 新增）
+
+> 计划书 = `documentation/aifflor_branch_wide_coverage_plan.md`（§13 是实施记录）。
+> 口径单一真源 = **`aifflor/aifflor_branch.py`**。
+
+### 要解决什么
+
+`AIFFLOR-run14`（v6 + `--critic_wind5 1`）的离线读数：`∂Q_c/∂a` 与物理 `∂c1/∂a`
+的 sign 一致率 **~52%**、Pearson **≈0**、**折点放大比 0.78（真值 21.7）**
+⇒ critic 基本没学到"动作 → 波动成本"。
+
+根因**不是**网络容量（离线 C1 回归 R²≈0.99），而是在线**行为策略的动作分布太窄**：
+同一个块首 state 上 actor 只留下 1 个动作，动作边际只解释 value 方差的 ~1%
+（风速/电价解释了 ~96%）。
+
+### 做法（一句话）
+
+**每个分支块从同一个「完整块首 state」再跑若干个测试动作**，把它们各自的
+块级 `(s, a, Σr1, Σc1, s′, done)` 当**正常 TD 数据**写进同一个 replay；
+但 `actor loss / 下层 BESS / λ / EMA / curriculum / CSV / TB / test`
+**只用 actor 来源的数据**。
+
+```
+块 b 的块首 ──► actor: 5 步（真正推进主 episode）  ─► replay(src=actor, n_boot=γ^5)
+              └► branch ×4: 各自 5 步（跑完 restore）─► replay(src=branch, n_boot=γ)
+```
+
+### ⚠ 与计划书的一处**口径换算**（HSRL 语义）
+
+计划书里第 6 维是"SOC 目标信号 `±1`"；`--hsrl` 之后第 6 维是**块总放电量 `g` [MW·min]**。
+于本实现：
+
+| 开关 | 含义 |
+|---|---|
+| `--branch_freeze_lower 1`（**默认**） | branch 内下层 BESS 冻结在 `pb ≡ 0` ⇒ `P_G = P_tur`、`E` 不变 ⇒ 块内 `c1` **只由风机动作决定** |
+| 冻结时的 `g` | **恒 0**（`pb≡0` 时 `g` 无物理作用，留着只污染动作维） |
+| `--branch_goal_pm1 1` | 仅在 `--branch_freeze_lower 0` 时有物理作用：`g` 取 `+D_max`（满放电）/ `−C_max`（满充电） |
+
+⇒ **默认 = 上下层解耦，branch 只改 5 维风机动作。**
+
+### 动作集（`--branch_actions`，默认 `prior,low,high,uniform`）
+
+| mode | 生成式 | 覆盖 |
+|---|---|---|
+| `prior` | `[0.2,0.2,0.2,0.2,1/3] + 逐维 U(−0.05,0.05)` | 中性工作点 |
+| `low` | 逐维 `U(0.00, 0.10)` | 强降载边界（`a<0.05` 占一半） |
+| `high` | 逐维 `U(0.40, 0.50)` | 满发边界（`a>0.45` 占一半） |
+| `uniform` | 逐维 `U(0, 0.5)` | 全域无偏 |
+| `ramp` / `alt` / `single` | 斜坡 / 奇偶交替 / 单台扰动 | 形状与异向（可选） |
+
+* 全部**按构造**落在 `[0,0.5]` ⇒ 不需要"触边只截噪声"那一步（actor 分支才需要）。
+* `low/high` 的带**刻意**取 `[0,0.10]`/`[0.40,0.50]`（计划书字面的 `[0.05]+U[0,0.05]`
+  对 `a<0.05` 的覆盖率是 **0%**，达不到"边界覆盖 ≥5%"）；可用
+  `--branch_low_lo/hi`、`--branch_high_lo/hi` 覆盖。
+
+### Replay 与采样
+
+| 项 | 实现 |
+|---|---|
+| 标签 | `src`（0=actor/1=branch）、`mode`、`block_id`、`lower_ver` —— **只用于采样/诊断，绝不进 critic state** |
+| 存储 | **同一个 replay**（`PER_buffer.PrioritizedReplayBuffer` 的元数据是**惰性**的：不用 branch 时零开销、逐位不变） |
+| 采样 | critic 批按 `--branch_critic_frac`（默认 **0.45**）分层：`n_branch=round(0.45·bsize)`，两池**池内**各按 priority^α 抽；branch 池内部按 mode 均衡 |
+| actor loss | **只用 actor 行**（`actor_mask` 掩码切片）；无 branch 时 `slice(None)` ⇒ 逐位不变 |
+| λ 的分子 | `recent_states` 只在 `src==actor` 里取近端 N 条；`q_c_mean` 只算 actor 行 |
+| 下层 BESS | `agent_L` 有**独立** memory ⇒ branch 从不进 L 的 replay |
+| n 步 | branch 只有 1 个块 ⇒ `n_boot = γ`，**不进 `_pending` 链**；actor 仍 `γ^n` |
+
+### 开关一览（`python aifflor/aifflor_main.py --help` 的 `branch` 组）
+
+| 参数 | 默认 | 说明 |
+|---|---:|---|
+| `--branch_every` | **0（关）** | 每 K 块 branch 一次；`10` ⇒ **1.4×** 仿真，`4` ⇒ 2.0× |
+| `--branch_pilot_blocks` | 0 | 前 N 块**每块**都 branch（阶段 A pilot/预训练） |
+| `--branch_actions` | `prior,low,high,uniform` | 逗号分隔；可用 7 种生成器 |
+| `--branch_critic_frac` | 0.45 | critic 批里 branch 的占比（夹到 ≤0.5，避免 actor 被淹没） |
+| `--branch_freeze_lower` | 1 | 1 = `pb≡0`（默认）；0 = 用摊还执行器兑现该 branch 的 `g` |
+| `--branch_goal_pm1` | 0 | 仅 `freeze_lower=0` 时有物理作用 |
+| `--branch_sup_beta` | 0（关） | 可选的 branch 1-step 辅助监督（在同一尺度上做 Huber，不带 bootstrap）；按 `--branch_sup_blocks` 从 β0 线性降到 0.2·β0 |
+| `--branch_csv` | 1 | 写 `df_branch_hsrl.csv` |
+| `--branch_seed` | −1 | branch 的**独立** RandomState（⇒ 开关 branch **不改变 actor 轨迹的随机数**） |
+| `--branch_low_lo/hi`、`--branch_high_lo/hi`、`--branch_prior_jitter` | 见上表 | 动作带的细调 |
+
+### 产物
+
+* `df_branch_hsrl.csv`：逐 branch transition（`step/block_id/mode/a1..a5/g/r1/c1/P_F_mean/P_F_max/n_fold/soc_*/sum_disch/lam1/lower_ver`）。
+* TensorBoard `branch/*`：`c1_mean`、`r1_mean`、`n_trans`、`cover_lo`/`cover_hi`/`cover_fold`
+  （计划 §7 的三个覆盖率）、`buffer_n_branch`/`buffer_frac`/`batch_frac`。
+* 训练结束打印 `[branch]` 汇总：每 mode 的 `n/mean_c1/mean_r1/mean_P_F` + 覆盖率 + replay 比例。
+* **行为层一条都不写**（`df_hsrl.csv` / `df_test20_hsrl.csv` / `λ` / `EMA` / curriculum 全是 actor 的）。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| `python agentutil/test_aifflor_branch_contract.py` | **28149 条断言全绿**（纯静态，不跑仿真）：`Σr1/Σc1` 与**独立数组重算**逐位一致、`freeze_lower` 时 SOC/pbrule 恒 0、主轨迹逐位还原、PER 环形覆盖后计数正确、`update_policy` 里 actor 每批只吃 actor 行、`n_boot` branch=γ/actor=γⁿ、`recent_states` 只取 actor |
+| `agentutil/probe_cost_grad_hsrl_wind5.py`（在 `run14` 上的基线读数） | sign **51.5%**、Pearson **+0.13**、折点放大比 **0.78**（真值 **21.7 ≈ 解析 21**）、动作增量 R² **+0.0022** ⇒ 三条验收全 FAIL，与计划书对 run14 的判断吻合 |
+| `--branch_every 0`（默认） | 全部新代码走"关闭"分支：`branch_mix=0` ⇒ `update_policy` 用历史整池采样、不给 actor 打掩码；`recent_states` 无元数据 ⇒ 历史口径 |
+
+> ⚠ 成本：`--branch_every 10` 实测口径是 **1.40×**（每 10 块 50 步 + 20 步），
+> 不是计划书写的 1.3×（那按"每块 5 动作"的近似估的）。
