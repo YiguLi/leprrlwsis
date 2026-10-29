@@ -80,7 +80,7 @@
 | `--critic_wind5` | 已实现：actor 4D，critic = 原 obs + `[u2..u5]/10`，asymmetric |
 | `SP_TD3(critic_nb_states=...)` | 已实现：memory 存完整 state，actor 取前 `nb_states` |
 | `q_cost_rate` / `policy_batch_cost_rate` | 已实现 actor 切片 |
-| 宽动作覆盖默认 | 已实现：`DAY_REPEAT=3`；WT 噪声 `U[0.05,0.25]`、触边截断噪声、不衰减 |
+| 宽动作覆盖默认 | 已实现：`DAY_REPEAT=3`；WT 噪声 `U[0.05,0.25]`（**2026-10-29 起收窄为 `U[0.00,0.05]`，见 §13.8**）、触边截断噪声、不衰减 |
 | OU 噪声 | **未接线**：`random_process` 创建但 `select_action` 不用 |
 | 信号维噪声 | 仍按 `sig_noise_max → sig_noise_min` 衰减；HSRL 覆写 `0.5 → 0.025` |
 | branch / 多动作 transition | **未实现**，本计划核心 |
@@ -418,7 +418,7 @@ $PY = 'C:\Users\yigul\anaconda3\envs\llmenhancedwsis\python.exe'
 # 基线：v6 + wind5，无 branch
 & $PY aifflor\aifflor_main.py `
     --critic_arch v6 --critic_wind5 1 `
-    --wt_noise_mode wide --wt_noise 0.05 --wt_noise_max 0.25 `
+    --wt_noise_mode wide --wt_noise_min 0.0 --wt_noise_max 0.05 `
     ...
 
 # branch 方案（实现后）
@@ -573,3 +573,46 @@ $PY = 'C:\Users\yigul\anaconda3\envs\llmenhancedwsis\python.exe'
 > 设计稿 §5 的"K=10 ⇒ 1.3×"是按"每块 5 动作"的近端口径估的；**按上式实际是 1.4×**。
 > `branch_mix` 的额外算力 = 每个 critic 批多 45% 的 branch 行（同一批、同一次反向传播），
 > 不增加前向次数。
+
+### 13.8 配套改动：actor 行为噪声收窄到 `U[0.00, 0.05]`（2026-10-29）
+
+**改了什么**
+
+| 项 | 旧 | 新 |
+|---|---|---|
+| wide 的幅度带 | `U[0.05, 0.25]` | **`U[0.00, 0.05]`** |
+| 下界开关 | `--wt_noise`（兼 legacy 起幅） | **`--wt_noise_min`**（默认 0.0） |
+| `--wt_noise` | wide 下界 + legacy 起幅 | **只管 legacy**（起幅，默认仍 0.05） |
+| `--wt_noise_max` | 0.25 | **0.05** |
+
+**为什么**（与 branch 的设计直接相关）
+
+1. **噪声幅度 ≈ 设计间距**：branch 的测试动作在带内的间距是 **0.20~0.25**
+   （`prior≈0.20–0.33` / `low≈0–0.10` / `high≈0.40–0.50`），而旧噪声
+   **std≈0.093、峰值 0.25** ⇒ 等于把"同块 5 动作"的配对结构抹平。
+   新带 **std≈0.017、峰值 0.05 = 间距的 1/4**。
+2. **删失堆料**：旧带幅度 > 半带，触边后噪声被压成单边、并可正好落到 0/0.5
+   ⇒ run14 实测 `a>0.45` 占 **35.7%**、`a<0.05` 仅 **2.7%**。这既不是
+   "actor+对称噪声"也不是"平衡覆盖"。覆盖率改由 `--branch_actions` 承担
+   （平衡、无删失、不随 π 移动、样本干净）。
+3. **λ 为噪声付费**：`c1=φ(P_F)` 凸 ⇒ `E[c1(π+ε)] > c1(π)`，而 wide 的风机维噪声
+   **从不衰减** ⇒ 旧带让约束价格长期被探索噪声抬高（README §3.8 记录过同源的
+   Jensen 缺口：0.317 vs 0.490）。
+
+**保留了什么（为什么不直接关到 0）**
+
+* branch 只覆盖 `1/--branch_every` 的块（K=10 ⇒ 只有 **10%** 的状态有兄弟动作）
+  ⇒ 全关噪声会让 90% 的状态只剩"点质量动作"，`∂c1/∂a` 只能靠 10% 的状态外推；
+* actor 噪声还兼着 **状态探索**（改动作 → 改 E/P_G/SOC 轨迹，branch 不推进 episode）
+  与**边界处的局部光滑**（策略有向边界堆的倾向，那里正好是折点 = critic 最不准的地方）。
+
+**未定项（需要 A/B）**
+
+`0.05` 是"设计间距 1/4"的经验值，不是实测最优。建议三臂（`--branch_every 10`，
+同 `--seed`，判据 = 探针的 sign / Pearson / 折点放大比 + `λ1` 轨迹 + `sum_c1` + 越限率）：
+
+| 臂 | 噪声 | 预期 |
+|---|---|---|
+| A | `--wt_noise_min 0.05 --wt_noise_max 0.25`（旧口径） | 基线 |
+| B | **默认 `U[0.00, 0.05]`** | 配对结构清晰，仍保留局部光滑 |
+| C | `--wt_noise_min 0 --wt_noise_max 0`（全关） | 最"干净"但 90% 状态无动作约束 ⇒ **不看好** |

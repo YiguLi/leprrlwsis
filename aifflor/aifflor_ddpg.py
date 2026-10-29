@@ -52,7 +52,7 @@ class SP_TD3(object):
                  wt_noise=0.05, sig_noise_max=0.2, sig_noise_min=0.01,
                  wt_noise_floor=0.01,
                  nstep=1, target_agg='min', critic_nb_states=None,
-                 wt_noise_mode='wide', wt_noise_min=None, wt_noise_max=0.25,
+                 wt_noise_mode='wide', wt_noise_min=0.0, wt_noise_max=0.05,
                  branch_mix=0.0, branch_sup_beta=0.0):
 
         # Determine device first
@@ -290,7 +290,11 @@ class SP_TD3(object):
         # ---- 宽动作覆盖（aifflor 默认）----
         # 每个风机维每次决策独立抽幅度 A_i ~ U[wt_noise_min, wt_noise_max]，
         # 噪声 ~ U[-A_i,A_i]，再按 [0,0.5] 边界**截断噪声**（不是截断动作），
-        # 且不乘 ε ⇒ 训练全程保持宽覆盖，不衰减。
+        # 且不乘 ε ⇒ 训练全程保持同样幅度，不衰减。
+        # ⚠ 2026-10-29 起 aifflor 的 CLI 默认把带宽收窄到 **U[0.00, 0.05]**
+        #   （旧默认 U[0.05, 0.25] 的幅度与 branch 设计间距 0.20~0.25 同量级，
+        #    会把同块 5 动作的配对结构抹平、并在边界删失堆料）。本类的 kwarg 默认
+        #   与之一致；具体值仍由调用方（aifflor_main 的 CLI）决定。
         mode = str(wt_noise_mode or 'wide').strip().lower()
         self.wt_noise_mode = 'wide' if mode == 'wide' else 'legacy'
         self.wt_noise_min = float(wt_noise if wt_noise_min is None
@@ -863,6 +867,7 @@ class SP_TD3(object):
         # 逐维探索噪声
         #   wide（aifflor 默认）: 风机维 A_i ~ U[wt_noise_min, wt_noise_max]，
         #       noise_i ~ U[-A_i,A_i]，并按 [0,0.5] **截断噪声**；不乘 ε ⇒ 不衰减。
+        #       ⚠ aifflor 的 CLI 默认带 = **U[0.00, 0.05]**（2026-10-29 起；旧 U[0.05,0.25]）。
         #   legacy: 原口径 U(-amp,amp)，amp=amp_full·ε+floor·(1−ε)。
         if self.is_training:
             _wide_wt = (self.wt_noise_mode == 'wide'

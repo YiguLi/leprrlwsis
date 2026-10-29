@@ -2066,14 +2066,27 @@ if __name__ == "__main__":
                              '(默认 0.1)')
 
     # ---- 探索噪声幅度 (逐维; 与 td3perrb 上层同口径) ----
+    # 2026-10-29 改：wide 的幅度带由 U[0.05, 0.25] 收窄到 **U[0.00, 0.05]**。
+    #   依据：branch 的测试动作在带内的**设计间距**是 0.20~0.25（prior≈0.20–0.33 /
+    #   low≈0–0.10 / high≈0.40–0.50），而旧噪声 std≈0.093、峰值 0.25 ⇒ **噪声幅度 ≈
+    #   设计间距**，会把"同块 5 个动作"的配对结构抹平（且触边删失后堆在 0/0.5，
+    #   run14 实测 a>0.45 占 35.7%）。收窄到 ≤0.05 后：std≈0.017、峰值 0.05
+    #   = 间距的 1/4 ⇒ 只保留"局部光滑 + 少量状态探索"，覆盖率交给
+    #   `--branch_actions`（平衡、无删失、不随 π 移动）。
+    #   ⚠ `--wt_noise` 从此**只管 legacy**；wide 的下界用 `--wt_noise_min`。
     parser.add_argument('--wt_noise_mode', default='wide',
                         choices=['wide', 'legacy'],
-                        help='WT 探索噪声口径: wide=aifflor 默认，逐维幅度 U[wt_noise,wt_noise_max]、'
-                             '触边截断噪声、不衰减; legacy=旧 ε 衰减口径')
+                        help='WT 探索噪声口径: wide=aifflor 默认，逐维幅度 '
+                             'U[wt_noise_min,wt_noise_max]、触边截断噪声、不衰减; '
+                             'legacy=旧 ε 衰减口径')
     parser.add_argument('--wt_noise', default=0.05, type=float,
-                        help='wide: 风机维幅度下界; legacy: 起始幅度 (±wt_noise*eps)')
-    parser.add_argument('--wt_noise_max', default=0.25, type=float,
-                        help='wide: 风机维幅度上界（逐维 U[wt_noise,wt_noise_max]）')
+                        help='**legacy 专用**: 起始幅度 (±wt_noise·eps)，随 ε 衰减到 '
+                             '--wt_noise_floor。wide 模式下本参数不生效（用 --wt_noise_min）')
+    parser.add_argument('--wt_noise_min', default=0.0, type=float,
+                        help='wide: 风机维**幅度下界**（逐维 A_i~U[min,max]，默认 0.0）')
+    parser.add_argument('--wt_noise_max', default=0.05, type=float,
+                        help='wide: 风机维**幅度上界**（默认 0.05 = 设计间距 0.20 的 1/4；'
+                             '旧默认 0.25 会把 branch 的 5 动作配对抹平）')
     parser.add_argument('--sig_noise_max', default=0.2, type=float,
                         help='SOC 目标信号维探索噪声幅度上限 (±sig_noise_max*eps)')
     parser.add_argument('--sig_noise_min', default=0.0, type=float,
@@ -2334,8 +2347,8 @@ if __name__ == "__main__":
         prCyan('[train] pen_h={} | WT noise=wide U[{},{}]（逐维、触边截断噪声、**不衰减**）| '
                'signal noise ε 1→0 于 {} 块'.format(
                    getattr(args, 'pen_h', 100.0),
-                   getattr(args, 'wt_noise', 0.05),
-                   getattr(args, 'wt_noise_max', 0.25),
+                   getattr(args, 'wt_noise_min', 0.0),
+                   getattr(args, 'wt_noise_max', 0.05),
                    (_nzs if _nzs > 0 else getattr(args, 'epsilon', 0))))
     else:
         prCyan('[train] pen_h={} wt_noise={} floor={} | 噪声日程: ε 1→0 于 step {}'
@@ -2494,7 +2507,7 @@ if __name__ == "__main__":
                      cost_critic_mode=args.cost_critic_mode,
                      wt_noise=args.wt_noise,
                      wt_noise_mode=args.wt_noise_mode,
-                     wt_noise_min=args.wt_noise,
+                     wt_noise_min=args.wt_noise_min,
                      wt_noise_max=args.wt_noise_max,
                      sig_noise_max=args.sig_noise_max,
                      sig_noise_min=args.sig_noise_min,

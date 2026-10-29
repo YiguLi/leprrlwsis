@@ -358,30 +358,44 @@ aifflor 默认使用**宽动作覆盖**，用于 offline/在线 replay 的动作
    `episode 0..2 → day[0]`，`3..5 → day[1]`，依此类推；其他项目仍 `DAY_REPEAT=1`。
 2. **风机 5 维噪声**：
    ```text
-   A_i ~ U[wt_noise, wt_noise_max]     # 默认 U[0.05, 0.25]，逐维、每次决策独立
+   A_i ~ U[wt_noise_min, wt_noise_max]     # 默认 U[0.00, 0.05]，逐维、每次决策独立
    noise_i ~ U[-A_i, A_i]
    ```
    若 `a_i + noise_i` 触到 `[0,0.5]`，只把该维**噪声**截到可行区间
    （`noise_i ← clip(noise_i, −a_i, 0.5−a_i)`）；若 actor 输出本身越界，仍保留原动作，
    `CheckAction` 照常记越界罚。
-3. **风机噪声不衰减**：wide 模式不乘 ε，训练全程保持宽覆盖；
-   第 6 维 SOC 信号仍沿用原 `sig_noise_max → sig_noise_min` 衰减。
+3. **风机噪声不衰减**：wide 模式不乘 ε，训练全程保持同样幅度；
+   第 6 维 `g` 仍沿用 `--hsrl_sig_noise_max → --hsrl_sig_noise_min` 衰减。
 4. 口径开关：
    ```powershell
-   # 默认 wide
+   # 默认 wide（幅度带 U[0.00, 0.05]）
    python aifflor/aifflor_main.py ...
    # 回到旧 ε 衰减口径
    python aifflor/aifflor_main.py --wt_noise_mode legacy ...
    ```
+
+> **⚠ 2026-10-29 改默认：幅度带 `U[0.05, 0.25]` → `U[0.00, 0.05]`。**
+> 依据（与 §3.9 的 branch 配套）：
+> * branch 的测试动作在带内的**设计间距**是 **0.20~0.25**（`prior≈0.20–0.33` /
+>   `low≈0–0.10` / `high≈0.40–0.50`）；
+> * 旧带的 **std ≈ 0.093、峰值 0.25** ⇒ 噪声幅度 **≈ 设计间距**，会把"同块 5 个动作"
+>   的配对结构抹平；且触边删失后质量堆在 0/0.5（run14 实测 `a>0.45` 占 **35.7%**、
+>   `a<0.05` 仅 2.7%），既不是"actor+对称噪声"也不是"平衡覆盖"；
+> * 新带 **std ≈ 0.017、峰值 0.05 = 间距的 1/4** ⇒ 只保留"局部光滑 + 少量状态探索"，
+>   而**覆盖率交给 `--branch_actions`**（平衡、无删失、不随 π 移动、且是干净的样本）。
+> * 副作用（刻意接受）：`c1=φ(P_F)` 是凸的 ⇒ 噪声越大，`E[c1(π+ε)]−c1(π)` 越大；
+>   旧宽带让 **λ 长期为探索噪声付费**（且风机维噪声**从不衰减**），收窄后这部分偏差显著变小。
+> * **兼容性**：`--wt_noise` 从此**只管 legacy**（起幅）；wide 的下界改用 **`--wt_noise_min`**。
 
 相关参数：
 
 | 参数 | 默认 | 说明 |
 |---|---:|---|
 | `--wt_noise_mode` | `wide` | `wide` / `legacy` |
-| `--wt_noise` | 0.05 | wide 的幅度下界；legacy 的起始幅度 |
-| `--wt_noise_max` | 0.25 | wide 的幅度上界 |
-| `--wt_noise_floor` | 0.0 | 仅 legacy 使用 |
+| `--wt_noise_min` | **0.0** | wide 的幅度**下界**（逐维 `A_i~U[min,max]`） |
+| `--wt_noise_max` | **0.05** | wide 的幅度**上界**（旧默认 0.25） |
+| `--wt_noise` | 0.05 | **仅 legacy**：起始幅度（随 ε 衰减） |
+| `--wt_noise_floor` | 0.0 | **仅 legacy**：地板 |
 
 ### ⚠ 两个**不能**平移的东西（别混淆）
 
