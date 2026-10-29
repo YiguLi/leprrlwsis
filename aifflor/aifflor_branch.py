@@ -74,7 +74,23 @@
 ⚠ 不要在 branch 里调用 `env.reset()` / `env.step` 之外的任何推进接口：
 `restore_env` 只认 `pr/u/E/P_G_prev/count_wind/count_price` 这 6 个标量。
 """
+import os
+import sys
+
 import numpy as np
+
+# ---- 路径自举（与 `aifflor_env.py` 同款）------------------------------------
+#   * 作为**包**被 import（`from aifflor import aifflor_branch`）：ROOT 已经在
+#     `sys.path` 里 ⇒ 下面两行是 no-op；
+#   * **直接执行** `python aifflor/aifflor_branch.py`：此时 `sys.path[0]` 是
+#     `aifflor/`、**没有 ROOT** ⇒ `aifflor_hsrl` 顶层那句 `import hsrl_cost`
+#     （在仓库根）会 `ModuleNotFoundError`。这里把两边都补上，
+#     ⇒ 本模块可以被任意 CWD 直接跑/导入（`agentutil/` 的脚本也能直接用）。
+_HERE = os.path.dirname(os.path.abspath(__file__))       # aifflor/
+_ROOT = os.path.dirname(_HERE)                           # 仓库根
+for _p in (_ROOT, _HERE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 try:                                            # 主路径：aifflor 作为包
     from aifflor import aifflor_hsrl as hsrl
@@ -574,3 +590,44 @@ def declared_scope():
             '但 actor/lower/λ/EMA/curriculum/CSV/TB/test **只用 actor source**；'
             'branch 只覆盖 1 个块（n_boot=γ），不进 n-step 链'.format(
                 len(parse_modes(DEFAULT_BRANCH_ACTIONS))))
+
+
+USAGE = """\
+`aifflor_branch` 是 **口径模块**（纯函数 + 常量 + 控制器），**不是训练入口**。
+
+训练入口是 `aifflor/aifflor_main.py`（`--hsrl` / `--branch_*` 都属于它）：
+
+    python aifflor/aifflor_main.py --hsrl
+    python aifflor/aifflor_main.py --hsrl --branch_every 10
+    python aifflor/aifflor_main.py --hsrl --branch_actions prior,low,high,uniform \\
+        --branch_pilot_blocks 2000 --branch_every 0 --max_steps 10000
+
+全部 {n_flags} 个 branch 开关：
+    python aifflor/aifflor_main.py --help        # 搜 `branch（同块首宽动作覆盖`
+
+契约测试（纯静态，不跑仿真）：
+    python agentutil/test_aifflor_branch_contract.py
+
+本模块对外提供的接口：
+    snapshot_env / restore_env / snapshot_diff      块首 state 快照与恢复
+    branch_action / parse_modes                     7 种测试动作生成器
+    run_branch_block                                在快照上跑 5 步 → 块级 transition
+    BranchController                                触发 / goal / 诊断 / β 衰减
+    add_branch_args                                 CLI（由 aifflor_main 调用）
+"""
+
+
+def _n_branch_flags():
+    """数一下 `add_branch_args` 挂了多少个 `--branch_*`（只给 USAGE 用）。"""
+    import argparse
+    p = argparse.ArgumentParser(add_help=False)
+    add_branch_args(p)
+    return sum(1 for a in p._actions for o in a.option_strings
+               if o.startswith('--branch'))
+
+
+if __name__ == '__main__':
+    # `python aifflor/aifflor_branch.py --hsrl` 这种误用**不再报 ModuleNotFoundError**
+    # （路径自举已修），改为打印用法并以非 0 退出，提示"这不是入口"。
+    print(USAGE.format(n_flags=_n_branch_flags()))
+    sys.exit(2)
