@@ -635,11 +635,16 @@ class SP_TD3(object):
         ⚠ 必须显式覆盖写：replay 是环形缓冲，复用到的槽上一次可能是 branch
         （`src=1`）⇒ 不覆盖就会把 actor 数据误判成 branch（actor loss 会漏掉它，
         而 branch 池会混进 actor 样本）。
+
+        ⚠ 用 `getattr(..., False)` 而不是直接读 `self._tag_replay`：`agentutil/` 里有
+        几个 n 步/产出率契约测试用 `cls.__new__(cls)` **绕过 `__init__`** 并只塞最小
+        属性集（`test_nstep_uniform.py` / `analyse_nstep_entry_rate.py` 等），
+        直接读属性会让它们 `AttributeError`。缺属性 ⇒ 视为"不打标签"（= 历史行为）。
         """
-        if not self._tag_replay:
+        if not getattr(self, '_tag_replay', False):
             return
         self.memory.set_meta(idx, src=SRC_ACTOR, mode=MODE_ACTOR,
-                             block_id=-1, lower_ver=int(self.lower_ver))
+                             block_id=-1, lower_ver=int(getattr(self, 'lower_ver', 0) or 0))
 
     def push_branch_transition(self, s_t, a_t, r_t, c_t, s_t1, done,
                               mode=0, block_id=-1, lower_ver=None, boot=None):
