@@ -120,8 +120,8 @@ def init_wt_action_bias(agent, lo=0.05, hi=0.45, sig_value=0.0, verbose=True,
       * 其余维在 `[lo,hi]=[0.05,0.45]` 上**逐维独立均匀**采样 ⇒ 保留全局覆盖。
 
     动机（run57 实测）：旧口径 5 维**独立** `U(0.05,0.45)` 时起点可离已知最优很远，
-    而 RL 的有效样本几乎全部来自策略自己的时间平均分布（warmup 288 块 vs 自采
-    ~13,500 块）⇒ **起点运气 ≈ 早训期探索预算**；且 run57 收敛到
+    而 RL 的有效样本几乎全部来自策略自己的时间平均分布（warmup **1440 块 = 7200 步** vs
+    自采 ~13,500 块；旧口径 288 块）⇒ **起点运气 ≈ 早训期探索预算**；且 run57 收敛到
     `[0.328,0.060,0.321,0.187,0.143]`，与已知最优 `[0.2,0.2,0.2,0.2,1/3]` 在
     4/5 维上方向相反（ΣCp 低 14.3%）。混合采样把起点搬到先验邻域，同时留 30%
     覆盖以免"先验错了就全错"。
@@ -1134,10 +1134,24 @@ if __name__ == "__main__":
                         default=0.0001,
                         type=float,
                         help='policy net learning rate (only for DDPG)')
+    # ---- warmup 时长（**warmup7200**，默认 7200 步 = 1440 块 = 5 个完整 episode/天）----
+    #   口径的单一真源 = `hsrl_warmup.WARMUP_STEPS`（2026-10-23 起由 1440 改为 7200）：
+    #     ① 1440 步只覆盖一天的某一段；7200 步覆盖完整电价三档（300/580/980）× 完整风况日
+    #        循环 ⇒ warmup 的 (s,a) 分布与策略期**同分布**；
+    #     ② H 层每 5 步产 1 条 transition ⇒ 7200/5 = **1440 条 ≫ bsize(256)**
+    #        ⇒ 首个 minibatch 不复制同一条 transition，且 LHS 覆盖 1440 个块（每维 10 层 × 144）；
+    #     ③ warmup 期**零网络更新**（`if step > args.warmup` 守卫 + BiasInitTracker 运行期断言）。
+    #   `default=None` 是**哨兵**（不是 7200）：只有 None 才走"固定 7200 / `--warmup_bsize_mult`
+    #   旧口径"的分支；写死 7200 会让 `--warmup_bsize_mult` 永远失效。解析见 `resolve_warmup`。
     parser.add_argument('--warmup',
                         default=None,
                         type=int,
-                        help='time without training but only filling the replay memory')
+                        help='warmup 步数（**默认 7200 步 = 1440 个块 = 5 个完整 episode/天**，'
+                             '来自 hsrl_warmup.WARMUP_STEPS；warmup 期零网络更新、'
+                             'bias 在 warmup 之后第一个块末一次性应用）。'
+                             '复现历史 run（1440 步/288 块口径）请显式传 --warmup 1440，'
+                             '复现 200 块口径传 --warmup 200；'
+                             '--warmup_bsize_mult 4 走"4×--bsize"旧口径')
     # 0.95: H 层 γ 以【块(5 min)】为单位生效 (observe_jump 聚合 5 步后 discount 只用一次)
     #       ⇒ 半衰期 ln0.5/ln0.95 = 13.5 块 ≈ 68 min; 1/(1−γ) = 20 块 ≈ 100 min
     #       (0.98 时半衰期 34 块 ≈ 2.8 h; 0.99 才是 69 块 ≈ 5.8 h —— 旧注释此处写错过)
@@ -1347,7 +1361,30 @@ if __name__ == "__main__":
     # 同块首宽动作覆盖（branch）：默认**全关**（--branch_every 0）⇒ 历史行为逐位不变
     tbr.add_branch_args(parser)
     args = parser.parse_args()
-    args = hwarm.resolve_warmup(args)   # WARMUP_AUTO: 正式口径 warmup=bsize*mult, 期零网络更新
+    args = hwarm.resolve_warmup(args)   # WARMUP_AUTO: 默认 = WARMUP_STEPS = 7200 步, 期零网络更新
+
+    # =================================================================
+    # warmup7200 口径自检（td3per 侧）
+    #   时长真源在 `hsrl_warmup.WARMUP_STEPS`（= 7200 步）；这里只把它在 td3per 里的
+    #   **后果**打印出来，便于事后审计（不改变任何数值）：
+    #     * 1440 个块 = 5 个完整 episode/天（episode = 1440 步）⇒ warmup 覆盖完整电价三档
+    #       × 完整风况日循环，与策略期同分布；
+    #     * H 层缓冲 ≈ 块数（每块 1 条 transition）⇒ 与 --bsize 比较，判断首个 minibatch
+    #       会不会复制同一条 transition；
+    #     * bias 触发步 = warmup 之后第一个块末（`hsrl_agent_init.first_trigger_step`），
+    #       同一块末 `step > args.warmup` 才开始网络更新 ⇒ **warmup 期零更新**。
+    # =================================================================
+    _wm_steps = int(args.warmup)
+    _wm_blocks = _wm_steps // 5
+    _wm_bias = hinit.first_trigger_step(_wm_steps)
+    _wm_dup = _wm_blocks < int(args.bsize)
+    prCyan('[warmup7200] warmup={} 步 = {} 个块（{:.2f} 个 episode/天，episode=1440 步）| '
+           'H 层缓冲 ≈ {} 条 vs --bsize={} ⇒ {} | '
+           '块末 bias 触发 = step {}（warmup 之后第一个块末，此后才允许网络更新）'.format(
+               _wm_steps, _wm_blocks, _wm_steps / 1440.0, _wm_blocks, int(args.bsize),
+               ('⚠ 不足 ⇒ 首个 minibatch 会复制同一条 transition'
+                if _wm_dup else '足够 ⇒ 首个 minibatch 不复制同一条 transition'),
+               _wm_bias))
     hc.set_mode(args.c1_mode)
     hc.set_value_scale(args.value_scale)   # 值函数回归空间归一化 (单一真源)
     hc.set_cost_scale(args.cost_scale)   # cost 通道缩放 (λ 自动跟随)

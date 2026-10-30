@@ -282,7 +282,7 @@ python td3leprrlrb/td3leprrlrb_main.py    # 需配置 LLM
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--warmup` | 200 | warmup 块数（**已不再纯随机**，见文末附注） |
+| `--warmup` | **7200 步** | warmup 时长（单位是**步**，不是块）。默认由 `hsrl_warmup.resolve_warmup` 解析为 **`WARMUP_STEPS` = 7200 步 = 1440 个块 = 5 个完整 episode/天**（2026-10-23 起由 1440 步改为 7200；`td3per` 与其余 8 个入口共用这同一真源）：覆盖完整电价三档 × 风况日循环 ⇒ warmup 的 (s,a) 与策略期同分布；H 层缓冲 1440 条 ≫ `bsize`(256) ⇒ 首个 minibatch 不复制同一条 transition。warmup 期**零网络更新**（`if step > args.warmup` 守卫 + `BiasInitTracker` 运行期断言），价值基线 bias 在 warmup 之后第一个块末（step = 7204）一次性应用。⚠ `--warmup` 的默认 `None` 是**哨兵**而非 7200：写死数值会让旧口径 `--warmup_bsize_mult` 永远失效。复现历史：1440 步/288 块口径传 `--warmup 1440`，200 块口径传 `--warmup 200`，绑 bsize 传 `--warmup_bsize_mult 4`。`td3per` 启动时另打印 `[warmup7200]` 一行自检（块数/缓冲/bias 触发步） |
 | `--warmup_sched` | `fixed` | warmup 上层动作调度：`fixed` = 1/3 起每块 ±0.05、clip[0.05,0.45]、信号维恒 0；`random` = 旧 `random_action()`（对照臂） |
 | `--warmup_wt_sched` | `lhs` | warmup 风机 5 维生成方式：`lhs` = LHS 全局覆盖（其余入口默认）；`unified` = **aifflor 默认** —— 一半 LHS + 一半"五维统一随机升降噪声"（奇数块 `a_i = prior_i + o`，`o` 每块加**同一个** ±0.05，整场同向升降；偶数块走 LHS）；`mix` = 先验邻域 + 全局覆盖；`walk` = 旧逐维游走（复现历史 run） |
 | `--warmup_bess` | `rule` | BESS-RL 项目（per/prrbb/prle/td3per/td3prrbb/td3prle）warmup 下层行为：`rule` = RBB 窗口 + SOC 目标跟踪（确定性，无随机）；`random` = 旧 `agent_L.random_action()`（对照臂） |
@@ -819,7 +819,8 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 **问题（`output/TD3PRRLRB-run3` day0 实测）**
 
 1. **bias 初始化从不触发**：触发条件写成"块末分支内 `step == args.warmup`"，而 episode 长度
-   1440 是 5 的倍数 ⇒ 块末步恒为 `step ≡ 4 (mod 5)`，默认 `--warmup 200 ≡ 0` **永不相等**。
+   1440 是 5 的倍数 ⇒ 块末步恒为 `step ≡ 4 (mod 5)`，当时默认 `--warmup 200 ≡ 0` **永不相等**
+   （**现行默认已是 7200 步 = 1440 块**，见参数字典的 `--warmup` 行；200 只是历史口径）。
    结果 critic 起点 = `fc3.bias` 的 PyTorch 默认值（实测 `q_p_mean = 0.0497`）。
 2. **warmup 自身是唯一"BESS 疯狂 churn"的窗口**：上层全随机 ⇒ `soc_target` 每块跳 ±2.5 MWh，
    而 RBB 窗口内每块只能移动 0.36~0.52 MWh（85% 的块目标不可达）⇒ `SocTracker` 全程顶格往返；
