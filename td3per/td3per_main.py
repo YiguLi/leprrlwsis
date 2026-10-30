@@ -234,8 +234,11 @@ def train(num_iterations_H,
     #                                 + 逐维 U(±WT_PRIOR_STEP)，其余 30% 在 [WT_LO,WT_HI] 上
     #                                 逐维独立均匀（全局覆盖）；
     #                   walk        = 从 WT_START=0.2 起逐维随机 ±WT_STEP，clip 到 [WT_LO,WT_HI]。
-    #                 两口径下 §6 信号维都由 --warmup_sig 决定：SOC 目标语义 ⇒ soc_target≡3,
-    #                 影子电价语义 ⇒ 影子价≡0。**nolow 与标准 td3per 走的是这同一个入口**
+    #                 两口径下第 6 维（goal）都由 `--warmup_sig` 决定（td3per 是 SOC 目标语义：
+    #                 信号 → `soc_target_from_signal`；nolow 无第 6 维）。**2026-10-30 起默认
+    #                 `random` = 纯随机 U(−0.5,0.5)/块**（不看电价）；旧口径 `price_walk`
+    #                 （价格条件游走）与更旧的 `fixed`（恒 0）仍可显式指定。
+    #                 **nolow 与标准 td3per 走的是这同一个入口**
     #                 （`--nolow` 只改 nb_actions 6→5 与下层旁路，不另建 warmup）。
     #   bias_init   : warmup 块样本收集 + bias 一次性应用
     #                 (修 step == args.warmup 与块末 episode_steps%5==4 不同余导致永不触发的 bug;
@@ -308,9 +311,9 @@ def train(num_iterations_H,
             sum_c2 = 0     # L 层 5 步块累计成本 (喂 EMA 对偶)
             sum_gap_pen = 0.0
             if step <= args.warmup:
-                # 传电价 ⇒ 第 6 维(SOC 目标信号)按价格游走(300 上调/580 不动/980 下调);
-                # 下层用规则组件**完全追踪**该目标(Δ≡0 ⇒ trackerr≡0)。
-                # --warmup_sig fixed 可退回"信号恒 0"的旧口径。
+                # 第 6 维（goal）由 `--warmup_sig` 生成：**默认 random = 纯随机 U(−0.5,0.5)/块**
+                # （不看电价）；旧口径 price_walk 才是"价格条件游走"（300 上调/580 不动/980 下调）；
+                # fixed 退回"信号恒 0"。下层规则臂**完全追踪**该目标(Δ≡0 ⇒ trackerr≡0)。
                 _wa = warmup_sched.action(float(observation[0]))   # None ⇒ 对照臂 (--warmup_sched random)
                 applied_action_H = original_action_H = (
                     agent_H.random_action() if _wa is None else _wa)

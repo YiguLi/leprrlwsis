@@ -150,7 +150,10 @@ def sec_c_chain():
     ok(d.warmup_wt_sched == 'lhs', '风机动作 = LHS 全局覆盖（td3per 默认）')
     ok(d.warmup_sched == 'fixed', '上层调度 = fixed')
     ok(d.warmup_bess == 'rule', '下层 = 规则臂（Δ≡0，trackerr≡0）')
-    ok(d.warmup_sig == 'price_walk', '第 6 维 = 价格条件游走')
+    # goal（第 6 维）：2026-10-30 起**纯随机**（旧的 price_walk 是显式复现口径）
+    ok(d.warmup_sig == 'random', '第 6 维 = 纯随机（i.i.d. U(−0.5,0.5)）')
+    ok(td3per_args(['--warmup_sig', 'price_walk']).warmup_sig == 'price_walk',
+       '显式 --warmup_sig price_walk 仍是旧口径（复现历史 warmup）')
     ok(abs(float(d.soc_reset_low) - 0.25) < 1e-12
        and abs(float(d.soc_reset_high) - 0.25) < 1e-12, 'episode 起点 SOC 固定 0.25')
 
@@ -226,7 +229,8 @@ def sec_d_invariants():
 def sec_e_lhs():
     print('\n[E] 1440 块的 LHS 覆盖（warmup7200 的数据质量）')
     n = 7200 // 5
-    sched = hw.WarmupSchedule(5, 6, seed=7, wt_sched='lhs', lhs_n_blocks=n)
+    sched = hw.WarmupSchedule(5, 6, seed=7, wt_sched='lhs', lhs_n_blocks=n,
+                              sig_mode='price_walk')
     prices = np.array([300.0, 580.0, 980.0])[np.arange(n) % 3]
     A = np.array([sched.action(float(p)) for p in prices], dtype=float)
     ok(A.shape == (n, 6), '1440 块 × 6 维动作')
@@ -245,7 +249,7 @@ def sec_e_lhs():
     # 信号维：price_walk 方向 + 范围
     ok(A[:, 5].min() >= hw.SIG_LO - 1e-12 and A[:, 5].max() <= hw.SIG_HI + 1e-12,
        '信号维落在 [%.1f, %.1f]' % (hw.SIG_LO, hw.SIG_HI))
-    s2 = hw.WarmupSchedule(5, 6, seed=3, wt_sched='lhs')
+    s2 = hw.WarmupSchedule(5, 6, seed=3, wt_sched='lhs', sig_mode='price_walk')
     up = np.array([s2.action(300.0)[5] for _ in range(40)])
     dn = np.array([s2.action(980.0)[5] for _ in range(60)])
     ok(np.all(np.diff(up) >= -1e-12) and up[-1] > 0.0, '低谷 300 ⇒ 信号上调')

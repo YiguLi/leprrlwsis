@@ -119,12 +119,36 @@ WT_PRIOR_FRAC = 0.7
 #: 仅用于"加大扰动幅度"的对照臂，且始终再夹回 `[WT_LO, WT_HI]` 之外**不越物理带**）。
 WT_WIDE_GAIN = 1.0
 SIG_VALUE = 0.0          # 第 6 维**起点**: SOC 目标语义→target=3; 影子电价语义→中性 0
-#: **第 6 维（SOC 目标信号）的价格条件游走**（用户口径 2026-10-08）：
-#: 低谷(300) 上调 / 平峰(580) 不动 / 高峰(980) 下调，步幅随机。
-#: 目标语义是 `target = 3 + 5·a6` ⇒ 目标步幅 = 5 × 信号步幅：用户要的 **0.3–0.5 MWh**
-#: 对应信号步幅 **0.06–0.10**；范围 `a6 ∈ [−0.5, 0.5]` ⇔ `target ∈ [0.5, 5.5]`。
+#: **第 6 维（goal）的取值带**：`a6 ∈ [SIG_LO, SIG_HI]`。
+#: 映射（`soc_target_from_signal`）= `center + span·a6`，当前 `center=0.25 MWh`、
+#: `span=0.4167`（`hsrl_soctarget.SOC_TARGET_*`）⇒ **target ∈ [0.0417, 0.4583] MWh**。
+#: ⚠ 旧的 `target = 3 + 5·a6` / `target ∈ [0.5,5.5]` 是 **max_E=5 MWh 时代**的刻度，
+#:   保留在下面 `SIG_STEP_*` 的注释里说明"历史来源"，不要按它读当前数值。
 SIG_LO, SIG_HI = -0.5, 0.5
+#: **价格条件游走**（旧口径 `--warmup_sig price_walk`）的每块信号步幅：`U(0.06, 0.10)`。
+#: 当时（5 MWh 刻度）对应目标步幅 0.3–0.5 MWh；当前 0.5 MWh 刻度下它 = **0.025–0.042 MWh/块**
+#: （≈ 电池单块最大可移动量 0.0417 MWh 的 60–100%）。
 SIG_STEP_LO, SIG_STEP_HI = 0.06, 0.10
+#: **warmup 期 goal（第 6 维）的生成方式** —— `--warmup_sig` 的三个取值：
+#:
+#:   * `'random'`（**2026-10-30 起的默认**）= **纯随机**：每块 **i.i.d. `U(sig_lo, sig_hi)`**，
+#:     与电价无关、与上一块无关（块内 5 步固定）。
+#:     动机：`price_walk` 的累积游走会被端点裁剪 —— 按真实 5 天电价日程实测，1440 个块里
+#:     **91.3%** 的 goal 停在 ±0.5（目标只剩 0.0417 / 0.4583 两个值），**中间的 goal 取值
+#:     几乎没有样本**，critic 无法从 warmup 数据学到"goal 在带内变化"的效应；
+#:     纯随机把整条信号带均匀铺满（1440 块 ⇒ 每 0.1 宽的子区间 ≈144 个样本）。
+#:   * `'price_walk'` = **旧口径**（2026-10-30 之前默认）：低谷(300) 上调 / 平峰(580) 不动 /
+#:     高峰(980) 下调的**累积游走** + clip 到 `[sig_lo, sig_hi]`（复现历史 warmup 用）。
+#:   * `'fixed'` = 恒 `sig_value`（更旧的"信号恒 0"口径）。
+#:
+#: ⚠ 纯随机的**代价**：目标每块独立跳变（平均 |Δtarget| ≈ **0.14 MWh**，≈ 电池单块最大
+#:   可移动量 0.0417 MWh 的 3.4 倍）⇒ warmup 的**块末 gap 罚明显变大**：静态估算（SOC 每块
+#:   按额定功率追目标、不计 RBB 窗口）从 `price_walk` 的 ≈0 升到**平均 0.69/块**（76% 的块 >0，
+#:   p90 1.63；H 的 `10·max(0,|target−SOC|−tol)`）。这是"用均匀覆盖换 gap 噪声"的**有意取舍**；
+#:   想让随机目标也可达，可收窄 `--warmup_sig_lo/hi`（默认 = `SIG_LO/SIG_HI`；收到 ±0.1 时
+#:   目标步幅 ≈ 单块可移动量）。
+SIG_MODES = ('random', 'price_walk', 'fixed')
+SIG_MODE_DEFAULT = 'random'
 SOC_TARGET = 0.25         # warmup 期下层规则跟踪的目标 (MWh)
 #: **episode 起始 SOC**（正式口径 = 固定 3.0 MWh）。旧口径每 episode 从 U[0.5,5.5] 随机，
 #: 让前若干块的收益/退化都花在"把 SOC 拉到中性"上并引入与策略无关的方差；见 `--soc_reset_*`。
@@ -214,7 +238,10 @@ class WarmupSchedule:
         self.lo, self.hi = float(lo), float(hi)
         self.sig_value = float(sig_value)
         self.enabled = bool(enabled)
-        #: 第 6 维生成方式: 'price_walk' = 价格条件游走（正式口径）; 'fixed' = 恒 sig_value（旧口径）
+        #: 第 6 维（goal）生成方式，见 `SIG_MODES`。**构造函数默认保持 `'price_walk'`**
+        #: （直接构造的测试/探针口径不变 ⇒ 它们断言的历史行为仍然成立）；
+        #: **生产默认 = `SIG_MODE_DEFAULT`（'random'）**，由 `add_warmup_args` 的 CLI 传入
+        #: ⇒ 所有走 `build_from_args` 的入口都是纯随机。
         self.sig_mode = str(sig_mode)
         self.sig_step_lo, self.sig_step_hi = float(sig_step_lo), float(sig_step_hi)
         self.sig_lo, self.sig_hi = float(sig_lo), float(sig_hi)
@@ -305,7 +332,11 @@ class WarmupSchedule:
         return float(self._sig)
 
     def sig_delta(self, price):
-        """本块第 6 维的增量：低谷上调 / 平峰不动 / 高峰下调，幅度随机 ∈ [lo, hi]。"""
+        """本块第 6 维的**增量**：低谷上调 / 平峰不动 / 高峰下调，幅度随机 ∈ [lo, hi]。
+
+        只对 `sig_mode='price_walk'` 有意义；`'random'` 是**直接抽值**（不是增量），
+        实现见 `_advance_sig`（本方法对 random 恒返回 0，避免调用方误用）。
+        """
         if self.sig_mode != 'price_walk' or price is None:
             return 0.0
         p = float(price)
@@ -314,6 +345,25 @@ class WarmupSchedule:
         if p >= PRICE_HIGH - 1e-6:           # 980 高峰 ⇒ 目标下调（放电方向）
             return -float(self.rng.uniform(self.sig_step_lo, self.sig_step_hi))
         return 0.0                           # 580 平峰 ⇒ 不动
+
+    def _advance_sig(self, price):
+        """推进本块的 goal（第 6 维），返回新值。
+
+        * `'random'`（**默认**）：**纯随机** —— 直接 `i.i.d. U(sig_lo, sig_hi)`，
+          不读电价、不读上一块（= 无状态的"每块重抽"）；
+        * `'price_walk'`：`sig ← clip(sig + sig_delta(price), sig_lo, sig_hi)`；
+        * `'fixed'`：`sig_delta` 恒 0 ⇒ 恒 `sig_value`。
+
+        ⚠ 随机流用 `self.rng`（与 LHS/游走同一个流）：同 seed 可复现，且**不消耗全局
+          numpy RNG**；换 `--warmup_sig` 会改变该流的消耗序列 ⇒ 跨模式的同 seed 逐位
+          可复现性不成立（本来也不要求）。
+        """
+        if self.sig_mode == 'random':
+            self._sig = float(self.rng.uniform(self.sig_lo, self.sig_hi))
+        else:
+            self._sig = float(np.clip(self._sig + self.sig_delta(price),
+                                      self.sig_lo, self.sig_hi))
+        return float(self._sig)
 
     def g_walk(self, lo, hi):
         """第 6 维 g 的**可行域内随机游走**（与电价无关）。
@@ -354,18 +404,22 @@ class WarmupSchedule:
     def action(self, price=None):
         """返回本块的上层动作；`enabled=False` 时返回 None（调用方走旧随机臂）。
 
-        `price` 给出时，第 6 维（SOC 目标信号）按价格游走（见 `sig_delta`）；
-        不给（或 `sig_mode='fixed'`）则退化回"信号恒 `sig_value`"的旧口径 ⇒ 老调用点不受影响。
+        `price` 只在 `sig_mode='price_walk'` 时被使用（第 6 维按价格游走，见 `sig_delta`）；
+        `sig_mode='random'`（**生产默认**）时第 6 维是**每块独立重抽**的纯随机，
+        与电价无关；`'fixed'` 则恒 `sig_value`。老调用点（不传 price）行为不变。
         """
         if not self.enabled:
             return None
         if self._first:
             self._first = False                      # 第 0 块 = 起点 (start 各维, 信号 sig_value)
+            if self.sig_mode == 'random':
+                # 纯随机没有"锚点"：第 0 块也照抽。否则首块恒 0 会给 critic 一个
+                # 只在 warmup 出现的假集中点（策略期首块并不会必然落在 0）。
+                self._advance_sig(price)
         elif self.wt_sched == 'lhs':
             # ---- LHS 覆盖：每维在 [0,0.5] 上分层（同一样本量下逐维均匀铺满）----
             self._wt = self._next_lhs()
-            self._sig = float(np.clip(self._sig + self.sig_delta(price),
-                                      self.sig_lo, self.sig_hi))
+            self._advance_sig(price)
         elif self.wt_sched == 'unified':
             # ---- aifflor 新口径：偶数块 LHS / 奇数块五维统一随机升降噪声 ----
             if self._blk % 2 == 1:
@@ -379,20 +433,17 @@ class WarmupSchedule:
                 self._wt = np.clip(self.prior + self._wt_u_off, self.lo, self.hi)
             else:
                 self._wt = self._next_lhs()
-            self._sig = float(np.clip(self._sig + self.sig_delta(price),
-                                      self.sig_lo, self.sig_hi))
+            self._advance_sig(price)
         elif self.wt_sched == 'mix':
             # ---- 混合采样（正式口径）----
             self._wt = self._sample_mix()
-            self._sig = float(np.clip(self._sig + self.sig_delta(price),
-                                      self.sig_lo, self.sig_hi))
+            self._advance_sig(price)
         else:
             # ---- 旧口径：逐维随机游走（`--warmup_wt_sched walk` 复现历史 run）----
             self._wt = self._wt + self.rng.choice([-self.step, self.step],
                                                   size=self.nb_turbine)
             self._wt = np.clip(self._wt, self.lo, self.hi)
-            self._sig = float(np.clip(self._sig + self.sig_delta(price),
-                                      self.sig_lo, self.sig_hi))
+            self._advance_sig(price)
         self._blk += 1
         if self.nb_actions is None:
             return self._wt.copy()
@@ -608,20 +659,22 @@ def fill_bess_transition(agent_L, s_L, a_L, r2, c2, s_L_next, done_L,
     return agent_L.observe_jump(s_L, a_L, r2, c2, s_L_next, done_L, **kwargs)
 
 
-def add_warmup_args(parser, yaw=False, wt_sched_default='lhs'):
+def add_warmup_args(parser, yaw=False, wt_sched_default='lhs', sig_default=None):
     """把 warmup 调度的命令行开关挂到各 main 的 parser 上（9 个 main + yawflor 共用）。
 
     `yaw=True` ⇒ 默认值换成**偏航带**（`YAW_START/STEP/LO/HI`，无量纲 `n∈[−1,1]`），
     文案与**先验中心**（`YAW_PRIOR` = 全 0）也换成偏航语义。
     `wt_sched_default` ⇒ `--warmup_wt_sched` 的默认值；共享默认保持 `'lhs'`，
     **aifflor_main 显式传 `'unified'`**（一半 LHS + 一半五维统一随机升降噪声）。
+    `sig_default` ⇒ `--warmup_sig`（goal 生成方式）的默认值；`None` ⇒ 全局
+    `SIG_MODE_DEFAULT`（**`'random'` = 纯随机**，2026-10-30 起）⇒ **所有入口一起切换**。
     """
     if yaw:
         d_start, d_step, d_lo, d_hi = YAW_START, YAW_STEP, YAW_LO, YAW_HI
         # ⚠ help 文本会被 argparse 做一次 `% params` 展开 ⇒ 字面百分号必须写 `%%`
         #   （否则 `--help` 直接 ValueError: unsupported format character）
         sched_help = ('warmup 期上层动作调度: fixed=偏航 5 维从 **0** 起每块随机 ±0.2 并 '
-                      'clip 到 [−1,+1] + 信号维恒 0 (本方案); '
+                      'clip 到 [−1,+1]（第 6 维由 --warmup_sig 决定，fixed 时恒 0）; '
                       'random=旧的 random_action() 对照臂')
         h_start = 'warmup 偏航动作起始值 (默认 0 = 单机最优点 γ=0°)'
         h_step = 'warmup 偏航动作每块随机步长 (默认 ±0.2 = 满带宽 2 的 10%%)'
@@ -631,7 +684,8 @@ def add_warmup_args(parser, yaw=False, wt_sched_default='lhs'):
     else:
         d_start, d_step, d_lo, d_hi = WT_START, WT_STEP, WT_LO, WT_HI
         sched_help = ('warmup 期上层动作调度: fixed=1/3 起每块±0.05 clip[0.05,0.45]'
-                      ' + 信号维恒 0 (本方案); random=旧的 random_action() 对照臂')
+                      '（第 6 维由 --warmup_sig 决定；--warmup_sig fixed 时恒 0）; '
+                      'random=旧的 random_action() 对照臂')
         h_start = ('warmup 风机动作**首块**取值（默认 %.3f）。注意 mix 口径下它的作用'
                    '仅限于第 0 块：之后由 --warmup_wt_prior 与 --warmup_wt_lo/hi 决定；'
                    'walk 口径下它才是整条游走的起点' % WT_START)
@@ -683,16 +737,35 @@ def add_warmup_args(parser, yaw=False, wt_sched_default='lhs'):
     parser.add_argument('--warmup_wt_step', default=d_step, type=float, help=h_step)
     parser.add_argument('--warmup_wt_lo', default=d_lo, type=float, help=h_lo)
     parser.add_argument('--warmup_wt_hi', default=d_hi, type=float, help=h_hi)
-    parser.add_argument('--warmup_sig', default='price_walk', choices=['price_walk', 'fixed'],
-                        help='warmup 期第 6 维（SOC 目标信号）生成方式（**正式口径 = price_walk**）: '
-                             'price_walk=价格条件游走 (300 上调 / 580 不动 / 980 下调，'
-                             '信号步幅 U(0.06,0.10) ⇒ **目标步幅 U(0.3,0.5) MWh**，'
-                             '范围 a6∈[−0.5,0.5] ⇔ target∈[0.5,5.5]); fixed=恒 0（旧口径）')
+    # ---- warmup 期 goal（第 6 维）的生成方式 ----
+    #   2026-10-30 起默认 **纯随机**（`SIG_MODE_DEFAULT`）：每块 i.i.d. U(sig_lo, sig_hi)。
+    #   旧口径 price_walk / fixed 仍可用（复现历史 warmup 请显式传 price_walk）。
+    #   ⚠ help 文本之后还会被 argparse 做一次 `% params` 展开 ⇒ 字面百分号写 `%%`
+    #     （所以这里用 `+` 拼接而不是 `% _sig_default`，否则 `%%` 会被提前吃掉）。
+    _sig_default = SIG_MODE_DEFAULT if sig_default is None else str(sig_default)
+    _sig_help = (
+        'warmup 期 goal（第 6 维 / SOC 目标信号）的生成方式（**默认 = ' + _sig_default + '**）:\n'
+        '  random=**纯随机** —— 每块 i.i.d. U(--warmup_sig_lo, --warmup_sig_hi)，'
+        '**不看电价、不看上一块**（块内 5 步固定）；把整条信号带均匀铺满'
+        '（1440 块 ⇒ 每 0.1 宽 ≈144 个样本）；\n'
+        '  price_walk=**旧口径**（2026-10-30 之前默认）—— 价格条件累积游走: '
+        '低谷 300 上调 / 平峰 580 不动 / 高峰 980 下调，每块步幅 '
+        'U(--warmup_sig_step_lo, --warmup_sig_step_hi)，clip 到 '
+        '[--warmup_sig_lo, --warmup_sig_hi]（实测 91%% 的块停在端点）；\n'
+        '  fixed=恒 sig_value（更旧的"信号恒 0"口径）')
+    parser.add_argument('--warmup_sig', default=_sig_default, choices=list(SIG_MODES),
+                        help=_sig_help)
+    parser.add_argument('--warmup_sig_lo', default=SIG_LO, type=float,
+                        help='goal 信号取值下界（默认 %.2f）。纯随机模式的采样带下界；'
+                             '收窄它可让随机目标更"物理可达"' % SIG_LO)
+    parser.add_argument('--warmup_sig_hi', default=SIG_HI, type=float,
+                        help='goal 信号取值上界（默认 %.2f）' % SIG_HI)
     parser.add_argument('--warmup_sig_step_lo', default=SIG_STEP_LO, type=float,
-                        help='第 6 维随机步幅下界（信号量纲；×5 = MWh 目标步幅，默认 %.2f）'
+                        help='**(只对 price_walk)** 第 6 维每块步幅下界（信号量纲，默认 %.2f）'
                              % SIG_STEP_LO)
     parser.add_argument('--warmup_sig_step_hi', default=SIG_STEP_HI, type=float,
-                        help='第 6 维随机步幅上界（默认 %.2f ⇒ 目标步幅 0.50 MWh）' % SIG_STEP_HI)
+                        help='**(只对 price_walk)** 第 6 维每块步幅上界（默认 %.2f）'
+                             % SIG_STEP_HI)
     parser.add_argument('--warmup_bess', default='rule',
                         choices=['rule', 'price', 'random'],
                         help='BESS-RL 项目 warmup 期下层行为（**正式口径 = rule**）: '
@@ -914,9 +987,11 @@ def build_from_args(args, agent_H, agent_L=None):
         hi=float(getattr(args, 'warmup_wt_hi', WT_HI)),
         seed=int(getattr(args, 'seed', 0) or 0),
         enabled=(getattr(args, 'warmup_sched', 'fixed') != 'random'),
-        sig_mode=str(getattr(args, 'warmup_sig', 'price_walk')),
+        sig_mode=str(getattr(args, 'warmup_sig', SIG_MODE_DEFAULT)),
         sig_step_lo=float(getattr(args, 'warmup_sig_step_lo', SIG_STEP_LO)),
         sig_step_hi=float(getattr(args, 'warmup_sig_step_hi', SIG_STEP_HI)),
+        sig_lo=float(getattr(args, 'warmup_sig_lo', SIG_LO)),
+        sig_hi=float(getattr(args, 'warmup_sig_hi', SIG_HI)),
         wt_sched=str(getattr(args, 'warmup_wt_sched', 'lhs')),
         prior=parse_prior(getattr(args, 'warmup_wt_prior', None), default=WT_PRIOR),
         prior_frac=float(getattr(args, 'warmup_wt_prior_frac', WT_PRIOR_FRAC)),

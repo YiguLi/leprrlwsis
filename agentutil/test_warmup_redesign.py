@@ -244,7 +244,8 @@ check(all(abs(s10.action(300.0)[5]) < 1e-12 for _ in range(30)),
 s11 = hwarm.WarmupSchedule(nb_turbine=5, nb_actions=6, seed=3, sig_mode='price_walk')
 check(all(abs(s11.action()[5]) < 1e-12 for _ in range(10)),
       'action() 不传 price ⇒ 信号恒 0（老调用点向后兼容）')
-check(_ns.warmup_sig == 'price_walk', '--warmup_sig 默认 price_walk')
+check(_ns.warmup_sig == hwarm.SIG_MODE_DEFAULT,
+      '--warmup_sig 默认 = SIG_MODE_DEFAULT（2026-10-30 起 random）')
 check(abs(_ns.warmup_sig_step_lo - 0.06) < 1e-12 and abs(_ns.warmup_sig_step_hi - 0.10) < 1e-12,
       '--warmup_sig_step_lo/hi 默认 0.06/0.10')
 _SIG_MAINS = ['aifflor/aifflor_main.py', 'aifflorpave/aifflorpave_main.py',

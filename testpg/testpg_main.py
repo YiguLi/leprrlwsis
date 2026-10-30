@@ -201,9 +201,11 @@ def train(num_iterations_H,
     _, warmup_rule, bess_fill_stats = hwarm.build_from_args(args, agent_H, agent_L)
     warmup_sched = PGWarmup(
         enabled=(str(getattr(args, 'warmup_sched', 'fixed')) != 'random'),
-        sig_mode=str(getattr(args, 'warmup_sig', 'price_walk')),
+        sig_mode=str(getattr(args, 'warmup_sig', hwarm.SIG_MODE_DEFAULT)),
         sig_step_lo=float(getattr(args, 'warmup_sig_step_lo', hwarm.SIG_STEP_LO)),
         sig_step_hi=float(getattr(args, 'warmup_sig_step_hi', hwarm.SIG_STEP_HI)),
+        sig_lo=float(getattr(args, 'warmup_sig_lo', hwarm.SIG_LO)),
+        sig_hi=float(getattr(args, 'warmup_sig_hi', hwarm.SIG_HI)),
         seed=int(getattr(args, 'seed', 0) or 0))
     prCyan(warmup_sched.describe())
     # 残余动作自检: warmup 规则臂写进 buffer 的是 Δ≡0 ⇒ 它的"命令"必须与策略期基线
@@ -1187,13 +1189,22 @@ if __name__ == "__main__":
     parser.add_argument('--warmup_sched', default='fixed', choices=['fixed', 'random'],
                         help='fixed（默认）= PGWarmup 的 [rate~U(0,1), goal 价格游走]；'
                              'random = agent_H.random_action() 对照臂')
-    parser.add_argument('--warmup_sig', default='price_walk', choices=['price_walk', 'fixed'],
-                        help='warmup 期 goal 维：price_walk（默认，300 上调 / 580 不动 / 980 下调）'
-                             '或 fixed（恒 0）')
+    parser.add_argument('--warmup_sig', default=hwarm.SIG_MODE_DEFAULT,
+                        choices=list(hwarm.SIG_MODES),
+                        help='warmup 期 goal 维的生成方式（**默认 %s**，与 hsrl_warmup 同义）: '
+                             'random=纯随机 每块 i.i.d. U(--warmup_sig_lo,hi)（不看电价）；'
+                             'price_walk=旧口径 价格条件累积游走（300 上调/580 不动/980 下调）；'
+                             'fixed=恒 0' % hwarm.SIG_MODE_DEFAULT)
+    parser.add_argument('--warmup_sig_lo', default=hwarm.SIG_LO, type=float,
+                        help='goal 信号取值下界（默认 %.2f）' % hwarm.SIG_LO)
+    parser.add_argument('--warmup_sig_hi', default=hwarm.SIG_HI, type=float,
+                        help='goal 信号取值上界（默认 %.2f）' % hwarm.SIG_HI)
     parser.add_argument('--warmup_sig_step_lo', default=hwarm.SIG_STEP_LO, type=float,
-                        help='goal 随机步幅下界（默认 %.2f）' % hwarm.SIG_STEP_LO)
+                        help='**(只对 price_walk)** goal 每块步幅下界（默认 %.2f）'
+                             % hwarm.SIG_STEP_LO)
     parser.add_argument('--warmup_sig_step_hi', default=hwarm.SIG_STEP_HI, type=float,
-                        help='goal 随机步幅上界（默认 %.2f）' % hwarm.SIG_STEP_HI)
+                        help='**(只对 price_walk)** goal 每块步幅上界（默认 %.2f）'
+                             % hwarm.SIG_STEP_HI)
     parser.add_argument('--warmup_bess', default='rule', choices=['rule', 'price', 'random'],
                         help='warmup 期下层：rule（默认，规则追踪）/ price（价格条件随机充放）/ '
                              'random（agent_L.random_action()）')
