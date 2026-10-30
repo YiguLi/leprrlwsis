@@ -752,6 +752,29 @@ def sec_j_update():
     ok(ag2.last_batch_branch_frac == 0.0 and ag2.n_updates_with_branch == 0,
        '池里无 branch ⇒ 回退历史采样（不报错、不缩批）')
 
+    # ---- (4) 可选 1-step 辅助监督（β>0）路径不炸、键不变 ----
+    ag3 = make_agent(nstep=1, bsize=16, branch_mix=0.45, branch_sup_beta=0.3)
+    ag3.policy_delay = 1
+    for i in range(40):
+        _s, _a = _row()
+        ag3.memory.append(_s, _a, 1.0, 0.5, _s, False)
+        ag3.memory.set_meta(i, src=SRC_ACTOR, mode=MODE_ACTOR)
+    for i in range(40, 70):
+        _s, _a = _row()
+        ag3.memory.append(_s, _a, 2.0, 0.7, _s, False)
+        ag3.memory.set_meta(i, src=SRC_BRANCH, mode=[1, 2, 3, 4][i % 4])
+    keys0 = set(ag3.update_stats[0].keys()) if ag3.update_stats else None
+    ag3.update_policy()
+    ok(ag3.update_stats and all(np.isfinite(v) for v in ag3.update_stats[-1].values()),
+       'β>0 的辅助监督路径不产生 NaN/Inf')
+    if keys0 is not None:
+        ok(set(ag3.update_stats[-1].keys()) == keys0,
+           'update_stats 键不变（CSV 列不因 β 改变）')
+    # β 衰减到 0 后回到纯 TD（不抛异常）
+    ag3.branch_sup_beta = 0.0
+    ag3.update_policy()
+    ok(np.isfinite(float(ag3.update_stats[-1]['td_c_mean'])), 'β=0 ⇒ 纯 TD 路径仍正常')
+
 
 # =============================================================================
 # [K] main 的静态接线（不 import：td3per_main 在 import 期会启 MATLAB）

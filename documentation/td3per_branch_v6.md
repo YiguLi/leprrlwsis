@@ -1,7 +1,7 @@
 # `td3per` 的两项移植：branch（同块首宽动作覆盖）+ critic v6
 
 > 实施日期：2026-10-30 ｜ 契约测试：`python agentutil/test_td3per_branch_v6_contract.py`
-> （1625 条断言，纯静态/纯算术，**不跑仿真、不需要 MATLAB**）
+> （1627 条断言，纯静态/纯算术，**不跑仿真、不需要 MATLAB**）
 
 本文记录把 `aifflor` 的两项方法移植进 `td3per` 的口径。两项互不依赖，可单独开关：
 
