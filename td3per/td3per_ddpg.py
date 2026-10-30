@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 
-from model import (Actor, Critic)
+from model import (Actor, Critic, infer_arch)
 from PER_buffer import PrioritizedReplayBuffer
 from random_process import OrnsteinUhlenbeckProcess
 from util import *
@@ -13,6 +13,13 @@ from util import *
 # from ipdb import set_trace as debug
 
 criterion = nn.MSELoss()
+
+#: replay 的**来源标签**（branch 分层采样用）。取值与 `td3per_branch.SRC_*` /
+#: `td3per_branch.MODE_ACTOR` **逐位一致**（`agentutil/test_td3per_branch_contract.py`
+#: 会断言这件事）。这里刻意**不 import** `td3per_branch`：ddpg 是纯算法层，
+#: 不应依赖"行为数据生成"那一层（方向：branch → ddpg 可以，ddpg → branch 不行）。
+SRC_ACTOR, SRC_BRANCH = 0, 1
+MODE_ACTOR = 0
 
 
 class SP_TD3(object):
@@ -34,6 +41,14 @@ class SP_TD3(object):
     Everything else (PER buffer, importance sampling, EMA dual ascent
     for lam, exploration noise, hierarchical observe interface) is
     identical to SP_DDPG.
+
+    ---- 2026-10 新增（与 `aifflor` 同源）----
+    * **critic 结构可切换**（`critic_arch`；缺省取 `args.critic_arch`，再缺省 `v1`）：
+      `model.Critic` 的 v1 / v1af / v2 / v3 / v4 / v5 / **v6**。
+      `v1` 时四个 critic 的构造与改造前**逐位相同**（历史 run 可原样复现）。
+    * **branch（同块首宽动作覆盖）**：`branch_mix` > 0 时按 `src` 分池采样
+      （actor 池 / branch 池各自在池内按 priority^α 抽），actor loss **只用 actor 行**，
+      `q_c` 的对偶分子也只算 actor 行；`branch_mix == 0` ⇒ 所有路径与历史逐位相同。
     """
 
     def __init__(self, nb_states, nb_actions, args, lam_max=None, lam_min=0.1,
@@ -43,7 +58,9 @@ class SP_TD3(object):
                  cost_critic_mode='max',
                  wt_noise=0.05, sig_noise_max=0.2, sig_noise_min=0.01,
                  wt_noise_floor=0.01,
-                 nstep=1, target_agg='min'):
+                 nstep=1, target_agg='min',
+                 critic_arch=None, critic_act='relu', critic_out_init='3e3',
+                 branch_mix=0.0, branch_sup_beta=0.0):
 
         # Determine device first
         self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -64,27 +81,40 @@ class SP_TD3(object):
             'hidden2': args.hidden2,
             'init_w': args.init_w
         }
+        # ---- critic 结构（--critic_arch）------------------------------------
+        #   优先级: 显式 kwarg > args.critic_arch > **'v1'（历史口径）**。
+        #   ⚠ 这里刻意与 `aifflor_ddpg` 的回落值（'v6'）不同：td3per 的生产默认
+        #     由 `td3per_main.py` 的 CLI（默认 v6）决定，而**直接构造 SP_TD3 的脚本**
+        #     （agentutil 里大量探针/契约测试不传 critic_arch）必须继续拿到历史网络，
+        #     否则那些"逐位不变"的断言会静默失效。
+        self.critic_arch = str(critic_arch or getattr(args, 'critic_arch', 'v1') or 'v1')
+        critic_cfg = dict(net_cfg)
+        critic_cfg['arch'] = self.critic_arch
+        critic_cfg['act'] = str(critic_act or 'relu')
+        critic_cfg['out_init'] = str(critic_out_init or '3e3')
+        #: 重建 critic 时复用（`load_weights` 遇到 checkpoint 的 arch 不同会重建）
+        self._critic_cfg = dict(critic_cfg)
         self.actor = Actor(self.nb_states, self.nb_actions, **net_cfg)
         self.actor_target = Actor(self.nb_states, self.nb_actions, **net_cfg)
         self.actor_optim = Adam(self.actor.parameters(), lr=args.prate)
 
         # ---- TD3: twin critics per channel ----
         # profit channel: critic_p / critic_p2
-        self.critic_p = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_p = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_p = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_p = Critic(self.nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_p = Adam(self.critic_p.parameters(), lr=args.rate)
 
-        self.critic_p2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_p2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_p2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_p2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_p2 = Adam(self.critic_p2.parameters(), lr=args.rate)
 
         # cost channel: critic_c / critic_c2
-        self.critic_c = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_c = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_c = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_c = Critic(self.nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_c = Adam(self.critic_c.parameters(), lr=args.rate)
 
-        self.critic_c2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_c2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_c2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_c2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_c2 = Adam(self.critic_c2.parameters(), lr=args.rate)
 
         hard_update(self.actor_target, self.actor)  # Make sure target is with the same weight
@@ -100,6 +130,24 @@ class SP_TD3(object):
                                                        theta=args.ou_theta,
                                                        mu=args.ou_mu,
                                                        sigma=args.ou_sigma)
+
+        # ---- branch（同块首宽动作覆盖）: 来源分层采样 ----
+        #   `branch_mix` = critic 批里 **branch** 的占比（0 = 关闭 ⇒ 历史行为逐位不变）。
+        #   口径 = `aifflor` 的同一份计划（documentation/aifflor_branch_wide_coverage_plan.md
+        #   §4.2/§4.3，td3per 侧实现在 `td3per/td3per_branch.py`）。
+        #   ⚠ 硬约束：branch 数据**只**允许进 critic TD（与可选的 1-step 辅助监督）；
+        #     actor loss / λ / EMA / curriculum / CSV / TB / test **一律只用 actor**。
+        self.branch_mix = float(min(0.5, max(0.0, float(branch_mix or 0.0))))
+        #: 可选的 branch 1-step 辅助监督权重 β（由主循环按块推进/衰减；0 = 关闭）
+        self.branch_sup_beta = float(branch_sup_beta or 0.0)
+        #: `True` ⇒ 每条转移都显式打 `src` 标签（环形缓冲会复用旧槽，必须覆盖写）
+        self._tag_replay = bool(self.branch_mix > 0.0)
+        #: 下层 BESS 的版本号（由主循环推进；只做 branch 标签过期的诊断口径）
+        self.lower_ver = 0
+        #: 诊断：上一批的 branch 占比 / 累计
+        self.last_batch_branch_frac = 0.0
+        self.n_updates_with_branch = 0
+        self.n_branch_transitions = 0
 
         # Hyper-parameters
         self.batch_size = args.bsize
@@ -251,15 +299,64 @@ class SP_TD3(object):
             return torch.max(q1, q2)
         return torch.min(q1, q2)
 
+    # ---- 采样：branch 未启用时与历史 `memory.sample(...)` 逐位相同 ------------
+    def _sample_batch(self):
+        """采一批，并返回 `(…, idxes, src)` —— `src` 是本批每条转移的来源标签。
+
+        * branch 关闭（`branch_mix == 0` 或缓冲里还没 branch）⇒ 走历史
+          `memory.sample(...)`（整池一次抽，数学与原实现逐位相同）；
+        * branch 开启 ⇒ `n_branch = round(branch_mix·bsize)`，剩下的给 actor，
+          两池各自**在池内**做优先度比例采样；branch 池内部按 mode 均衡。
+        * 池不够时**自动回退**到"能抽多少抽多少"，绝不让 batch 变形（BSIZE 恒定）。
+        """
+        mem = self.memory
+        n_branch = 0
+        n_actor = self.batch_size
+        if self.branch_mix > 0.0 and mem.n_branch > 0 and mem.n_actor > 0:
+            n_branch = int(round(self.branch_mix * self.batch_size))
+            n_branch = min(n_branch, int(mem.n_branch), self.batch_size - 1)
+            n_actor = self.batch_size - n_branch
+            if n_actor > int(mem.n_actor):
+                n_actor = int(mem.n_actor)
+                n_branch = self.batch_size - n_actor
+            if n_actor <= 0 or n_branch <= 0:
+                n_branch, n_actor = 0, self.batch_size
+
+        if n_branch <= 0:
+            out = mem.sample(self.batch_size, self.PER_beta,
+                             self.beta_increment_per_sampling)
+            src = self._src_of(out[-1])
+            self.last_batch_branch_frac = float(np.mean(src == SRC_BRANCH)) if src.size else 0.0
+            return tuple(list(out) + [src])
+
+        idxes = (mem.sample_pool(SRC_ACTOR, n_actor)
+                 + mem.sample_pool(SRC_BRANCH, n_branch, by_mode=True))
+        out = mem.sample_by_idxes(idxes, self.PER_beta)
+        src = self._src_of(out[-1])
+        self.last_batch_branch_frac = float(np.mean(src == SRC_BRANCH)) if src.size else 0.0
+        self.n_updates_with_branch += 1
+        return tuple(list(out) + [src])
+
+    def _src_of(self, idxes):
+        """下标 → 来源标签数组（无元数据 ⇒ 全 actor）。"""
+        idx = np.asarray(idxes, dtype=np.int64).reshape(-1)
+        if not self.memory.has_meta:
+            return np.zeros(idx.size, dtype=np.int8)
+        return np.asarray(self.memory._src[idx], dtype=np.int8)
+
     def update_policy(self):
         # A2: β 退火 —— 每次更新推进 self.PER_beta (0.4→1)，写回实例属性
         # (原 PER_buffer.sample 内递增是局部变量，退火永不生效；此处推进后传入)
         self.PER_beta = min(1.0, self.PER_beta + self.beta_increment_per_sampling)
 
         # Sample batch
+        #   branch 未启用 ⇒ `_sample_batch()` 走历史 `memory.sample(...)`，逐位不变；
+        #   branch 启用 ⇒ 按 **来源分池** 采样（actor ~55% / branch ~45%，
+        #   branch 内部按 mode 均衡），并额外返回本批的 `src` 标签。
         state_batch, action_batch, profit_batch, cost_batch,\
-        next_state_batch, terminal_batch, weights, batch_idxes \
-        = self.memory.sample(self.batch_size, self.PER_beta, self.beta_increment_per_sampling)
+        next_state_batch, terminal_batch, weights, batch_idxes, batch_src \
+            = self._sample_batch()
+
         # reshape data
         profit_batch = profit_batch.reshape(-1, 1)
         cost_batch = cost_batch.reshape(-1, 1)
@@ -273,6 +370,21 @@ class SP_TD3(object):
         if _SC != 1.0:
             cost_batch = cost_batch / _SC
         terminal_batch = terminal_batch.reshape(-1, 1)
+
+        # ---- branch: 本批的来源掩码 ----
+        #   * critic TD 用**全部**（actor + branch）；
+        #   * **actor loss 只用 actor**（branch 的动作是随机测试动作，不是策略采样，
+        #     拿它做策略梯度会把 actor 拉向"随机动作上的 Q 最大点"，且 λ 会被
+        #     branch 的高成本动作顶格 —— 正是计划 §9.1 要避免的失败模式）；
+        #   * 无 branch 时 `actor_mask is None` ⇒ 所有张量切片退化为 `[:]`，逐位不变。
+        _src_np = np.asarray(batch_src).reshape(-1)
+        if _src_np.size == self.batch_size and (_src_np == SRC_BRANCH).any():
+            actor_mask = torch.tensor(_src_np == SRC_ACTOR, dtype=torch.bool,
+                                      device=self.device)
+            branch_mask = ~actor_mask
+        else:
+            actor_mask = None
+            branch_mask = None
 
         # Ensure all tensors are on the correct device
         state_batch = to_tensor(state_batch).to(self.device)
@@ -342,6 +454,19 @@ class SP_TD3(object):
         value_loss_c2 = torch.mean(torch.mean(weights * (q_batch_c2 - target_q_batch_c) ** 2, dim=1))
 
         critic_loss = value_loss_p + value_loss_p2 + value_loss_c + value_loss_c2
+
+        # ---- 可选：branch 的 1-step 辅助监督（计划 §6.2 的 β·L_sup，默认 β=0 关闭）----
+        #   口径：在**同一尺度**（c1/s_c）上做 Huber 回归，目标**不带 bootstrap**
+        #   ⇒ 等价于"γ=0 的 cost TD"，只作用于 branch 行 ⇒ 强化"动作 → 块成本"的
+        #   直接可辨识性，而不动 actor/λ/日志。
+        if self.branch_sup_beta > 0.0 and branch_mask is not None:
+            _nb = int(branch_mask.sum().item())
+            if _nb > 0:
+                _tgt_c = cost_batch[branch_mask].detach()
+                _sup = (nn.functional.smooth_l1_loss(q_batch_c[branch_mask], _tgt_c)
+                        + nn.functional.smooth_l1_loss(q_batch_c2[branch_mask], _tgt_c))
+                critic_loss = critic_loss + self.branch_sup_beta * _sup
+
         critic_loss.backward()
 
         nn.utils.clip_grad_norm_(self.critic_p.parameters(), max_norm=2.0, norm_type=2)
@@ -358,17 +483,21 @@ class SP_TD3(object):
 
         # ---- TD3: delayed policy update ----
         self.update_count += 1
-        if self.update_count % self.policy_delay == 0:
+        if self.update_count % self.policy_delay == 0 and \
+                (actor_mask is None or int(actor_mask.sum().item()) >= 2):
             self.actor.zero_grad()
+            # branch：actor loss **只用 actor 行** —— 无 branch 时 `_sel` 是
+            #   `state_batch` 本身 ⇒ 四个 `self.actor(...)` 调用与历史逐位相同。
+            _sel = state_batch if actor_mask is None else state_batch[actor_mask]
             # Fresh forward through the (just updated) critics: min of twins.
             min_p_cur = self._pair_min(
-                self.critic_p([state_batch, self.actor(state_batch)]),
-                self.critic_p2([state_batch, self.actor(state_batch)]))
+                self.critic_p([_sel, self.actor(_sel)]),
+                self.critic_p2([_sel, self.actor(_sel)]))
             # clamp(min=0) on cost: prevents the actor from exploiting a
             # (pathological) negative cost Q inside the Lagrangian objective.
             min_c_cur = self._aggregate_pair(
-                self.critic_c([state_batch, self.actor(state_batch)]),
-                self.critic_c2([state_batch, self.actor(state_batch)])).clamp(min=0.0)
+                self.critic_c([_sel, self.actor(_sel)]),
+                self.critic_c2([_sel, self.actor(_sel)])).clamp(min=0.0)
 
             # cost 为 +
             policy_loss = -(min_p_cur - self.lam * min_c_cur)  # TODO
@@ -419,13 +548,19 @@ class SP_TD3(object):
 
         # ---- H 层更新数据收集：本批（batch）统计，供主循环块末汇总 ----
         if self.record_update_stats:
+            # branch：`q_c_mean`/`q_c2_mean` 是 **λ1 的分子**（对偶口径）
+            # ⇒ 必须只用 actor 行；无 branch 时这两个表达式与 `q_batch_c.mean()` 逐位相同。
+            _qcm = (float(q_batch_c.mean().item()) if actor_mask is None
+                    else float(q_batch_c[actor_mask].mean().item()))
+            _qcm2 = (float(q_batch_c2.mean().item()) if actor_mask is None
+                     else float(q_batch_c2[actor_mask].mean().item()))
             self.update_stats.append({
                 'td_p_mean': float(np.mean(td_errors_p_np)),
                 'td_c_mean': float(np.mean(td_errors_c_np)),
                 'q_p_mean': float(q_batch_p.mean().item()),
                 'q_p2_mean': float(q_batch_p2.mean().item()),
-                'q_c_mean': float(q_batch_c.mean().item()),
-                'q_c2_mean': float(q_batch_c2.mean().item()),
+                'q_c_mean': _qcm,
+                'q_c2_mean': _qcm2,
                 'min_p_next_mean': float(min_p_next.mean().item()),
                 'min_c_next_mean': float(min_c_next.mean().item()),
                 'target_p_mean': float(target_q_batch_p.mean().item()),
@@ -488,8 +623,49 @@ class SP_TD3(object):
 
     def observe(self, r_t, c_t, s_t1, done):
         if self.is_training:
+            idx = self.memory._next_idx
             self.memory.append(self.s_t, self.a_t, r_t, c_t, s_t1, done)
+            self._tag_actor(idx)
             self.s_t = s_t1
+
+    # ---- 来源标签（branch 分层采样的唯一依据；不进 critic state）--------------
+    def _tag_actor(self, idx):
+        """把刚写入的槽显式标成 **actor**。
+
+        ⚠ 必须显式覆盖写：replay 是环形缓冲，复用到的槽上一次可能是 branch
+        （`src=1`）⇒ 不覆盖就会把 actor 数据误判成 branch（actor loss 会漏掉它，
+        而 branch 池会混进 actor 样本）。
+        """
+        if not self._tag_replay:
+            return
+        self.memory.set_meta(idx, src=SRC_ACTOR, mode=MODE_ACTOR,
+                             block_id=-1, lower_ver=int(self.lower_ver))
+
+    def push_branch_transition(self, s_t, a_t, r_t, c_t, s_t1, done,
+                              mode=0, block_id=-1, lower_ver=None, boot=None):
+        """写一条 **branch** 转移（同块首的测试动作，`source=branch`）。
+
+        ⚠ 与 actor 的关键差异（计划 §4.5）：
+        * **不进 n-step 链**：不碰 `_pending`，直接写 memory；
+        * `n_boot = γ`（只有 1 个块），而不是 actor 的 `γ^n`；
+        * `done` 只影响**它自己**的 bootstrap（`boot=0` 当且仅当该 branch 块是 episode 末）。
+
+        Returns
+        -------
+        idx : int  该转移在 replay 里的下标（供诊断/断言），未写则 -1
+        """
+        if not self.is_training:
+            return -1
+        gam = float(self.discount if boot is None else boot)
+        lv = int(self.lower_ver if lower_ver is None else lower_ver)
+        idx = int(self.memory._next_idx)
+        self.memory.append(s_t, a_t, r_t, c_t, s_t1, done)
+        if self._boot is not None and 0 <= idx < len(self._boot):
+            self._boot[idx] = 0.0 if done else gam
+        self.memory.set_meta(idx, src=SRC_BRANCH, mode=int(mode),
+                             block_id=int(block_id), lower_ver=lv)
+        self.n_branch_transitions += 1
+        return idx
 
     # ---- n 步回报: 写入侧 --------------------------------------------------
     def _push_transition(self, s_t, a_t, r_t, c_t, s_t1, done, boot):
@@ -503,6 +679,7 @@ class SP_TD3(object):
         self.memory.append(s_t, a_t, r_t, c_t, s_t1, done)
         if self._boot is not None and 0 <= idx < len(self._boot):
             self._boot[idx] = boot
+        self._tag_actor(idx)
 
     def _emit_nstep(self, start, n_used):
         """把 _pending[start : start+n_used] 折叠成一条 n 步转移写入 memory。
@@ -594,11 +771,53 @@ class SP_TD3(object):
         self.s_t = obs
         self.random_process.reset_states()
 
+    # ---- critic 结构自动识别 / 重建（评测与续训）----------------------------
+    def _rebuild_critics(self, arch, verbose=True):
+        """按 `arch` 重建四个 critic + 四个 target + 优化器（actor 不动）。
+
+        只在 `load_weights` 发现 checkpoint 的结构与当前实例不一致时调用。
+        动机：评测脚本（`test_five_days.py` / `nine_case_test`）与 `--resume`
+        未必知道训练时的 `--critic_arch`；而 `load_state_dict` 在结构不符时只会
+        抛一串 key 不匹配 —— 自动重建让"v1 checkpoint 用 v1、v6 checkpoint 用 v6"
+        成为默认行为，不必手填。
+        """
+        self.critic_arch = str(arch)
+        cfg = dict(self._critic_cfg)
+        cfg['arch'] = self.critic_arch
+        self._critic_cfg = dict(cfg)
+        lr = self.critic_optim_p.param_groups[0]['lr']
+        for name, base in (('critic_p', 'p'), ('critic_p2', 'p2'),
+                           ('critic_c', 'c'), ('critic_c2', 'c2')):
+            net = Critic(self.nb_states, self.nb_actions, **cfg)
+            tgt = Critic(self.nb_states, self.nb_actions, **cfg)
+            net.to(self.device)
+            tgt.to(self.device)
+            setattr(self, name, net)
+            setattr(self, 'critic_target_' + base, tgt)
+            setattr(self, 'critic_optim_' + base,
+                    Adam(net.parameters(), lr=lr))
+        if verbose:
+            print('[critic] checkpoint 结构 = {} ⇒ 已重建四个 critic '
+                  '(actor 不变)'.format(self.critic_arch))
+
+    def _resolve_arch(self, sd):
+        """按 critic_p 的 state_dict 推断 arch；失败时返回 None。"""
+        try:
+            return str(infer_arch(sd, self.nb_states, self.nb_actions))
+        except Exception:
+            return None
+
     def load_weights(self, output):
         if output is None: return
 
         self.actor.load_state_dict(torch.load('{}/actor_{}.pkl'.format(output, self.nb_actions)))
-        self.critic_p.load_state_dict(torch.load('{}/critic_p_{}.pkl'.format(output, self.nb_actions)))
+        _sd_p = torch.load('{}/critic_p_{}.pkl'.format(output, self.nb_actions),
+                           map_location='cpu')
+        # ---- v6 支持: checkpoint 的结构优先于实例默认（v1 历史 checkpoint 不受影响）----
+        _arch = self._resolve_arch(_sd_p)
+        if _arch is not None and _arch != self.critic_arch:
+            self._rebuild_critics(_arch)
+        self.critic_p.load_state_dict(_sd_p)
         self.critic_c.load_state_dict(torch.load('{}/critic_c_{}.pkl'.format(output, self.nb_actions)))
 
         # TD3: twin-2 weights — fall back to warm-start copy from twin-1

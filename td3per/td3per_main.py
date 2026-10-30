@@ -64,6 +64,7 @@ sys.path.insert(0, _HSRL_DIR)
 
 from env import WindBattery
 from td3per.td3per_ddpg import SP_TD3
+from td3per import td3per_branch as tbr   # 同块首宽动作覆盖（branch）的全部口径
 from util import *
 from td3per.td3per_myfunc import (
     CheckAction, Normalize, Normalize_H,
@@ -253,6 +254,29 @@ def train(num_iterations_H,
     # 与 H agent 绑定同一 (γ, s): 估计口径 = critic 回归口径, 结构上不会分叉
     bias_init.value_scale = float(getattr(agent_H, 'value_scale', hc.value_scale()))
     bias_init.discount = float(agent_H.discount)
+
+    # =================================================================
+    # 同块首宽动作覆盖（branch，计划书 documentation/aifflor_branch_wide_coverage_plan.md）
+    #   * 每个 branch 块：从**同一个块首 state** 再跑 len(modes) 个测试动作 × 5 步；
+    #   * 只写 replay（source=branch），**不推进主 episode、不写任何行为日志**；
+    #   * 随机流独立（`BranchController.rng`）⇒ 开关 branch 不改变 actor 的随机数轨迹。
+    # =================================================================
+    branch_ctl = tbr.BranchController(args)
+    _branch_csv = bool(int(getattr(args, 'branch_csv', 1) or 0))
+    _branch_enabled = bool(branch_ctl.enabled)
+    df_branch_rows = []
+    df_branch_written = 0
+    _branch_blk_c1 = float('nan')
+    _branch_blk_r1 = float('nan')
+
+    def _make_critic_state(_obs, _env, _minute):
+        """块末原始观测 → critic state（与 actor 同一个构造 ⇒ s' 口径必然一致）。"""
+        return Normalize_H(_obs, _minute, phase_mode, phase_table)
+
+    if _branch_enabled:
+        prCyan(branch_ctl.summary())
+        prCyan(tbr.declared_scope())
+
     while step < num_iterations_H:
         # start of episode 重置环境
         prYellow('########### step:{} ###########'.format(step))
@@ -303,6 +327,84 @@ def train(num_iterations_H,
             soc_signal = 0.0 if args.nolow else float(applied_action_H[5])
             soc_target = soc_target_from_signal(soc_signal)
             pb_l = list()
+
+            # ============================================================
+            # 同块首宽动作覆盖（branch，计划 §3.3）
+            #   此刻 env 恰好停在**块首**（本块一步都还没推进）⇒ 这里就是 s_block。
+            #   跑完由 `run_branch_block` 的 `restore_env` 原样恢复，
+            #   `episode_steps / E / P_G_prev / count_wind / count_price` 一位不变。
+            #   ⚠ 只写 replay（source=branch）：λ/EMA/curriculum/CSV/TB/test 一律不看。
+            # ============================================================
+            if _branch_enabled and branch_ctl.trigger(step):
+                _snap = tbr.snapshot_env(env)
+                # 该块末是否 episode 终止（与主循环 `done` 的判据同式）
+                _block_done = bool(
+                    max_episode_length
+                    and (episode_steps + tbr.BLOCK - 1) >= max_episode_length - 1)
+                _minute_end = phase_minute_of_day(episode_steps + tbr.BLOCK)
+                _blk_id = branch_ctl.begin_block()
+                _c1s, _r1s = [], []
+                for _mode in branch_ctl.modes:
+                    _a5b = branch_ctl.action(_mode)          # 独立随机流
+                    _s6b = branch_ctl.signal_value(float(observation[2]),
+                                                   actor_signal=soc_signal)
+                    _bres = tbr.run_branch_block(
+                        env, rbb_system, _a5b, _s6b, _snap, _block_done,
+                        _make_critic_state, minute_end=_minute_end,
+                        lower=branch_ctl.lower, nolow=bool(args.nolow),
+                        viol_derate_coef=args.viol_derate,
+                        soc_tol=soc_tol_upper)
+                    _a6b = np.concatenate([np.asarray(_bres['a5'], dtype=float),
+                                           np.array([float(_bres['a6'])])])
+                    agent_H.push_branch_transition(
+                        norm_observation_H, _a6b[:len(applied_action_H)],
+                        _bres['r1'], _bres['c1'],
+                        _bres['s2'], _bres['done'], mode=_mode,
+                        block_id=_blk_id, lower_ver=agent_H.lower_ver)
+                    branch_ctl.note(_mode, _bres)
+                    _c1s.append(float(_bres['c1']))
+                    _r1s.append(float(_bres['r1']))
+                    prPurple('--branch-- [{}] a={} sig={:+.3f} | r1={:.2f} c1={:.3f} '
+                             '| P_F_mean={:.3f} max={:.3f}'.format(
+                                 tbr.MODE_NAME[_mode],
+                                 np.round(_bres['a5'], 3), _bres['a6'],
+                                 _bres['r1'], _bres['c1'],
+                                 float(np.mean(_bres['P_F'])), _bres['P_F_max']))
+                    if use_csv and _branch_csv:
+                        _a5c = np.asarray(_bres['a5'], dtype=float).reshape(-1)
+                        df_branch_rows.append({
+                            'step': step, 'block_id': _blk_id,
+                            'mode': tbr.MODE_NAME[_mode],
+                            **{'a{}'.format(i + 1): float(_a5c[i])
+                               for i in range(_a5c.size)},
+                            'soc_signal': float(_bres['a6']),
+                            'soc_target': float(_bres['soc_target']),
+                            'r1': _bres['r1'], 'c1': _bres['c1'],
+                            'gap_pen': _bres['gap_pen'],
+                            'P_F_mean': float(np.mean(_bres['P_F'])),
+                            'P_F_max': _bres['P_F_max'], 'n_fold': _bres['n_fold'],
+                            'soc_start': _bres['soc_start'], 'soc_end': _bres['soc_end'],
+                            'pbrule_sum': _bres['pbrule_sum'],
+                            'lam1': float(agent_H.lam),
+                            'lower_ver': int(agent_H.lower_ver),
+                        })
+                _branch_blk_c1 = float(np.mean(_c1s)) if _c1s else float('nan')
+                _branch_blk_r1 = float(np.mean(_r1s)) if _r1s else float('nan')
+                if upload:
+                    _cov = branch_ctl.coverage()
+                    writer.add_scalar('branch/c1_mean', _branch_blk_c1, step)
+                    writer.add_scalar('branch/r1_mean', _branch_blk_r1, step)
+                    writer.add_scalar('branch/n_trans', branch_ctl.n_trans, step)
+                    writer.add_scalar('branch/cover_lo', _cov['frac_lo'], step)
+                    writer.add_scalar('branch/cover_hi', _cov['frac_hi'], step)
+                    writer.add_scalar('branch/cover_fold', _cov['frac_fold'], step)
+                    writer.add_scalar('branch/buffer_n_branch', agent_H.memory.n_branch, step)
+                    writer.add_scalar('branch/buffer_frac',
+                                      (agent_H.memory.n_branch
+                                       / max(1, len(agent_H.memory))), step)
+                    writer.add_scalar('branch/batch_frac',
+                                      float(getattr(agent_H, 'last_batch_branch_frac', 0.0)),
+                                      step)
 
         prGreen('--H-- ori a_t = {}'.format(round_list(original_action_H, 3)))
 
@@ -574,6 +676,15 @@ def train(num_iterations_H,
                 # nolow: 下层 RL 旁路 ⇒ 启动时已把 args.utd_l 置 0 (循环体与守卫形式均不变)
                 for _ in range(args.utd_l):
                     agent_L.update_policy()
+                # ---- 下层版本号（branch 的 `lower_ver` 标签）----
+                #   branch 用**冻结/规则**下层，它的 c1 标签与"当时的下层版本"绑定；
+                #   版本推进只用于采样期诊断（计划 §9.2），不改变采样概率。
+                if args.utd_l > 0:
+                    agent_H.lower_ver = int(getattr(agent_H, 'lower_ver', 0)) + 1
+                # ---- branch 的可选 1-step 辅助监督权重 β（线性衰减到 0.2·β0）----
+                if _branch_enabled:
+                    agent_H.branch_sup_beta = float(
+                        branch_ctl.sup_beta(branch_ctl.n_blocks))
 
                 if consecutive_satisfied_H >= hc.H_CURRICULUM_BLOCKS:
                     d_block_H = max(d_block_H / 2, d_block_H_min)  # H: 收紧块预算
@@ -756,6 +867,12 @@ def train(num_iterations_H,
                 df_written = flush_csv_append_batch(
                     '{}/df_{}.csv'.format(output, RUN_TAG), df_rows, df_written)
                 df_rows = []
+                # branch 专用 CSV（逐 branch transition；actor 行为日志不受影响）
+                if _branch_enabled and _branch_csv and df_branch_rows:
+                    df_branch_written = flush_csv_append_batch(
+                        '{}/df_branch_{}.csv'.format(output, RUN_TAG),
+                        df_branch_rows, df_branch_written)
+                    df_branch_rows = []
 
         # ---- Periodic checkpoint (every 2000 steps) ----
         if step > 0 and step % 2000 == 0:
@@ -935,6 +1052,20 @@ def train(num_iterations_H,
         flush_csv_append_batch('{}/update_stats_H.csv'.format(output),
                    df_update_rows, df_update_written)
 
+    # branch CSV 收尾（独立批次表；与 `df_*.csv` 的 flush 分开，避免重复写）
+    if use_csv and _branch_enabled and _branch_csv:
+        flush_csv_append_batch('{}/df_branch_{}.csv'.format(output, RUN_TAG),
+                               df_branch_rows, df_branch_written)
+
+    if _branch_enabled:
+        # branch 口径汇总（只打日志，不参与任何训练量）
+        prCyan(branch_ctl.summary())
+        prCyan('[branch] replay: actor {} 条 / branch {} 条 | 含 branch 的 critic 批 {} 次 | '
+               '上一批 branch 占比 {:.1%}'.format(
+                   agent_H.memory.n_actor, agent_H.memory.n_branch,
+                   int(getattr(agent_H, 'n_updates_with_branch', 0)),
+                   float(getattr(agent_H, 'last_batch_branch_frac', 0.0))))
+
     # 相位自检结论 (应恒为 0; >0 说明 episode_steps 与 env 电价时钟失配)
     if phase_mode > 0:
         prGreen('phase check: mode={} dims={} checked={} mismatch={} ({:.4f}%)'.format(
@@ -974,6 +1105,27 @@ if __name__ == "__main__":
                         default=100,
                         type=int,
                         help='hidden num of second fully connect layer')
+    # ---- 上层/下层 critic 结构（v6 = model.Critic 的双流新结构）----
+    #   2026-10 起**默认 v6**（与 aifflor 同源，`model.V6_DIMS`）:
+    #       s: 4(+相位) → 32 → 32  ∥  a: 6 → 64 → 64
+    #       cat(32+64)=96 → 128 → 256 → 256 → 128 → 1   （原始 a 不再重复拼入）
+    #   `v1` = 改造前的历史结构（`--hidden1/--hidden2` 生效）⇒ 复现历史 run 请传
+    #   `--critic_arch v1`。v6 下 `--hidden1/--hidden2` **不生效**（宽度写死在 V6_DIMS）。
+    parser.add_argument('--critic_arch', default='v6',
+                        choices=['v1', 'v1af', 'v2', 'v3', 'v4', 'v5', 'v6'],
+                        help='critic 结构（默认 **v6**，2026-10 起）: '
+                             'v6=双流(s→32→32 ∥ a→64→64)→128→256→256→128→1; '
+                             'v1=历史结构（--hidden1/--hidden2 生效，复现旧 run 用）; '
+                             'v2=双流(s16-100 ∥ a32-64→square 残差); v1af=动作首层进网')
+    parser.add_argument('--critic_act', default='relu', choices=['relu', 'leaky'],
+                        help='critic 激活: relu=历史; leaky=LeakyReLU(0.01)（防死单元）')
+    parser.add_argument('--critic_out_init', default='3e3', choices=['3e3', 'fanin'],
+                        help='critic 输出层权重初始化: 3e3=历史(±3e-3); fanin=PyTorch 默认(±1/√fan_in)')
+    parser.add_argument('--l_critic_arch', default='inherit',
+                        choices=['inherit', 'v1', 'v2', 'v6'],
+                        help='**下层 L** 的 critic 结构（默认 inherit = 与 H 相同）。'
+                             'L 只有 1 维动作、每块 10 次更新 ⇒ v6 在这里的算力占比比 H 高；'
+                             '想省算力可传 --l_critic_arch v1（H 仍是 v6）')
     parser.add_argument('--rate',
                         default=0.01,
                         type=float,
@@ -1192,6 +1344,8 @@ if __name__ == "__main__":
     parser.add_argument('--max_steps', default=0, type=int,
                         help='>0 时覆盖 train_iter_H, 用于短程 A/B')
     hwarm.add_warmup_args(parser)
+    # 同块首宽动作覆盖（branch）：默认**全关**（--branch_every 0）⇒ 历史行为逐位不变
+    tbr.add_branch_args(parser)
     args = parser.parse_args()
     args = hwarm.resolve_warmup(args)   # WARMUP_AUTO: 正式口径 warmup=bsize*mult, 期零网络更新
     hc.set_mode(args.c1_mode)
@@ -1272,6 +1426,15 @@ if __name__ == "__main__":
     print('H nb_states = {} (4 base + {} phase dims, --phase_feat={})'.format(
         nb_states_H, PHASE_DIM[int(getattr(args, 'phase_feat', 0))], args.phase_feat))
     nb_actions_H = 5 if getattr(args, 'nolow', False) else 6
+    # ---- branch（同块首宽动作覆盖）：critic 批的来源分层比例 ----
+    #   计划书 §4.2：actor 50–60% / branch 40–50%。关闭时 `branch_mix=0` ⇒
+    #   `update_policy` 走历史 `memory.sample(...)`，不给 actor 打掩码（逐位不变）。
+    _branch_on = (int(getattr(args, 'branch_every', 0) or 0) > 0
+                  or int(getattr(args, 'branch_pilot_blocks', 0) or 0) > 0)
+    _branch_frac = (float(getattr(args, 'branch_critic_frac', 0.45) or 0.0)
+                    if _branch_on else 0.0)
+    _branch_beta = (float(getattr(args, 'branch_sup_beta', 0.0) or 0.0)
+                    if _branch_on else 0.0)
     agent_H = SP_TD3(nb_states=nb_states_H, nb_actions=nb_actions_H, args=args,
                      lam_max=(_HCFG['lam_max'] if _HCFG else 100.0), lam_min=(_HCFG['lam_min'] if _HCFG else 3.0),
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
@@ -1284,7 +1447,24 @@ if __name__ == "__main__":
                      sig_noise_max=args.sig_noise_max,
                      sig_noise_min=args.sig_noise_min,
                      wt_noise_floor=args.wt_noise_floor,
-                     nstep=args.nstep, target_agg=args.target_agg)
+                     nstep=args.nstep, target_agg=args.target_agg,
+                     critic_arch=args.critic_arch,
+                     critic_act=args.critic_act,
+                     critic_out_init=args.critic_out_init,
+                     branch_mix=_branch_frac, branch_sup_beta=_branch_beta)
+    _n_crit = sum(p.numel() for p in agent_H.critic_p.parameters())
+    prCyan('[critic] arch={} act={} out_init={} → 单个 critic 参数量 {:,} '
+           '（对照: ns=4/na=6 时 v1=14,441, v6=150,081）'.format(
+               agent_H.critic_arch, args.critic_act, args.critic_out_init, int(_n_crit)))
+    if _branch_on:
+        prCyan('[branch] critic 批 branch 占比 = {:.2f} | 每 {} 块一次 | pilot 前 {} 块每块 | '
+               'lower={} signal={} | sup_beta={} (衰减跨度 {} 块) | csv={}'.format(
+                   _branch_frac, int(getattr(args, 'branch_every', 0) or 0),
+                   int(getattr(args, 'branch_pilot_blocks', 0) or 0),
+                   getattr(args, 'branch_lower', 'freeze'),
+                   getattr(args, 'branch_signal', 'soc'),
+                   _branch_beta, int(getattr(args, 'branch_sup_blocks', 20000) or 20000),
+                   int(getattr(args, 'branch_csv', 1) or 0)))
     print('[H] nstep={} target_agg={} (n 步回报: 自助传播深度 50->{:.1f}; '
           '复现历史 run1~run10 请传 --nstep 1)'.format(
               args.nstep, args.target_agg, 50.0 / max(1, args.nstep)))
@@ -1329,7 +1509,13 @@ if __name__ == "__main__":
                      policy_delay=args.l_policy_delay,
                      policy_noise=args.l_policy_noise,
                      noise_clip=args.noise_clip,
-                     cost_critic_mode=args.cost_critic_mode)
+                     cost_critic_mode=args.cost_critic_mode,
+                     # 下层 critic 结构: 默认与 H 相同（--l_critic_arch 可单独降级）
+                     critic_arch=(args.critic_arch
+                                  if str(args.l_critic_arch) == 'inherit'
+                                  else args.l_critic_arch),
+                     critic_act=args.critic_act,
+                     critic_out_init=args.critic_out_init)
     agent_L.lam = hst.L_LAM_INIT
     agent_L.cost_limit = hst.L_COST_LIMIT  # L层c2专用初始值（单一真源）
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))

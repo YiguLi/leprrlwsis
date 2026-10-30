@@ -34,6 +34,21 @@ Key differences from SP_DDPG:
   4. PER priority based on twin-min TD errors (unchanged formula shape).
   5. 逐维探索噪声 (WT 5 维 ±wt_noise·ε; 信号维 ±max(sig_noise_max·ε,
      sig_noise_min)), 由 td3perrb 移植。
+
+2026-10 新增（两项，均可单独关闭）
+---------------------------------
+  * **critic v6**（`--critic_arch`，默认 v6）: `model.Critic(arch='v6')` 双流结构
+    `s→32→32 ∥ a→64→64 → cat(96) →128→256→256→128→1`（原始 a 不再重复拼入；
+    ns=4/na=6 时 150,081 参数）。`--critic_arch v1` = 改造前结构（逐位复现历史）。
+    ⚠ `SP_TD3` 构造函数在拿不到 `args.critic_arch` 时回落 **v1**（探针/契约测试不变）。
+    `load_weights` 会按 checkpoint 的 state_dict 自动推断 arch 并重建（v1↔v6）。
+  * **branch**（`--branch_every` / `--branch_pilot_blocks`，默认关闭）: 同块首宽动作覆盖，
+    口径唯一真源 = `td3per/td3per_branch.py`（移植自 `aifflor`，见
+    `documentation/td3per_branch_v6.md`）。branch 只进 critic TD（分池采样 + actor 掩码），
+    不进 n 步链（`n_boot=γ`），actor/λ/EMA/CSV/TB/test 只用 actor 行。
+
+口径与契约测试见 `documentation/td3per_branch_v6.md` /
+`agentutil/test_td3per_branch_v6_contract.py`。
 """
 
 from td3per.td3per_ddpg import SP_TD3
