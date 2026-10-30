@@ -84,6 +84,16 @@
     # 重新选天（数据变了 / 想换桶宽）
     python agentutil/test_4days_two_engines.py --rebuild-days --dry-run
 
+固定动作基线（`--fixed-a`，**不需要模型目录**）
+--------------------------------------------
+`--fixed-a A` 把五台轴向因子全程钉在 `A`、第 6 维（块总放电量 `g`）钉在 `--goal`（默认 0），
+下层走 HSRL 的**摊还执行器**规则 `pb = clip(−(g−Σ)/n_rem, 物理域)`：
+    g = 0  ⇒  need ≡ 0  ⇒  pb ≡ 0  ⇒  储能完全不动作（SOC 恒定）
+也就是说这条臂 = **纯固定桨距风场 + 空电池**，不带任何学习成分，用来当"引擎/口径"的参照点。
+    python agentutil/test_4days_two_engines.py --fixed-a 0.3333 --goal 0 --engines matlabwfsim
+结果落在 `<out>/<engine>/FIXED-A0.333/`，与其它模型臂并列进同一套汇总表；不同 `--fixed-a`
+值会得到不同目录（不会互相覆盖）。
+
 环境
 ----
     MATLAB 引擎要求本机装有 MATLAB 且 `matlab.engine` 可用；受限沙箱（named pipe
@@ -394,7 +404,10 @@ class HsrlRunner:
         self.verbose = verbose
         self.episode_length = int(day_runner_args['episode_length'])
         self.soc0 = float(day_runner_args['soc0'])
-        self.phase_mode = int(cfg['phase_mode'])
+        # ---- 固定动作基线（`--fixed-a`）：无模型臂 ----
+        self.fixed_a = day_runner_args.get('fixed_a')
+        self.fixed_g = float(day_runner_args.get('goal', 0.0) or 0.0)
+        self.phase_mode = int(cfg['phase_mode']) if cfg else 0
         self.phase_table = (myf.phase_daily_table() if self.phase_mode >= 2 else None)
 
         # ---- 物理后端 ----
@@ -418,9 +431,19 @@ class HsrlRunner:
                                  time=DT, fluctuation_limit=float('inf'))
 
         # ---- 智能体（H: 6 动作 / L: 1 动作）----
-        from aifflor.aifflor_ddpg import SP_TD3
+        # `--fixed-a` 时**不加载任何模型**：动作是写死的常量，下层走摊还规则
         import torch
         torch.set_grad_enabled(False)
+        self.agent_H = self.agent_L = None
+
+        if self.fixed_a is not None:
+            if verbose:
+                print('    [{}] 固定动作臂：a_i ≡ {:.4f}（五台），g ≡ {:g} MW·min，'
+                      '下层 = 摊还规则（g=0 ⇒ pb ≡ 0，储能不动作）'
+                      .format(engine_kind, float(self.fixed_a), self.fixed_g))
+            return
+
+        from aifflor.aifflor_ddpg import SP_TD3
 
         args_H = build_args(cfg, device, critic_arch=cfg['critic_H'][0],
                             critic_feat_power=cfg['critic_H'][1],
@@ -495,7 +518,8 @@ class HsrlRunner:
         obs[2] = self.soc0
 
         norm_obs = self._norm_H(obs, 0)
-        agent_H.reset(norm_obs)
+        if agent_H is not None:
+            agent_H.reset(norm_obs)
 
         # ---- 累计量 ----
         viol_count = 0
@@ -520,9 +544,15 @@ class HsrlRunner:
             if t % 5 == 0:
                 sum_disch = 0.0
                 E_block_start = float(obs[2])
-                # 注意：`select_action` 内部已做 `--scalar_wt` 投影（aifflor_ddpg:692），
-                # 因此这里**不需要**再调 `_apply_scalar_wt`。
-                action_H = np.asarray(agent_H.select_action(norm_obs), dtype=float).reshape(-1)
+                if self.fixed_a is not None:
+                    # 固定动作臂：前 5 维恒为 `--fixed-a`，第 6 维恒为 `--goal`（默认 0）
+                    action_H = np.concatenate([np.full(5, float(self.fixed_a)),
+                                               np.array([self.fixed_g])])
+                else:
+                    # 注意：`select_action` 内部已做 `--scalar_wt` 投影（aifflor_ddpg:692），
+                    # 因此这里**不需要**再调 `_apply_scalar_wt`。
+                    action_H = np.asarray(agent_H.select_action(norm_obs),
+                                          dtype=float).reshape(-1)
                 applied_H, _pen5, _pen6 = CheckH(action_H, E_block_start)
                 g_applied = float(applied_H[5])
                 pw_tru = env.PowerOutput(obs[1], applied_H)
@@ -535,12 +565,19 @@ class HsrlRunner:
             # ---- L 观测（6 维，含 c_L 的参照点 need）----
             need = hsrl.plan_need(g_applied, sum_disch, n_rem)
             obs_L = hsrl.build_L_obs_hsrl(obs[1], obs[0], E_now, pg_prev, g_applied, need)
-            if t % 5 == 0:
+            if t % 5 == 0 and agent_L is not None:
                 agent_L.reset(obs_L)
 
             # ---- L 动作 = 绝对 pb（正=充电），只按物理域裁剪 ----
-            action_L = np.asarray(agent_L.select_action(obs_L), dtype=float).reshape(-1)
-            pb_cmd = float(action_L[0])
+            if self.fixed_a is not None:
+                # 固定动作臂的下层 = **摊还执行器**（HSRL 的"零成本动作"规则）：
+                #   pb = clip(−(g−Σ)/n_rem, 物理域) ⇒ g≡0 时 pb≡0（储能不动作，SOC 恒定）
+                pb_cmd = float(hsrl.amortized_rule_action(
+                    g_applied, sum_disch, n_rem, E_now))
+            else:
+                action_L = np.asarray(agent_L.select_action(obs_L),
+                                      dtype=float).reshape(-1)
+                pb_cmd = float(action_L[0])
 
             # ---- RBB 硬裁剪（HSRL 下 ≡ clip 到物理域）----
             pbrule, _rbb_info = self.rbb.compute_pbrule(
@@ -736,16 +773,11 @@ class Tb:
         if not self.enabled:
             return None
         if run_name not in self.writers:
-            path = os.path.join(self.root, run_name)
-            # 同一个引擎被**重跑**时：把旧 run 归档（不删），免得 TB 里新旧曲线叠在一起
-            if _has_events(path):
-                bak = '%s.old-%s' % (path, time.strftime('%Y%m%d-%H%M%S'))
-                try:
-                    os.replace(path, bak)
-                    print('  [tb] 旧 run 已归档: %s' % os.path.basename(bak))
-                except OSError:
-                    pass
-            self.writers[run_name] = self._SW(path)
+            # 注意：**追加**写（不归档、不清空）。同一引擎后续再加别的臂（如 `--fixed-a` 基线）
+            # 时，新旧 tag 互不重叠、各自成曲线；只有"同一臂重跑"才会在该 tag 上多出一个点，
+            # 而 CSV 侧是幂等的（`days.csv` 覆盖写 + `summary_all.csv` 按 (engine,model,day) 去重）。
+            # 想彻底重来就手工删掉 `<out>/tensorboard/<engine>`。
+            self.writers[run_name] = self._SW(os.path.join(self.root, run_name))
         return self.writers[run_name]
 
     def scalar(self, run_name, tag, value, step):
@@ -912,6 +944,12 @@ def parse_args():
                    help='放电退化成本 元/MWh（默认 490）')
     p.add_argument('--scalar-wt', type=int, default=None, choices=[0, 1],
                    help='强制 --scalar_wt（默认 None = 从 train.log 自动探测）')
+    p.add_argument('--fixed-a', type=float, default=None, metavar='A',
+                   help='**不要模型**：五台轴向因子全程固定为 A（如 0.3333），'
+                        '第 6 维固定为 --goal；下层走摊还规则（g=0 ⇒ 储能不动作）。'
+                        '用来跑"固定动作 + 无储能"的基线臂')
+    p.add_argument('--goal', type=float, default=0.0,
+                   help='配合 --fixed-a：块总放电量 g 的固定值 [MW·min]（默认 0 = 储能不动作）')
     p.add_argument('--output', default=os.path.join('output', 'test_4days_engine'),
                    help='输出目录（默认 output/test_4days_engine）')
     p.add_argument('--seed', type=int, default=0, help='torch/numpy 种子（默认 0）')
@@ -981,7 +1019,7 @@ def main():
     torch.manual_seed(args.seed)
     torch.set_grad_enabled(False)
 
-    models = pick_models(args)
+    models = [] if args.fixed_a is not None else pick_models(args)
     engines = list(args.engines)
 
     if args.selftest:
@@ -1016,17 +1054,24 @@ def main():
                       '[%g,%g)' % (d['lo'], d['hi'])))
     print('  清单已固化到: %s' % os.path.join(out_dir, 'fixed_days.csv'))
 
-    # ---- 2. 模型配置（自动探测）----
+    # ---- 2. 模型配置（自动探测）；`--fixed-a` 时只建一个无模型的常量臂 ----
     runs = []
-    for tag, d, note in models:
-        cfg = detect_model_cfg(d)
-        sw = args.scalar_wt if args.scalar_wt is not None else detect_scalar_wt(d)
-        if sw is None:
-            sw = 0
-            print('[警告] %s 无 train.log，scalar_wt 按 0 处理（如该 run 是标量臂请 --scalar-wt 1）'
-                  % tag)
-        cfg['scalar_wt'] = int(bool(sw))
-        runs.append(dict(tag=tag, dir=d, note=note, cfg=cfg))
+    if args.fixed_a is not None:
+        a_val, g_val = float(args.fixed_a), float(args.goal)
+        runs.append(dict(
+            tag='FIXED-A%g' % a_val, dir='', cfg=None,
+            note='固定动作基线: a_i≡%.4f (五台), g≡%g MW·min, 下层=摊还规则(储能不动作)'
+                 % (a_val, g_val)))
+    else:
+        for tag, d, note in models:
+            cfg = detect_model_cfg(d)
+            sw = args.scalar_wt if args.scalar_wt is not None else detect_scalar_wt(d)
+            if sw is None:
+                sw = 0
+                print('[警告] %s 无 train.log，scalar_wt 按 0 处理（如该 run 是标量臂请 --scalar-wt 1）'
+                      % tag)
+            cfg['scalar_wt'] = int(bool(sw))
+            runs.append(dict(tag=tag, dir=d, note=note, cfg=cfg))
 
     n_ep = len(runs) * len(engines) * len(days)
     print('\n' + '=' * 88)
@@ -1034,10 +1079,13 @@ def main():
           % (len(runs), len(engines), len(days), n_ep, EPISODE_LENGTH))
     print('=' * 88)
     for r in runs:
-        print('  %-18s %-26s scalar_wt=%d | H%s%s L%s%s'
-              % (r['tag'], r['dir'], r['cfg']['scalar_wt'],
-                 r['cfg']['ns_H'], r['cfg']['critic_H'][0], r['cfg']['ns_L'],
-                 r['cfg']['critic_L'][0]))
+        if r['cfg'] is None:
+            print('  %-18s %s' % (r['tag'], r['note']))
+        else:
+            print('  %-18s %-26s scalar_wt=%d | H%s%s L%s%s'
+                  % (r['tag'], r['dir'], r['cfg']['scalar_wt'],
+                     r['cfg']['ns_H'], r['cfg']['critic_H'][0], r['cfg']['ns_L'],
+                     r['cfg']['critic_L'][0]))
     for e in engines:
         print('  %-18s %s' % (e, ENGINE_DESC[e]))
         if e == 'matlabwfsim':
@@ -1076,7 +1124,9 @@ def main():
                 runner = HsrlRunner(cfg, engine_kind, device,
                                     dict(episode_length=EPISODE_LENGTH,
                                          soc0=float(args.soc0),
-                                         scalar_wt=cfg['scalar_wt'],
+                                         scalar_wt=(cfg['scalar_wt'] if cfg else 0),
+                                         fixed_a=args.fixed_a,
+                                         goal=float(args.goal),
                                          engine=engine_obj),
                                     verbose=True)
                 run_days, run_steps = [], []
