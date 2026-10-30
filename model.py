@@ -576,6 +576,66 @@ def proj_lin_wt_np(a, nt=5, decimals=2):
     return out
 
 
+def expand_lin_wt(x, nt=5, decimals=2):
+    """**3 输出头**的展开：`x = [a0, a_end, g...]` → `[a0, 中..., a_end, g...]`。
+
+    `--lin_wt` 的结构版 actor 输出层只有 **2 + (nb_actions − nt)** 个神经元：
+    首端 `a0`、末端 `a_end = a_{nt−1}`，其余维（HSRL 的 `g`）原样跟在后面。
+    本函数把中间 `nt−2` 维填成线性插值（并四舍五入），得到 critic / env 需要的
+    完整动作向量。
+
+    与 `proj_lin_wt` 的分工：
+      * `proj_lin_wt` 吃**完整动作**（如 warmup 调度给出的 5/6 维），只保留首尾；
+      * `expand_lin_wt` 吃**压缩后的 actor 输出**（2 + 额外维），负责展开。
+    """
+    n = int(nt)
+    if n < 2:
+        raise ValueError('expand_lin_wt: nt 必须 >= 2')
+    if x.shape[-1] < 2:
+        raise ValueError('expand_lin_wt: 输入至少要有 [a0, a_end] 两维')
+    mid = torch.zeros(x.shape[:-1] + (n - 2,), dtype=x.dtype, device=x.device)
+    base = torch.cat([x[..., 0:1], mid, x[..., 1:2], x[..., 2:]], dim=-1)
+    return proj_lin_wt(base, nt=n, decimals=decimals)
+
+
+def expand_lin_wt_np(x, nt=5, decimals=2):
+    """`expand_lin_wt` 的 numpy 版（1-D 输入；供 select_action / warmup 用）。"""
+    arr = np.asarray(x, dtype=np.float64).reshape(-1)
+    n = int(nt)
+    if n < 2:
+        raise ValueError('expand_lin_wt_np: nt 必须 >= 2')
+    if arr.size < 2:
+        raise ValueError('expand_lin_wt_np: 输入至少要有 [a0, a_end] 两维')
+    mid = np.zeros(n - 2, dtype=np.float64)
+    base = np.concatenate([arr[:1], mid, arr[1:2], arr[2:]])
+    return proj_lin_wt_np(base, nt=n, decimals=decimals)
+
+
+def wt_bias_values(nb_out, lo=0.05, hi=0.45, sig_value=0.0, lin_wt=False,
+                   rng=None):
+    """actor 输出层 bias 的初始化值（`--lin_wt` 的 3 输出映射也在这里）。
+
+    * 默认（6 输出）：前 5 维 = 风机 `a` 的“中性宽带” `U(lo,hi)`，其余 = `sig_value`；
+    * `--lin_wt`（3 输出）：第 0/1 维 = `a0/a4` 的 `U(lo,hi)`，其余 = `sig_value`。
+
+    返回 float32 numpy 向量；调用方把它写进 `actor.fc4.bias`（及 target）。
+    """
+    rng = np.random if rng is None else rng
+    b = np.zeros(int(nb_out), dtype=np.float32)
+    if b.size == 0:
+        return b
+    if lin_wt:
+        if b.size < 2:
+            raise ValueError('wt_bias_values(lin_wt): 输出至少要有 a0/a4 两维')
+        b[:2] = rng.uniform(lo, hi, 2)
+        b[2:] = float(sig_value)
+    else:
+        n_wt = min(5, b.size)
+        b[:n_wt] = rng.uniform(lo, hi, n_wt)
+        b[n_wt:] = float(sig_value)
+    return b
+
+
 def proj_scalar_wt(a, nt=5):
     """把前 nt 维风机动作压成**同一个值** a_0：`a_i = a_0`（i<nt），其余维不变。
 

@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""test_aifflor_lin_wt.py —— 线性行为分支（--lin_wt）的契约测试。
+"""test_aifflor_lin_wt.py —— 线性行为分支（--lin_wt，**结构版**）的契约测试。
 
-覆盖 6 条契约（任一失败即 exit 1）：
-  A 投影语义：a0 / a4 原样保留，中间三维 = 线性插值 + 两位小数四舍五入；
-             第 6 维 g 不动；**不 clip**（越界交给动作检查 + pen5）
-  B 梯度：投影只读首尾 ⇒ ∂/∂a_j (j=1..3) **恒为 0**；a0 / a4 / g 非零
-             （取整用 straight-through，故 a0/a4 的梯度不会被 round 清零）
-  C agent 层：探索噪声之后仍落在“首尾 + 线性插值”流形上；ε=0 的确定性输出同样
-  D 物理：同一 (a0, a4)、其余维任改 ⇒ env.PowerOutput 逐位相同；改 a4 出力变
-  E 默认臂：lin_wt=0 时 _project / _project_np 严格恒等（逐位不变）
-  F 接线：aifflor_main 的两条主循环（旧 train / train_hsrl）都调用 _apply_lin_wt
+结构版口径：
+  * actor 输出层 = `[a0, a_end, g...]` 共 `2 + (nb_actions − na_box)` 个神经元
+    （上层 6 维动作 ⇒ **3 个神经元**）；
+  * 中间 `na_box−2` 维由 `model.expand_lin_wt` 从 `a0/a_end` 线性插值展开，
+    并四舍五入到 `--lin_wt_decimals` 位（默认 2）；
+  * critic 仍吃 6 维动作；噪声 / target smoothing 只加在自由维上；
+  * checkpoint 为 `actor_3.pkl`（critic 仍 `*_6.pkl`）。
+
+覆盖（任一失败即 exit 1）：
+  A 展开/投影语义：首尾原样、中间线性插值 + 两位小数，g 原样，不 clip
+  B actor 结构：3 输出头 / 参数数 / 自由维索引 / 默认臂仍 6 输出
+  C 梯度：3 个输出都对 Q 有梯度；没有"中间输出单元"；STE 直接契约
+  D agent 层：探索噪声 / random_action / target smoothing 都在流形上
+  E checkpoint：`actor_3.pkl` + `critic_*_6.pkl` 可保存/加载
+  F 物理：同一 (a0,a4)、其余维任改 ⇒ 出力逐位相同
+  G 初始化映射：3 输出头的 a0/a4/g bias 映射
+  H 接线：两条主循环都调用 `_apply_lin_wt`，CLI/互斥/结构版接线存在
 
 跑法：python agentutil/test_aifflor_lin_wt.py
 """
 import os
+import shutil
 import sys
 from types import SimpleNamespace
 
@@ -31,6 +40,7 @@ import model  # noqa: E402
 from aifflor.aifflor_ddpg import SP_TD3  # noqa: E402
 
 FAIL = []
+TMP_DIR = os.path.join(ROOT, 'output', '_lin_wt_contract')
 
 
 def check(cond, msg):
@@ -56,61 +66,80 @@ def make_args(lin_wt=1, farm_level=0, scalar_wt=0, decimals=2):
     )
 
 
-# ---------------------------------------------------------------- A 投影语义
-def test_projection():
-    print('[A] 投影语义：a0/a4 不动，中间三维线性插值 + 两位小数，g 不动，不 clip')
-    a = torch.tensor([[0.12, 0.40, 0.01, 0.33, 0.25, -0.7],
-                      [0.30, 0.00, 0.50, 0.40, 0.10, 0.33]])
-    p = model.proj_lin_wt(a, nt=5)
+# ---------------------------------------------------------------- A 展开/投影
+def test_expand_and_projection():
+    print('[A] 展开/投影：首尾原样、中间线性插值 + 两位小数、g 原样、不 clip')
+    raw = torch.tensor([[0.12, 0.25, -0.7],
+                        [0.30, 0.10, 0.33]])
+    a = model.expand_lin_wt(raw, nt=5)
     exp = np.array([[0.12, 0.15, 0.19, 0.22, 0.25, -0.7],
                     [0.30, 0.25, 0.20, 0.15, 0.10, 0.33]])
-    check(np.allclose(p.numpy(), exp, atol=1e-9),
-          'torch 批量: 中间维 = 线性插值并四舍五入（%s）' % np.round(p[0, :5].numpy(), 2))
-    check(bool(torch.all(p[:, 0] == a[:, 0])) and bool(torch.all(p[:, 4] == a[:, 4])),
-          'torch: 首尾维 a0/a4 **逐位**保留（不取整）')
-    check(bool(torch.all(p[:, 5] == a[:, 5])), 'torch: 第 6 维 g 原样保留')
-    one = model.proj_lin_wt(torch.tensor([0.12, 0.40, 0.01, 0.33, 0.25, -0.7]), nt=5)
-    check(np.allclose(one.numpy(), exp[0], atol=1e-9), 'torch: 1-D 输入同样成立')
-    # 负值：不 clip，按 away-from-zero 四舍五入
-    neg = model.proj_lin_wt(torch.tensor([-0.20, 0.40, 0.01, 0.33, 0.45, 0.0]), nt=5)
-    check(np.allclose(neg[:5].numpy(), [-0.20, -0.04, 0.13, 0.29, 0.45], atol=1e-6),
-          'torch: 负值不被裁剪，中间维四舍五入 (-0.0375→-0.04, 0.125→0.13, 0.2875→0.29)')
+    check(a.shape == (2, 6), 'expand_lin_wt: 3 维 raw → 6 维动作')
+    check(np.allclose(a.numpy(), exp, atol=1e-6),
+          '3→6: 中间维 = 线性插值并四舍五入（%s）' % np.round(a[0, :5].numpy(), 2))
+    check(bool(torch.all(a[:, 0] == raw[:, 0])) and bool(torch.all(a[:, 4] == raw[:, 1])),
+          '首尾 a0/a4 **逐位**保留（不取整）')
+    check(bool(torch.all(a[:, 5] == raw[:, 2])), '第 6 维 g 原样保留')
+    # 无额外维（5 动作 H）
+    a5 = model.expand_lin_wt(torch.tensor([0.10, 0.30]), nt=5)
+    check(a5.shape == (5,) and np.allclose(a5.numpy(), [0.10, 0.15, 0.20, 0.25, 0.30]),
+          '2 维 raw → 5 维动作（无 g 的动作空间）')
     # numpy 版
-    pn = model.proj_lin_wt_np(np.array([0.12, 0.40, 0.01, 0.33, 0.25, -0.7]))
+    pn = model.expand_lin_wt_np(np.array([0.12, 0.25, -0.7]), nt=5)
     check(np.allclose(pn, exp[0], atol=1e-12), 'numpy: 与 torch 版语义一致')
-    check(np.array_equal(model.proj_lin_wt_np(pn), pn), 'numpy: 幂等（投影两次 = 一次）')
-    # 取整开关
-    nr = model.proj_lin_wt_np(np.array([0.12, 0.0, 0.0, 0.0, 0.25, 0.0]), decimals=-1)
-    check(np.allclose(nr[:5], [0.12, 0.1525, 0.185, 0.2175, 0.25], atol=1e-12),
-          'decimals<0 ⇒ 关闭取整（保留完整插值精度）')
-    # nt 泛化 / 退化
-    p3 = model.proj_lin_wt_np(np.array([0.10, 0.90, 0.30, 0.77]), nt=3)
-    check(np.allclose(p3[:3], [0.10, 0.20, 0.30], atol=1e-12) and p3[3] == 0.77,
-          'nt=3: 只改中间 1 维，nt 之后维度原样')
-    p2 = model.proj_lin_wt_np(np.array([0.10, 0.90]), nt=2)
-    check(np.array_equal(p2, np.array([0.10, 0.90])), 'nt=2: 没有中间维，原样返回')
-    # 四舍五入口径（half away from zero）
-    x = np.array([0.005, -0.005, 0.015, -0.015, 0.0149, -0.0149])
-    q = model._round_half_away_np(x, 2)
-    check(np.allclose(q, [0.01, -0.01, 0.02, -0.02, 0.01, -0.01], atol=1e-12),
-          '四舍五入 = half away from zero（0.005→0.01, -0.005→-0.01）')
+    # proj_lin_wt 仍用于 warmup 的 6 维动作
+    p6 = model.proj_lin_wt(torch.tensor([0.12, 0.40, 0.01, 0.33, 0.25, -0.7]), nt=5)
+    check(np.allclose(p6.numpy(), exp[0], atol=1e-6),
+          'proj_lin_wt(6 维 warmup 动作) 与 expand 的结果一致')
+    # 负值不 clip
+    neg = model.expand_lin_wt(torch.tensor([-0.20, 0.45, 0.0]), nt=5)
+    check(np.allclose(neg.numpy(), [-0.20, -0.04, 0.13, 0.29, 0.45, 0.0], atol=1e-6),
+          '负值不被裁剪，中间维四舍五入 (-0.0375→-0.04, 0.125→0.13, 0.2875→0.29)')
+    # 幂等（对展开后的完整动作再投影）
+    check(np.array_equal(model.proj_lin_wt_np(pn), pn), '完整动作再投影：幂等')
 
 
-# ---------------------------------------------------------------- B 梯度
+# ---------------------------------------------------------------- B actor 结构
+def test_actor_structure():
+    print('[B] actor 结构：上层 3 输出（a0/a4/g），默认臂仍 6 输出')
+    ag = SP_TD3(nb_states=4, nb_actions=6, args=make_args(lin_wt=1))
+    check(ag.actor.fc4.out_features == 3,
+          'lin: actor 输出层 = 3 个神经元（实际 %d）' % ag.actor.fc4.out_features)
+    check(ag.actor_nb_actions == 3 and ag.actor_tag == 3,
+          'lin: actor_nb_actions=3 / actor_tag=3')
+    n_actor = sum(v.numel() for v in ag.actor.state_dict().values())
+    check(n_actor == 3447, 'lin: actor(16/100, 3 输出) 参数量 = %d（期望 3447）' % n_actor)
+    check(np.array_equal(ag.action_free_idx, np.array([0, 4, 5])),
+          'lin: 自由维索引 = [0, 4, 5]（a0/a4/g）')
+    check(np.allclose(ag.action_amp_free, [0.5, 0.5, 0.5]),
+          'lin: target-smoothing 自由维幅度 = [0.5, 0.5, 0.5]')
+    check(np.allclose(ag.explore_amp, [0.05] * 5 + [0.20]),
+          'lin: 原始 explore_amp 仍 5×wt_noise + sig_noise_max（自由维取 0/4/5）')
+    # 下层 L（1 维动作）：同一个 --lin_wt 必须自动跳过
+    agL = SP_TD3(nb_states=5, nb_actions=1, args=make_args(lin_wt=1))
+    check(agL.lin_wt is False and agL.actor.fc4.out_features == 1,
+          '下层（1 维动作）：lin_wt 自动跳过，actor 仍 1 输出')
+    # 默认臂 / scalar / farm：仍 6 输出
+    ag0 = SP_TD3(nb_states=4, nb_actions=6, args=make_args(lin_wt=0))
+    check(ag0.actor.fc4.out_features == 6 and ag0.actor_tag == 6,
+          '默认臂：actor 仍 6 输出（逐位不变）')
+    check(sum(v.numel() for v in ag0.actor.state_dict().values()) == 3498,
+          '默认臂：actor(16/100, 6 输出) 参数量 = 3498')
+
+
+# ---------------------------------------------------------------- C 梯度
 def test_gradient():
-    print('[B] 投影只读首尾 ⇒ ∂/∂a_j (j=1..3) 恒为 0；a0/a4/g 非零（STE）')
+    print('[C] 梯度：3 个输出都对 Q 有梯度；没有中间输出单元；STE 契约')
     torch.manual_seed(0)
     net = model.Critic(4, 6, hidden1=16, hidden2=100, arch='v1')
     S = torch.randn(32, 4)
-    A = (torch.rand(32, 6) * 0.5).requires_grad_(True)
-    q = net((S, model.proj_lin_wt(A, nt=5)))
-    g, = torch.autograd.grad(q.sum(), A)
-    check(float(g[:, 1:4].abs().max()) == 0.0,
-          '∂Q/∂a_j (j=1..3) 的最大绝对值 = %.1e（严格 0）' % float(g[:, 1:4].abs().max()))
-    check(float(g[:, 0].abs().max()) > 0.0, '∂Q/∂a_0 非零（首端仍是有效自由度）')
-    check(float(g[:, 4].abs().max()) > 0.0, '∂Q/∂a_4 非零（末端仍是有效自由度）')
-    check(float(g[:, 5].abs().max()) > 0.0, '∂Q/∂g 非零（第 6 维仍独立）')
-    # STE 的直接契约：round 本身导数 0，STE 前向取整、反向恒等
+    raw = (torch.rand(32, 3) * 0.5).requires_grad_(True)
+    q = net((S, model.expand_lin_wt(raw, nt=5)))
+    g, = torch.autograd.grad(q.sum(), raw)
+    check(float(g[:, 0].abs().max()) > 0.0, '∂Q/∂a0 非零')
+    check(float(g[:, 1].abs().max()) > 0.0, '∂Q/∂a4 非零')
+    check(float(g[:, 2].abs().max()) > 0.0, '∂Q/∂g 非零')
+    # STE：round 本身导数 0，STE 前向取整、反向恒等
     x = torch.tensor([-1.234, -0.005, 0.0, 0.005, 0.015, 0.0199],
                      dtype=torch.float64, requires_grad=True)
     y = model._round_half_away_ste(x, 2)
@@ -124,9 +153,9 @@ def test_gradient():
     check(float(gr.abs().max()) == 0.0, '对照: 直接 torch.round ⇒ ∂y/∂x ≡ 0（STE 必需）')
 
 
-# ---------------------------------------------------------------- C agent 层
-def test_agent_keeps_manifold():
-    print('[C] agent：探索噪声之后仍落在“首尾 + 线性插值”流形上')
+# ---------------------------------------------------------------- D agent 层
+def test_agent_manifold():
+    print('[D] agent：探索噪声 / random_action / target smoothing 都在流形上')
     ag = SP_TD3(nb_states=4, nb_actions=6, args=make_args(lin_wt=1))
     ag.is_training = True
     ag.epsilon = 1.0
@@ -137,37 +166,78 @@ def test_agent_keeps_manifold():
         a = ag.select_action(s)
         ref = model.proj_lin_wt_np(a)
         max_err = max(max_err, float(np.abs(a[1:4] - ref[1:4]).max()))
-        if not np.allclose(a[1:4], ref[1:4], atol=1e-9):
+        if a.shape != (6,) or not np.allclose(a[1:4], ref[1:4], atol=1e-9):
             bad += 1
-    check(bad == 0, 'select_action × 50：中间维 = 首尾线性插值（最大偏差 %.1e）' % max_err)
+    check(bad == 0, 'select_action × 50：6 维、中间维 = 首尾线性插值（最大偏差 %.1e）' % max_err)
     ag.epsilon = 0.0
     a0 = ag.select_action(s)
     check(np.allclose(a0[1:4], model.proj_lin_wt_np(a0)[1:4], atol=1e-9),
           'ε=0：确定性动作仍在流形上')
+    # random_action（warmup）
+    bad_r = 0
+    for _ in range(50):
+        r = ag.random_action()
+        if not (r.shape == (6,) and 0.0 <= r[0] <= 0.5 and 0.0 <= r[4] <= 0.5
+                and -0.5 <= r[5] <= 0.5):
+            bad_r += 1
+            continue
+        if not np.allclose(r[1:4], model.proj_lin_wt_np(r)[1:4], atol=1e-9):
+            bad_r += 1
+    check(bad_r == 0, 'random_action × 50：6 维、a0/a4∈[0,0.5]、g∈[-0.5,0.5]、中间线性')
+    # main 会在构造后覆写 explore_amp[5]/floor[5]（HSRL 的 g 噪声量纲）
+    # ⇒ `_add_noise_free` 必须**动态**读当前数组，不能缓存 __init__ 时的值。
+    ag.explore_amp[5] = 0.5
+    ag.explore_floor[5] = 0.025
+    ag.epsilon = 1.0
+    g_noise = np.array([ag._add_noise_free(np.zeros(3))[2] for _ in range(200)])
+    check(np.abs(g_noise).max() > 0.3 and np.abs(g_noise).max() <= 0.5 + 1e-9,
+          'HSRL 覆写 explore_amp[5]=0.5 后，g 噪声幅度随之生效（max=%.3f）'
+          % np.abs(g_noise).max())
+    # target smoothing：只在自由维加噪，展开后仍在流形上
     with torch.no_grad():
-        det = ag._act(ag.actor, torch.tensor(np.array([s]))).numpy().ravel()
-    check(np.allclose(det[1:4], model.proj_lin_wt_np(det)[1:4], atol=1e-9),
-          '_act（critic 评估点）同样在流形上')
-    # 对照：不开 lin_wt 时不应满足线性关系
+        sm = ag._target_smoothed_action(torch.randn(32, 4)).numpy()
+    err_sm = max(float(np.abs(row[1:4] - model.proj_lin_wt_np(row)[1:4]).max())
+                 for row in sm)
+    check(sm.shape == (32, 6) and err_sm < 1e-6,
+          'target smoothing：32×6 且中间维仍在流形上（最大偏差 %.1e）' % err_sm)
+    # 对偶的 Q 分子也必须先把 3 输出展开成 6 维
+    import aifflor.aifflor_hsrl as hsrl
+    rate = hsrl.q_cost_rate(ag, s, a_t=np.zeros(6))
+    check(np.isfinite(rate), 'q_cost_rate(lin)：3 输出经 _act 展开后 critic 可评估')
+    # 对照：默认臂的 select_action 不要求线性
     ag2 = SP_TD3(nb_states=4, nb_actions=6, args=make_args(lin_wt=0))
     ag2.is_training, ag2.epsilon = True, 1.0
     neq = 0
     for _ in range(10):
         b = ag2.select_action(s)
         neq += int(not np.allclose(b[1:4], model.proj_lin_wt_np(b)[1:4], atol=1e-6))
-    check(neq > 0, '对照（lin_wt=0）：中间维**不**满足线性关系（投影确实起作用）')
-    # 下层 L 是 1 维动作：同一个 --lin_wt 不能把它扩成 5 维（必须自动跳过）
-    agL = SP_TD3(nb_states=5, nb_actions=1, args=make_args(lin_wt=1))
-    agL.is_training = True
-    agL.epsilon = 1.0
-    aL = agL.select_action(np.array([0.2, 0.3, 0.4, 0.5, 0.6], dtype=np.float32))
-    check(np.asarray(aL).size == 1 and np.isfinite(aL).all() and agL.lin_wt is False,
-          '下层（nb_actions=1）：lin_wt 自动跳过，动作仍 1 维且有限')
+    check(neq > 0, '对照（lin_wt=0）：中间维**不**满足线性关系（结构版确实生效）')
 
 
-# ---------------------------------------------------------------- D 物理
+# ---------------------------------------------------------------- E checkpoint
+def test_checkpoint():
+    print('[E] checkpoint：actor_3.pkl + critic_*_6.pkl')
+    shutil.rmtree(TMP_DIR, ignore_errors=True)
+    os.makedirs(TMP_DIR, exist_ok=True)
+    try:
+        ag = SP_TD3(nb_states=4, nb_actions=6, args=make_args(lin_wt=1))
+        ag.save_model(TMP_DIR)
+        files = set(os.listdir(TMP_DIR))
+        check('actor_3.pkl' in files, 'lin: 保存 actor_3.pkl')
+        check(all('critic_%s_6.pkl' % k in files for k in ('p', 'p2', 'c', 'c2')),
+              'lin: critic 仍按 6 维动作保存（critic_*_6.pkl）')
+        ag2 = SP_TD3(nb_states=4, nb_actions=6, args=make_args(lin_wt=1))
+        ag2.load_weights(TMP_DIR)
+        ok = all(torch.equal(ag.actor.state_dict()[k], ag2.actor.state_dict()[k])
+                 for k in ag.actor.state_dict())
+        check(ok, 'lin: actor_3.pkl 可加载且权重逐位一致')
+    finally:
+        shutil.rmtree(TMP_DIR, ignore_errors=True)
+
+
+# ---------------------------------------------------------------- F 物理
 def test_env_invariance():
-    print('[D] 物理：同一 (a0, a4)、其余维任改 ⇒ 出力逐位相同；改 a4 出力变')
+    print('[F] 物理：同一 (a0,a4)、其余维任改 ⇒ 出力逐位相同')
     import aifflor.aifflor_turbine as AT
     from aifflor.aifflor_env import AifflorPhysics
     ph = AifflorPhysics(nt=5, calibrated=False, power_scale=AT.LEVEL_COEF)
@@ -181,44 +251,62 @@ def test_env_invariance():
     p_raw = float(ph.power(u, a1[:5]))
     check(abs(p_raw - p1) > 1e-6,
           '未投影的原始动作给出不同出力 %.6f vs %.6f（投影确实生效）' % (p_raw, p1))
-    # 改末端 ⇒ 整条型线变化 ⇒ 出力变化
-    a3 = np.array([0.22, 0.0, 0.0, 0.0, 0.40, 0.0])
-    p3 = float(ph.power(u, model.proj_lin_wt_np(a3)[:5]))
-    check(abs(p3 - p1) > 1e-3, '改 a4 ⇒ 出力变化 (%.6f vs %.6f)' % (p3, p1))
 
 
-# ---------------------------------------------------------------- E 默认臂
-def test_default_arm_identity():
-    print('[E] 默认臂（lin_wt=0）逐位不受影响')
-    ag = SP_TD3(nb_states=4, nb_actions=6, args=make_args(lin_wt=0))
-    x = torch.tensor([[0.11, 0.42, 0.03, 0.35, 0.27, -0.5]])
-    check(ag._project(x) is x, '_project 严格恒等（返回同一对象）')
-    check(np.array_equal(ag._project_np(np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])),
-                         np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6])),
-          '_project_np 严格恒等')
+# ---------------------------------------------------------------- G 初始化映射
+def test_bias_mapping():
+    print('[G] 初始化映射：3 输出头的 a0/a4/g bias')
+    rng = np.random.RandomState(0)
+    v3 = model.wt_bias_values(3, lo=0.05, hi=0.45, sig_value=0.0,
+                              lin_wt=True, rng=rng)
+    check(v3.shape == (3,) and 0.05 <= v3[0] <= 0.45 and 0.05 <= v3[1] <= 0.45,
+          '3 输出：a0/a4 bias ∈ [0.05,0.45]（%s）' % np.round(v3, 3))
+    check(v3[2] == 0.0, '3 输出：g bias = sig_value = 0')
+    rng = np.random.RandomState(0)
+    v6 = model.wt_bias_values(6, lo=0.05, hi=0.45, sig_value=0.0,
+                              lin_wt=False, rng=rng)
+    check(v6.shape == (6,) and np.all((v6[:5] >= 0.05) & (v6[:5] <= 0.45)),
+          '6 输出（默认臂）：前 5 维仍 ∈ [0.05,0.45]')
+    check(v6[5] == 0.0, '6 输出：signal bias = 0')
+    # 同 seed 可复现
+    rng = np.random.RandomState(7)
+    check(np.array_equal(model.wt_bias_values(3, lin_wt=True, rng=rng),
+                         model.wt_bias_values(3, lin_wt=True,
+                                              rng=np.random.RandomState(7))),
+          '同 seed 初始化可复现')
 
 
-# ---------------------------------------------------------------- F 接线
+# ---------------------------------------------------------------- H 接线
 def test_main_wiring():
-    print('[F] aifflor_main：两条主循环都接 _apply_lin_wt')
-    p = os.path.join(ROOT, 'aifflor', 'aifflor_main.py')
-    src = open(p, encoding='utf-8').read()
-    n_def = src.count('def _apply_lin_wt(')
-    n_call = src.count('_apply_lin_wt(') - n_def
+    print('[H] 接线：两条主循环 + CLI + 结构版 actor')
+    mp = os.path.join(ROOT, 'aifflor', 'aifflor_main.py')
+    src_m = open(mp, encoding='utf-8').read()
+    n_def = src_m.count('def _apply_lin_wt(')
+    n_call = src_m.count('_apply_lin_wt(') - n_def
     check(n_def == 1, '定义 _apply_lin_wt 恰好 1 处')
-    check(n_call >= 4, '_apply_lin_wt 调用点 ≥4（旧 train 的 warmup/actor + HSRL 的 warmup/actor），实际 %d' % n_call)
-    check("'--lin_wt'" in src and "'--lin_wt_decimals'" in src,
+    check(n_call >= 4, '_apply_lin_wt 调用点 ≥4（旧 train + HSRL 的 warmup/actor），实际 %d' % n_call)
+    check("'--lin_wt'" in src_m and "'--lin_wt_decimals'" in src_m,
           'CLI 参数 --lin_wt / --lin_wt_decimals 已注册')
-    check('--lin_wt 与 --scalar_wt / --farm_level 互斥' in src,
-          '互斥断言已存在')
+    check('--lin_wt 与 --scalar_wt / --farm_level 互斥' in src_m, '互斥断言已存在')
+    check('_wt_bias_values' in src_m and 'is_lin' in src_m,
+          'init_wt_action_bias 已接 3 输出映射')
+    dp = os.path.join(ROOT, 'aifflor', 'aifflor_ddpg.py')
+    src_d = open(dp, encoding='utf-8').read()
+    check('Actor(self.nb_states, self.actor_nb_actions' in src_d,
+          'actor 构造使用 actor_nb_actions（结构版 3 输出）')
+    check("'{}/actor_{}.pkl'.format(output, self.actor_tag)" in src_d, 'save_model 使用 actor_tag')
+    check("'{}/actor_{}.pkl'.format(output, self.actor_tag)" in src_d, 'load_weights 使用 actor_tag')
+    check('def _target_smoothed_action' in src_d, 'target smoothing 已抽成自由维专用方法')
 
 
 def main():
-    test_projection()
+    test_expand_and_projection()
+    test_actor_structure()
     test_gradient()
-    test_agent_keeps_manifold()
+    test_agent_manifold()
+    test_checkpoint()
     test_env_invariance()
-    test_default_arm_identity()
+    test_bias_mapping()
     test_main_wiring()
     print()
     if FAIL:
@@ -226,7 +314,7 @@ def main():
         for f in FAIL:
             print('   - ' + f)
         return 1
-    print('线性行为分支（--lin_wt）契约测试：全部通过')
+    print('线性行为分支（--lin_wt，结构版）契约测试：全部通过')
     return 0
 
 

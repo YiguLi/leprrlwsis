@@ -601,6 +601,19 @@ def cost_rate_from_q(q_raw, gamma, block=HSRL_BLOCK, horizon='infinite'):
     return float(q_raw) / max(1e-9, k)
 
 
+def _policy_action(agent, s_actor):
+    """当前确定性策略动作（供 Q 对偶的分子使用）。
+
+    `--lin_wt` 的 actor 是 **3 输出**（a0/a4/g），必须先经 `agent._act` 展开成
+    6 维动作才能喂 critic；其余分支保持历史行为（直接 `agent.actor(s)`）。
+    """
+    if getattr(agent, 'lin_wt', False):
+        _act = getattr(agent, '_act', None)
+        if _act is not None:
+            return _act(agent.actor, s_actor)
+    return agent.actor(s_actor)
+
+
 def q_cost_rate(agent, s_t, a_t=None, horizon='infinite', agg=None, gamma=None,
                 block=HSRL_BLOCK, cost_scale=None, return_info=False):
     """用 **critic cost 的 Q** 估计"每块成本速率"（对偶的分子，替代实际 EMA）。
@@ -608,7 +621,8 @@ def q_cost_rate(agent, s_t, a_t=None, horizon='infinite', agg=None, gamma=None,
     取值约定（写死，便于 A/B 与审计）：
       * **状态** = 块首观测 `s_t`（H 是块级决策态；L 用**块的第一步**的观测 —— 块末观测
         已接近 episode 终止，`Q_c` 会退化成"最后一步的成本"，严重低估整块成本）；
-      * **动作** = 缺省 `actor(s_t)`（确定性）；**调用方应传本块第一步"实际执行"的动作**
+      * **动作** = 缺省 `π(s_t)`（`--lin_wt` 的 3 输出经 `_act` 展开成 6 维）；
+        **调用方应传本块第一步"实际执行"的动作**
         `a_t` —— critic 的 TD 目标是**带探索噪声的实际 cost**，用无噪动作评估会**系统性低估**
         （`c_L = 1−exp(−|·|)`、`c1 = P_F + 20(P_F−3)⁺` 都是凸的 ⇒ 噪声下 E[c] > c(E)）。
         实测：L 层 rate 0.317（无噪）vs 1.79（实际 EMA，差 5.6×），改用实际动作后收敛到同量级。
@@ -629,7 +643,7 @@ def q_cost_rate(agent, s_t, a_t=None, horizon='infinite', agg=None, gamma=None,
     with torch.no_grad():
         # asymmetric critic: s 是完整 critic state，actor 只看前 nb_states 维
         s_actor = s[:, :int(getattr(agent, 'nb_states', s.shape[1]))]
-        act = agent.actor(s_actor) if a_given is None else a_given
+        act = _policy_action(agent, s_actor) if a_given is None else a_given
         q1 = float(agent.critic_c([s, act]).reshape(-1)[0])
         q2 = float(agent.critic_c2([s, act]).reshape(-1)[0])
     _agg = HSRL_DUAL_Q_AGG if agg is None else str(agg)
@@ -710,7 +724,7 @@ def policy_batch_cost_rate(agent, n=HSRL_DUAL_RECENT_N, horizon='infinite', agg=
     s = torch.as_tensor(s_np) if dev is None else torch.as_tensor(s_np, device=dev)
     with torch.no_grad():
         s_actor = s[:, :int(getattr(agent, 'nb_states', s.shape[1]))]
-        act = agent.actor(s_actor)
+        act = _policy_action(agent, s_actor)
         q1 = agent.critic_c([s, act]).reshape(-1)
         q2 = agent.critic_c2([s, act]).reshape(-1)
     _agg = HSRL_DUAL_Q_AGG if agg is None else str(agg)

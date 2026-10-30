@@ -95,6 +95,7 @@ from aifflor import aifflor_turbine as aturb
 from aifflor.aifflor_ddpg import SP_TD3
 from model import proj_farm_level as _proj_farm_level   # 场级降载投影 (--farm_level)
 from model import proj_lin_wt_np as _proj_lin_wt_np     # 线性行为分支 (--lin_wt)
+from model import wt_bias_values as _wt_bias_values     # 3 输出头的 bias 映射
 from aifflor import aifflor_hsrl as hsrl   # --hsrl 分支的全部口径 (单一真源)
 from aifflor import aifflor_branch as abr  # 同块首宽动作覆盖 (branch) 的全部口径
 from util import *
@@ -150,7 +151,12 @@ def _append_wind5_H(norm_obs, obs, env, args):
 
 
 def init_wt_action_bias(agent, lo=0.05, hi=0.45, sig_value=0.0, verbose=True):
-    """把 actor 输出层前 5 维 (WT 轴向诱导因子 a) 的 bias 初始化到“中性宽带”。
+    """把 actor 输出层 bias 初始化到“中性宽带”。
+
+    两种结构：
+      * 默认（6 输出）：前 5 维 = 五台风机 `a` 的 `U(lo,hi)`，第 6 维 = `sig_value`；
+      * `--lin_wt`（**3 输出**）：第 0/1 维 = `a0/a4` 的 `U(lo,hi)`，第 2 维 = `sig_value`
+        （中间三台由线性插值展开，不需要也不能有单独的 bias）。
 
     为什么必须做 (run160/初始策略诊断):
       `model.py` 的 Actor 只把 fc4.weight 初始化成 ±init_w(0.003),
@@ -170,20 +176,27 @@ def init_wt_action_bias(agent, lo=0.05, hi=0.45, sig_value=0.0, verbose=True):
     if not hasattr(a, 'fc4'):
         return False
     nb = a.fc4.bias.data.shape[0]
+    is_lin = bool(getattr(agent, 'lin_wt', False))
+    n_wt = 2 if is_lin else min(5, nb)
     with torch.no_grad():
         b = a.fc4.bias.data
-        n_wt = min(5, nb)
-        b[:n_wt] = torch.tensor(np.random.uniform(lo, hi, n_wt), dtype=b.dtype)
-        if nb > n_wt:
-            b[n_wt:] = float(sig_value)
+        vals = _wt_bias_values(nb, lo=lo, hi=hi, sig_value=sig_value,
+                               lin_wt=is_lin)
+        b[:] = torch.tensor(vals, dtype=b.dtype)
         tgt = agent.actor_target.fc4.bias.data
         tgt.copy_(b)
     if verbose:
         cp = 4 * np.array([b[:n_wt].mean()]) * (1 - np.array([b[:n_wt].mean()])) ** 2
-        prGreen('init_wt_action_bias: WT bias = {} (mean a = {:.3f} -> Cp = {:.3f}); '
-                'signal bias = {}'.format(
-                    np.round(b[:n_wt].numpy(), 3), float(b[:n_wt].mean()),
-                    float(cp[0]), float(b[n_wt]) if nb > n_wt else None))
+        if is_lin:
+            prGreen('init_wt_action_bias (linear): a0/a4 bias = {} (mean a = {:.3f} -> '
+                    'Cp = {:.3f}); g bias = {}'.format(
+                        np.round(b[:2].numpy(), 3), float(b[:2].mean()),
+                        float(cp[0]), float(b[2]) if nb > 2 else None))
+        else:
+            prGreen('init_wt_action_bias: WT bias = {} (mean a = {:.3f} -> Cp = {:.3f}); '
+                    'signal bias = {}'.format(
+                        np.round(b[:n_wt].numpy(), 3), float(b[:n_wt].mean()),
+                        float(cp[0]), float(b[n_wt]) if nb > n_wt else None))
     return True
 
 
@@ -2137,8 +2150,8 @@ if __name__ == "__main__":
 
     # ---- 输出层 bias 初始化 (与 td3perrb 一致) ----
     parser.add_argument('--wt_bias_init', default=1, type=int, choices=[0, 1],
-                        help='1: 把 actor 输出层 WT 5 维 bias 初始化到“中性宽带” '
-                             '[0.05,0.45]; 0: 用 PyTorch 默认')
+                        help='1: 把 actor 输出层 WT bias 初始化到“中性宽带” [0.05,0.45]'
+                             '（默认 5 维；--lin_wt 时映射到 a0/a4 两维）；0: 用 PyTorch 默认')
 
     parser.add_argument('--value_scale', default=hc.VALUE_SCALE, type=float,
                         help='H 层 r1/c1 进入值函数回归空间的统一缩放 s '
@@ -2179,11 +2192,12 @@ if __name__ == "__main__":
                              '（投影线性 ⇒ 对它们的梯度恒为 0）。第 6 维 g 不受影响。'
                              '与 --farm_level 互斥；warmup/探索噪声/diag 改写之后仍强制相等')
     parser.add_argument('--lin_wt', default=0, type=int,
-                        help='1=**线性行为分支**：actor 只使用首尾两维 a0/a{na_box-1}，'
-                             '中间维沿机组线性插值并四舍五入到 --lin_wt_decimals 位小数'
-                             '（默认 2）⇒ 有效自由度 2，第 1..na_box-2 维"存在但无用"'
-                             '（投影只读首尾 ⇒ 对它们的梯度恒为 0）。第 6 维 g 不受影响。'
-                             '与 --scalar_wt / --farm_level 互斥；warmup/探索噪声/diag 改写之后'
+                        help='1=**线性行为分支（结构版）**：actor 输出层只保留首尾'
+                             'a0/a{na_box-1} 与额外维（H 的 g），共 2+(nb_actions−na_box) 个'
+                             '神经元（上层 = 3: a0/a4/g）；中间维由线性插值展开并四舍五入到'
+                             '--lin_wt_decimals 位小数（默认 2）。critic 仍吃 6 维动作；'
+                             '噪声/target smoothing 只加在 3 个自由维上。'
+                             '与 --scalar_wt / --farm_level 互斥；warmup/diag 改写之后'
                              '仍强制落在“首尾 + 线性插值”流形上')
     parser.add_argument('--lin_wt_decimals', default=2, type=int,
                         help='--lin_wt 的中间维小数位数（默认 2；<0 关闭取整）')
@@ -2429,12 +2443,14 @@ if __name__ == "__main__":
                       int(getattr(args, 'c1_smooth', 0) or 0),
                       getattr(args, 'critic_arch', 'v6')))
     if int(getattr(args, 'lin_wt', 0) or 0):
-        prLightPurple('[linear] 动作空间 = 2 个自由度: 首尾 a0/a{}，中间维线性插值并四舍五入到 {} 位小数'
-                      '（第 1..{} 维存在但无用, 梯度恒 0）；g 独立。warmup/探索噪声之后仍强制落在'
-                      '该流形上。c1 平滑={} critic_arch={}'.format(
-                          int(getattr(args, 'na_box', 5) or 5) - 1,
+        _na_box = int(getattr(args, 'na_box', 5) or 5)
+        _actor_nb = 2 + max(0, 6 - _na_box)
+        prLightPurple('[linear] actor 输出层 = {} 个神经元（a0/a{}/g...）；critic 仍 6 维动作；'
+                      'checkpoint = actor_{}.pkl；中间维 = 线性插值并四舍五入到 {} 位小数；'
+                      '噪声/target smoothing 只作用于自由维；g 独立。warmup/探索噪声之后仍强制'
+                      '落在该流形上。c1 平滑={} critic_arch={}'.format(
+                          _actor_nb, _na_box - 1, _actor_nb,
                           int(getattr(args, 'lin_wt_decimals', 2)),
-                          int(getattr(args, 'na_box', 5) or 5) - 2,
                           int(getattr(args, 'c1_smooth', 0) or 0),
                           getattr(args, 'critic_arch', 'v6')))
     _c1b = float(getattr(args, 'c1_bound_coef', 10.0))

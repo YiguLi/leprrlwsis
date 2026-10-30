@@ -9,16 +9,16 @@
 
 ---
 
-## 0. 与 `td3per` 的差异清单（**只有引擎**）
+## 0. 与 `td3per` 的差异清单（**默认路径只有引擎**；可选动作流形分支见 §3.10）
 
 | 项 | `td3per` | `aifflor` |
 |---|---|---|
 | 物理引擎 | WFSim（MATLAB，`WFSim_port`） | FLORIS（纯 Python） |
 | env 类 | `env.WindBattery`（`physics=None` ⇒ MATLAB 路径） | `WindBatteryAIF`（`physics=AifflorPhysics`） |
 | 尾流参数 | WFSim `meshing.m` 的 `forcescale` 等 | **FLORIS 随包默认**（`calibrated=False`）＋ **出口电平系数** `1/1.6696` |
-| **动作语义** | 轴向因子 `a∈[0,0.5]`（5 维）+ SOC 信号 | **完全相同** |
+| **动作语义** | 轴向因子 `a∈[0,0.5]`（5 维）+ SOC 信号 | **默认完全相同**；`--lin_wt` 时 actor 只输出 `a0/a4/g`（3 输出头） |
 | **奖励 / 成本 / 对偶 / n 步 / 相位特征** | `td3per_myfunc` | **逐字复用（零改动）** |
-| 算法本体（TD3+PER） | `td3per_ddpg` | **逐字复用（零改动）** |
+| 算法本体（TD3+PER） | `td3per_ddpg` | **默认逐位等价**；`--lin_wt` 分支改 actor 输出头/噪声/checkpoint |
 | 输出目录 | `output/TD3PER-runNN` | **`output/AIFFLOR-runNN`**（`--env` 默认值已改） |
 | TB scalar tag / CSV 列 | 与 `td3per` 逐字同名 | **逐字同名**（方法区分靠目录名 + CSV 名 `df_aifflor.csv`） |
 | 训练预算 | 1000 episode = 1,440,000 步 | **相同**（未改，与 `yawflor` 不同） |
@@ -133,7 +133,7 @@ WFSim 侧脚本 `agentutil/run_clip_check_wfsim.m`。）
 
 | 文件 | 关系 |
 |---|---|
-| `aifflor/aifflor_ddpg.py` | **逐字复制** `td3per/td3per_ddpg.py`（零改动） |
+| `aifflor/aifflor_ddpg.py` | `td3per` 本体 + aifflor 的动作流形接线（默认 6 输出逐位不变；`--lin_wt` 为 3 输出 actor） |
 | `aifflor/aifflor_myfunc.py` | **逐字复制** `td3per/td3per_myfunc.py`（**零改动**） |
 | `aifflor/aifflor_main.py` | `td3per/td3per_main.py` + 替换表（env 类 / 不启 MATLAB / **输出目录名 `--env`** / 文案 / RUN_TAG） |
 | `aifflor/aifflor_turbine.py` | **新写**：I/O 映射表 / 口径 / 模型构造 / 向量化求值（单一真源） |
@@ -542,7 +542,8 @@ AifflorPhysics(nt=5, calibrated=False, power_scale=AT.LEVEL_COEF)
 
 `aifflor` 现在有**两条方法分支**，靠命令行开关区分（**不加开关 = 旧口径，逐位不变**）；
 另有三个**动作流形开关**（`--farm_level` / `--scalar_wt` / `--lin_wt`，见 §3.10），
-它们只改"actor 输出到 5 维风机动作"的映射，不改方法语义：
+它们改"actor 输出到 5 维风机动作"的映射（`--lin_wt` 是结构版，还改 actor
+输出维数与 checkpoint），但不改方法语义：
 
 ```powershell
 python aifflor\aifflor_main.py            # 旧口径: SOC 目标信号 + 规则残余动作 + 平抑窗口
@@ -990,16 +991,16 @@ aifflor 用回 `--env TD3PER`。
 
 ---
 
-## 3.10 `--lin_wt`：线性行为分支（2026-10 新增）
+## 3.10 `--lin_wt`：线性行为分支（结构版，2026-10 新增）
 
 > 设计/取舍/局限的完整版 = `documentation/aifflor_linear_behavior_branch.md`。
 > 契约测试 = `python agentutil/test_aifflor_lin_wt.py`。
 
 ### 一句话
 
-**actor 只决定首尾两台的动作 `a0` / `a4`，中间三台由线性插值得到并保留两位小数**；
-其余（HSRL 语义、奖励/成本、critic、探索、warmup、日志）一律不动。
-默认 `--lin_wt 0` ⇒ 旧路径逐位不变。
+**actor 输出层只有 3 个神经元 `a0` / `a4` / `g`**；中间三台由 `a0` 到 `a4`
+线性插值展开并保留两位小数。critic 仍吃 6 维动作；其余（HSRL 语义、奖励/成本、
+探索、warmup、日志）一律不动。默认 `--lin_wt 0` ⇒ 旧路径逐位不变。
 
 ```powershell
 python aifflor/aifflor_main.py --hsrl --lin_wt 1 --seed 0
@@ -1008,25 +1009,33 @@ python aifflor/aifflor_main.py --hsrl --lin_wt 1 --seed 0
 ### 动作定义
 
 ```
-a0 = actor[0]                              （首端，原样，不取整）
-a4 = actor[4]                              （末端，原样，不取整）
-a_i = round(a0 + (a4 − a0) · i/4, 2)        i = 1, 2, 3
+actor 输出（3 维） = [a0, a4, g]
+
+展开：
+    Δ = a4 − a0
+    a1 = round(a0 + 0.25Δ, 2)
+    a2 = round(a0 + 0.50Δ, 2)
+    a3 = round(a0 + 0.75Δ, 2)
+    action = [a0, a1, a2, a3, a4, g]
 ```
 
-例：`a0=0.12, a4=0.25` ⇒ `[0.12, 0.15, 0.19, 0.22, 0.25]`。
+例：`a0=0.12, a4=0.25, g=-0.7` ⇒ `[0.12, 0.15, 0.19, 0.22, 0.25, -0.7]`。
 
-* **有效自由度 = 2（+g）**；actor 第 1..3 维输出"存在但无用"（投影只读第 0/4 维
-  ⇒ 对它们的梯度恒为 `0`）。
+* **actor 没有中间三个输出单元**：中间维是 `a0/a4` 的确定性函数
+  （`model.expand_lin_wt`），不存在"中间三台各自的 actor 行为/梯度"。
 * 首尾维**不取整、不 clip**：越界仍由 `check_action_H_hsrl` / `CheckAction`
   裁 + `pen5` 罚；首尾越界会连带推出中间维越界，`pen5` 按实际越界维数累计。
-* 第 6 维 `g`（HSRL 的块总放电量）完全独立。
+* 第 6 维 `g` 是 actor 的第 3 个输出，完全独立。
 
-> **中间三台没有独立的 actor 行为/梯度**：它们是 `a0/a4` 的确定性函数。
-> actor 仍保留 6 维输出层只是为了**不改** critic 输入、checkpoint 形状和
-> warmup/日志口径；`proj_lin_wt` 会把第 1..3 维覆盖掉（对 raw 第 1..3 维
-> `∂Q/∂a_j ≡ 0`）。插值动作对 Q 的影响通过链式法则回到 `a0/a4`，这才是 actor
-> 学到的梯度。若要求网络输出层本身只有 `a0/a4/g` 三个神经元，需要改 actor
-> 输出维数（参数量/checkpoint 随之改变），与"其他不变"冲突。
+### 结构版 vs 6 输出 + 投影覆盖
+
+| | **结构版（当前）** | 投影覆盖版（旧提案） |
+|---|---|---|
+| actor 输出层 | **3 个神经元** `a0/a4/g` | 6 个神经元，第 1..3 维被覆盖 |
+| 中间维来源 | `expand_lin_wt(a0,a4)` | `proj_lin_wt` 覆盖 |
+| 中间输出单元 | **不存在** | 存在但永远不用 |
+| actor checkpoint | **`actor_3.pkl`** | `actor_6.pkl`（形状其实 3） |
+| 中间维梯度 | 通过 `∂a_i/∂a0`、`∂a_i/∂a4` 回到 **a0/a4** | 同左，另有 3 个死输出单元 |
 
 ### 为什么是"首尾 + 线性"
 
@@ -1039,26 +1048,34 @@ a_i = round(a0 + (a4 − a0) · i/4, 2)        i = 1, 2, 3
 
 ### 与其它动作流形开关的区别（三者互斥）
 
-| 开关 | 流形 | 有效自由度 | 中间维 |
+| 开关 | 流形 | actor 输出维 | 中间维 |
 |---|---|---:|---|
-| 默认 | 5 维独立 | 5 | 自由 |
-| `--farm_level 1` | `a_i = s·c_i` | 1（+g） | 射线决定，保留形状 |
-| `--scalar_wt 1` | `a_i = a_0` | 1（+g） | 全等于首端 |
-| **`--lin_wt 1`** | **首尾 + 线性插值** | **2（+g）** | **线性型线，两位小数** |
+| 默认 | 5 维独立 | 6 | 自由 |
+| `--farm_level 1` | `a_i = s·c_i` | 6 | 射线决定，保留形状 |
+| `--scalar_wt 1` | `a_i = a_0` | 6 | 全等于首端 |
+| **`--lin_wt 1`** | **首尾 + 线性插值** | **3（a0/a4/g）** | **线性型线，两位小数** |
 
 ### 实现落点（缺一处就会被绕过）
 
 | 位置 | 作用 |
 |---|---|
-| `model.proj_lin_wt` / `proj_lin_wt_np` | 投影唯一真源（torch / numpy） |
+| `model.expand_lin_wt` / `expand_lin_wt_np` | **3 维 actor 输出 → 6 维动作**（中间线性插值 + 两位小数） |
+| `model.proj_lin_wt` / `proj_lin_wt_np` | 把**完整动作**（warmup 的 5/6 维）投影回首尾 + 线性型线 |
 | `model._round_half_away_ste` / `_round_half_away_np` | 四舍五入 + straight-through |
-| `SP_TD3._project` | 所有 actor 前向（含 target actor、critic 的演员评估点） |
-| `SP_TD3._project_np` + `select_action` | 加完探索噪声之后的实际执行动作 |
-| `aifflor_main._apply_lin_wt` | warmup / `diag_fix` / `explore_mix` 之后、动作检查之前 |
+| `SP_TD3.actor_nb_actions` | `2 + (nb_actions − na_box)`（上层 = 3）；下层 L 自动回退 1 |
+| `SP_TD3._expand` | 所有 actor 前向的统一出口：lin 展开 / 其余走原投影 |
+| `SP_TD3.select_action` | 只在 `[a0,a4,g]` 上加探索噪声，再展开 |
+| `SP_TD3._target_smoothed_action` | 只在 `[a0,a4,g]` 上加 TD3 target smoothing 噪声，再展开 |
+| `SP_TD3.random_action` | warmup 直接采 `[a0,a4]∈[0,0.5]²`、`g∈[-0.5,0.5]`，再展开 |
+| `SP_TD3.save/load/save_checkpoint` | actor 文件名用 `actor_tag`（lin = **3**） |
+| `aifflor_main._apply_lin_wt` | warmup / `diag_fix` / `explore_mix` 之后把完整动作投影回线性型线 |
+| `aifflor_main.init_wt_action_bias` | **3 输出映射**：`a0/a4` ← `U(lo,hi)`，`g` ← `sig_value` |
 | `train()` 与 `train_hsrl()` | 两条主循环的 warmup 与 actor 路径都调用 |
 
 * **下层 BESS 不受影响**：L 层只有 1 维动作，`SP_TD3` 构造时按
   `nb_actions >= na_box` 自动把 `lin_wt` 置 `False`；否则会把 1 维动作误扩成 5 维。
+* **critic 不变**：仍按 6 维动作构造；`actor_3.pkl` 只影响 actor checkpoint，
+  `critic_*_6.pkl` 文件名与形状都不变。
 * **`--branch_*` 的动作集不经过线性投影**（"其他不变"）。同时开
   `--branch_every` 时 critic 会同时看到流形外的 branch 动作；只想验证线性分支
   建议 `--branch_every 0`。
@@ -1066,7 +1083,7 @@ a_i = round(a0 + (a4 − a0) · i/4, 2)        i = 1, 2, 3
 ### 两位小数：前向量化 + 反传 STE
 
 直接 `round` 会把中间维对 `a0/a4` 的梯度贡献清零（`round/floor` 导数几乎处处 0）。
-因此投影用 **straight-through**：前向是真两位小数，反向按连续插值传梯度
+因此展开用 **straight-through**：前向是真两位小数，反向按连续插值传梯度
 （`∂y/∂x ≡ 1`）。另外：
 
 * `1e-6`（缩放后 = 动作量 `1e-8`）只吸收 float32 在 `.xx5` 边界上的表示抖动
@@ -1076,17 +1093,36 @@ a_i = round(a0 + (a4 − a0) · i/4, 2)        i = 1, 2, 3
 * 量化使"动作 → 奖励"在 0.01 网格上分段常值；STE 不改变执行的动作，只改变
   反向传播的近似。`--lin_wt_decimals` 可改小数位（`<0` 关闭取整）。
 
+### 训练期行为
+
+* **探索**：actor 输出 3 维 → 只在这 3 维上加噪声 → 展开；中间维没有独立噪声。
+  wide 模式的两个端点仍用 `U[wt_noise_min, wt_noise_max]` 幅度、按 `[0,0.5]`
+  截断噪声；`g` 仍用 `sig_noise_max → sig_noise_min`。
+* **target smoothing**：同样只对 3 个自由维加 clipped Gaussian 噪声，再展开
+  ⇒ 目标动作始终在线性流形上。
+* **warmup**：`random_action` 直接采 3 维；`WarmupSchedule` 产生的完整 6 维动作
+  在 `_apply_lin_wt` 处投影回首尾 + 线性型线（`unified` / `lhs` 的端点分布不变）。
+* **初始化**：`init_wt_action_bias` 把 3 个输出 bias 映射为
+  `a0,a4 ~ U(0.05,0.45)`、`g = 0.0`。
+* **checkpoint**：`actor_3.pkl`；critic 仍 `critic_*_6.pkl`。旧分析工具若写死
+  `actor_6.pkl`，需要改成 `actor_3.pkl` 并注意 actor 只有 3 个输出。
+
 ### 已知局限（刻意保留）
 
 1. **型线被强制为线性**：真实最优型线未必线性（`FARM_CENTRE` 就不线性）；
    这条臂测的是"两端 + 线性"这个结构假设，不是"最优型线"。
 2. **只有 2 个自由度**：中间三台无法独立微调；需要非单调型线时这条臂会系统性吃亏。
-3. **量化**：中间维在带内是 51 级格点；改 `--lin_wt_decimals` 会改变动作集，跨 run 不可直接比。
+3. **量化**：两位小数 ⇒ 中间维在带内是 51 级格点；首尾维仍连续。
+   改 `--lin_wt_decimals` 会改变动作集，跨 run 不可直接比。
 4. **首尾越界的连带罚**：一次可能计 3~5 维 `pen5`，是"2 维驱动 5 台"的必然结果。
+5. **checkpoint 不兼容**：`actor_3.pkl` 不能与 6 输出 actor 互相 warm-start
+   （`fc4` 形状不同）。
 
 ### 验证
 
 `python agentutil/test_aifflor_lin_wt.py`（只读；单点 FLORIS 求值，不跑 episode）：
-投影语义 / 梯度（`∂/∂a1..a3 ≡ 0`、`∂/∂a0`·`∂/∂a4`·`∂/∂g` 非零、STE 对照）/
-agent 噪声后的流形 / 下层 1 维自动跳过 / 物理不变性 / 默认臂恒等 / 两条主循环接线，
-全绿。回归：`test_aifflor_scalar_wt.py` 与 `test_aifflor_hsrl_contract.py` 仍全过。
+展开/投影语义、actor 结构（3 输出 / 3447 参数 / 自由维索引 / 默认臂 6 输出 /
+下层 1 维自动跳过）、梯度（a0/a4/g 三路 + STE 对照）、探索/random_action/
+target smoothing 的流形、`actor_3.pkl` 保存加载、物理不变性、初始化映射、
+两条主循环接线，全绿。回归：`test_aifflor_scalar_wt.py`、
+`test_aifflor_hsrl_contract.py`、`test_aifflor_branch_contract.py` 仍全过。

@@ -7,6 +7,7 @@ from torch.optim import Adam
 
 from model import (Actor, Critic, AuxModel, proj_farm_level,
                    proj_lin_wt, proj_lin_wt_np,
+                   expand_lin_wt, expand_lin_wt_np,
                    proj_scalar_wt, proj_scalar_wt_np)
 from PER_buffer import PrioritizedReplayBuffer
 from random_process import OrnsteinUhlenbeckProcess
@@ -71,6 +72,21 @@ class SP_TD3(object):
             raise ValueError('critic_nb_states(%d) < nb_states(%d)'
                              % (self.critic_nb_states, self.nb_states))
         self.nb_actions = nb_actions
+        # ---- 线性行为分支（--lin_wt 1）的**结构版**动作头 ----
+        #   风机动作只保留首尾两维 a0 / a_{nt−1}，中间维由线性插值展开；
+        #   非风机维（H 的第 6 维 g）仍是独立输出。
+        #   ⇒ actor 输出维数 = 2 + (nb_actions − na_box)；上层 6 维动作 ⇒ **3 个神经元**。
+        #   ⚠ 只作用于上层（nb_actions ≥ na_box）：下层 L 是 1 维动作，
+        #      同一个 --lin_wt 不能把它的动作扩成 5 维（L 保持 1 输出）。
+        #   ⚠ 与 --scalar_wt / --farm_level 互斥（main 里 assert）。
+        self.na_box = int(getattr(args, 'na_box', 5))
+        self.lin_wt = (bool(int(getattr(args, 'lin_wt', 0) or 0))
+                       and self.na_box >= 2 and self.nb_actions >= self.na_box)
+        self.lin_decimals = int(getattr(args, 'lin_wt_decimals', 2))
+        self.actor_nb_actions = (2 + max(0, self.nb_actions - self.na_box)
+                                 if self.lin_wt else self.nb_actions)
+        #: actor checkpoint 的文件后缀：lin 分支为 3（a0/a4/g），其余仍为 nb_actions
+        self.actor_tag = self.actor_nb_actions if self.lin_wt else self.nb_actions
         # L 层观测标记: myfunc 测试函数用它区分 5 维规则原配料观测
         # 与 PER 基线 5 维观测 (两者 nb_states 同为 5, 无法按维度区分).
         self.distilled_obs = True
@@ -92,8 +108,8 @@ class SP_TD3(object):
         critic_cfg['out_init'] = str(getattr(args, 'critic_out_init', '3e3') or '3e3')
         critic_cfg['feat_power'] = bool(int(getattr(args, 'critic_feat_power', 0) or 0))
         critic_cfg['feat_power_k'] = float(getattr(args, 'critic_feat_power_k', 1.357e-3))
-        self.actor = Actor(self.nb_states, self.nb_actions, **net_cfg)
-        self.actor_target = Actor(self.nb_states, self.nb_actions, **net_cfg)
+        self.actor = Actor(self.nb_states, self.actor_nb_actions, **net_cfg)
+        self.actor_target = Actor(self.nb_states, self.actor_nb_actions, **net_cfg)
         self.actor_optim = Adam(self.actor.parameters(), lr=args.prate)
 
         # ---- TD3: twin critics per channel ----
@@ -170,15 +186,6 @@ class SP_TD3(object):
         #   第 1..4 维"存在但无用"（投影线性 ⇒ 对它们的梯度恒为 0）。
         #   ⚠ 与 --farm_level 互斥（main 里 assert）；两者都开时 scalar 后生效。
         self.scalar_wt = bool(int(getattr(args, 'scalar_wt', 0) or 0))
-        # 线性行为分支（--lin_wt 1）：只保留首尾两维 a_0 / a_{nt−1}，中间维线性插值
-        #   并四舍五入到 `lin_decimals` 位（默认 2）。有效自由度 = 2；
-        #   第 1..nt−2 维"存在但无用"（投影只读首尾 ⇒ 对它们的梯度恒为 0）。
-        #   ⚠ 只作用于上层（nb_actions ≥ na_box）：下层 L 是 1 维动作，
-        #      同一个 --lin_wt 不能把它的动作扩成 5 维。
-        #   ⚠ 与 --scalar_wt / --farm_level 互斥（main 里 assert）。
-        self.lin_wt = (bool(int(getattr(args, 'lin_wt', 0) or 0))
-                       and self.nb_actions >= int(getattr(args, 'na_box', 5)))
-        self.lin_decimals = int(getattr(args, 'lin_wt_decimals', 2))
         # ---- k=1 的 1-step 监督模型（model-based 策略改进）----
         self.aux_model = bool(int(getattr(args, 'aux_model', 0) or 0))
         self.aux_mix = float(getattr(args, 'aux_mix', 1.0))
@@ -194,7 +201,6 @@ class SP_TD3(object):
             _lr = float(getattr(args, 'aux_rate', 1e-3))
             self.aux_optim_r = Adam(self.aux_r.parameters(), lr=_lr)
             self.aux_optim_c = Adam(self.aux_c.parameters(), lr=_lr)
-        self.na_box = int(getattr(args, 'na_box', 5))
         assert self.target_agg in ('min', 'mean'), self.target_agg
         self._pending = []        # nstep>1 时的滑窗队列: 最近 n-1 个块 (等待后继块结算)
         # 每条转移自带的 bootstrap 系数 (γ^n; episode 截断处为 0), 按 memory 下标存。
@@ -338,6 +344,18 @@ class SP_TD3(object):
         self.explore_amp = amp_e
         self.explore_floor = floor_e
 
+        # ---- 自由动作维索引（--lin_wt 的 3 输出头）----
+        #   actor 只输出 [a0, a_{na_box−1}, g...]；噪声/target smoothing 只能加在
+        #   这些"自由维"上，中间维永远由 expand_lin_wt 从首尾展开。
+        #   非 lin 分支 = 全体动作维（数组保持原样，便于统一写 target smoothing）。
+        if self.lin_wt:
+            self.action_free_idx = np.array(
+                [0, self.na_box - 1] + list(range(self.na_box, self.nb_actions)),
+                dtype=int)
+        else:
+            self.action_free_idx = np.arange(self.nb_actions, dtype=int)
+        self.action_amp_free = self.action_amp[self.action_free_idx]
+
     # ---- TD3 helper: aggregate a critic pair (min or max) ----
     def _pair_min(self, q1, q2):
         return torch.min(q1, q2)
@@ -458,11 +476,9 @@ class SP_TD3(object):
 
         # ---- TD3: target policy smoothing (clipped Gaussian noise,
         #      scaled per dimension by action amplitude) ----
-        amp_t = torch.tensor(self.action_amp, dtype=torch.float32, device=self.device)
-        a_next = self._act(self.actor_target, actor_next_state_batch)
-        noise = torch.randn_like(a_next) * (self.policy_noise * amp_t)
-        noise = noise.clamp(-self.noise_clip * amp_t, self.noise_clip * amp_t)
-        a_smoothed = a_next + noise
+        #   --lin_wt: 噪声只加在 3 个自由维上，再展开 ⇒ 目标动作在流形内；
+        #   默认臂：6 维逐维加噪（历史口径，逐位不变）。
+        a_smoothed = self._target_smoothed_action(actor_next_state_batch)
 
         # ---- TD3: twin targets, take min of the pair (clipped double Q) ----
         q_p1_next = self.critic_target_p([next_state_batch, a_smoothed])
@@ -832,6 +848,16 @@ class SP_TD3(object):
 
     def random_action(self):
         charge=0.5
+        if getattr(self, 'lin_wt', False):
+            # 结构版线性分支：只采 [a0, a4, g...]，中间由插值展开
+            extra = int(self.nb_actions - self.na_box)
+            raw = np.concatenate([
+                np.random.uniform(0., 0.5, 2),
+                np.random.uniform(-0.5, 0.5, extra)])
+            action = expand_lin_wt_np(raw, nt=self.na_box,
+                                      decimals=self.lin_decimals)
+            self.a_t = action
+            return action
         if self.nb_actions == self.nb_turbine:
             action = np.random.uniform(0., 0.5, self.nb_actions)
         if self.nb_actions == 1:
@@ -847,14 +873,30 @@ class SP_TD3(object):
         self.a_t = action
         return action
 
-    def _project(self, a):
-        """动作投影（**所有 actor 前向都必须走这里**）。
+    def _expand(self, raw):
+        """actor 原始输出 → **完整动作向量**（critic/env 口径）。
 
+        * `--lin_wt`：actor 输出 = `[a0, a_end, g...]`，中间维由
+          `model.expand_lin_wt` 线性插值展开；
+        * 其余：`raw` 本身就是完整动作，走原来的 `_project`
+          （`--farm_level` 射线 / `--scalar_wt` 等）。
+        """
+        if getattr(self, 'lin_wt', False):
+            return expand_lin_wt(raw, nt=int(getattr(self, 'na_box', 5)),
+                                 decimals=int(getattr(self, 'lin_decimals', 2)))
+        return self._project(raw)
+
+    def _project(self, a):
+        """动作投影（**完整动作**的投影入口）。
+
+        `--lin_wt` 的 3 维 raw 会先被展开；6 维完整动作则只保留首尾并重算中间。
         顺序：先 lin_wt（首尾 + 线性插值），再 farm_level（射线 a_i=s·c_i），
         再 scalar_wt（a_i=a_0）。三者在 main 里互斥 ⇒ 实际只会命中一个。
         对 v1/v2/... 的 6 维动作只改前 na_box 维，第 6 维 g 原样保留。
         """
         if getattr(self, 'lin_wt', False):
+            if a.shape[-1] == int(getattr(self, 'actor_nb_actions', self.nb_actions)):
+                return self._expand(a)
             a = proj_lin_wt(a, nt=int(getattr(self, 'na_box', 5)),
                             decimals=int(getattr(self, 'lin_decimals', 2)))
         if getattr(self, 'farm_level', False):
@@ -866,8 +908,13 @@ class SP_TD3(object):
     def _project_np(self, a):
         """numpy 版投影（用于**加完探索噪声之后**的实际执行动作）。"""
         if getattr(self, 'lin_wt', False):
-            a = proj_lin_wt_np(a, nt=int(getattr(self, 'na_box', 5)),
-                               decimals=int(getattr(self, 'lin_decimals', 2)))
+            if np.asarray(a).size == int(getattr(self, 'actor_nb_actions',
+                                                  self.nb_actions)):
+                a = expand_lin_wt_np(a, nt=int(getattr(self, 'na_box', 5)),
+                                     decimals=int(getattr(self, 'lin_decimals', 2)))
+            else:
+                a = proj_lin_wt_np(a, nt=int(getattr(self, 'na_box', 5)),
+                                   decimals=int(getattr(self, 'lin_decimals', 2)))
         elif getattr(self, 'scalar_wt', False):
             a = proj_scalar_wt_np(a, nt=int(getattr(self, 'na_box', 5)))
         elif getattr(self, 'farm_level', False):
@@ -875,10 +922,79 @@ class SP_TD3(object):
         return a
 
     def _act(self, net, s):
-        """actor 前向 + (可选)场级投影 —— 所有调用点都必须走这里。"""
-        return self._project(net(s))
+        """actor 前向 + 展开/投影 —— 所有调用点都必须走这里。"""
+        return self._expand(net(s))
+
+    def _target_smoothed_action(self, next_states):
+        """TD3 target policy smoothing（clipped Gaussian noise）。
+
+        * 默认：6 维动作逐维加噪（历史口径，逐位不变）；
+        * `--lin_wt`：只在 **3 个自由维**（a0/a4/g）上加噪，再展开成 6 维
+          ⇒ 目标动作始终落在"首尾 + 线性插值"流形上。
+        """
+        if getattr(self, 'lin_wt', False):
+            raw = self.actor_target(next_states)
+            amp_t = torch.tensor(self.action_amp_free, dtype=torch.float32,
+                                 device=self.device)
+            noise = torch.randn_like(raw) * (self.policy_noise * amp_t)
+            noise = noise.clamp(-self.noise_clip * amp_t, self.noise_clip * amp_t)
+            return self._expand(raw + noise)
+        amp_t = torch.tensor(self.action_amp, dtype=torch.float32, device=self.device)
+        a_next = self._act(self.actor_target, next_states)
+        noise = torch.randn_like(a_next) * (self.policy_noise * amp_t)
+        noise = noise.clamp(-self.noise_clip * amp_t, self.noise_clip * amp_t)
+        return a_next + noise
+
+    def _add_noise_free(self, raw):
+        """给 `--lin_wt` 的**自由维** `[a0, a_end, g...]` 加探索噪声。
+
+        * 首尾两个 WT 维沿用 wide 口径：幅度 `U[wt_noise_min, wt_noise_max]`，
+          噪声 `U[−amp, amp]`，并按 `[0,0.5]` 截断**噪声**（与默认臂同式）；
+        * 额外维（g）沿用 `explore_amp/floor` 的 ε 衰减口径；
+        * legacy 模式：所有自由维用 `explore_amp_free·ε + explore_floor_free·(1−ε)`。
+        """
+        eps = max(self.epsilon, 0.0)
+        if (self.wt_noise_mode == 'wide'
+                and self.nb_actions in (self.na_box, self.na_box + 1)):
+            a_wt = np.asarray(raw[:2], dtype=float)
+            amp = np.random.uniform(self.wt_noise_min, self.wt_noise_max, size=2)
+            noise = np.random.uniform(-amp, amp)
+            inside = (a_wt >= 0.0) & (a_wt <= 0.5)
+            noise = np.where(inside, np.clip(noise, 0.0 - a_wt, 0.5 - a_wt), noise)
+            raw[:2] = a_wt + noise
+            if raw.size > 2:
+                # 额外维（H 的 g）按**当前** explore_amp/floor 取：
+                # main 会在构造后覆写 `explore_amp[5]`（HSRL 的 g 噪声量纲），
+                # 因此不能缓存成 __init__ 时的 free 数组。
+                amp_x = (np.asarray(self.explore_amp[self.na_box:]) * eps
+                         + np.asarray(self.explore_floor[self.na_box:]) * (1.0 - eps))
+                raw[2:] += (np.random.random(raw.size - 2) - 0.5) * 2.0 * amp_x
+        else:
+            # 自由维顺序 = [a0, a_end, 额外维...]
+            amp_free = np.concatenate([
+                np.asarray([self.explore_amp[0], self.explore_amp[self.na_box - 1]]),
+                np.asarray(self.explore_amp[self.na_box:])])
+            floor_free = np.concatenate([
+                np.asarray([self.explore_floor[0], self.explore_floor[self.na_box - 1]]),
+                np.asarray(self.explore_floor[self.na_box:])])
+            amp = amp_free * eps + floor_free * (1.0 - eps)
+            raw += (np.random.random(raw.size) - 0.5) * 2.0 * amp
+        return raw
 
     def select_action(self, s_t, decay_epsilon=True):
+        if getattr(self, 'lin_wt', False):
+            # 结构版：actor 只输出 [a0, a4, g]；噪声只加在自由维，中间维由展开得到
+            raw = to_numpy(self.actor(to_tensor(np.array([s_t])))).squeeze(0)
+            raw = np.asarray(raw, dtype=float).copy()
+            if self.is_training:
+                raw = self._add_noise_free(raw)
+            action = expand_lin_wt_np(raw, nt=self.na_box,
+                                      decimals=self.lin_decimals)
+            if decay_epsilon and self.is_training:
+                self.epsilon -= self.depsilon
+            self.a_t = action
+            return action
+
         action = to_numpy(self._act(self.actor, to_tensor(np.array([s_t])))).squeeze(0)
 
         # 逐维探索噪声
@@ -940,7 +1056,7 @@ class SP_TD3(object):
     def load_weights(self, output):
         if output is None: return
 
-        self.actor.load_state_dict(torch.load('{}/actor_{}.pkl'.format(output, self.nb_actions)))
+        self.actor.load_state_dict(torch.load('{}/actor_{}.pkl'.format(output, self.actor_tag)))
         self.critic_p.load_state_dict(torch.load('{}/critic_p_{}.pkl'.format(output, self.nb_actions)))
         self.critic_c.load_state_dict(torch.load('{}/critic_c_{}.pkl'.format(output, self.nb_actions)))
 
@@ -961,7 +1077,7 @@ class SP_TD3(object):
         hard_update(self.critic_target_c2, self.critic_c2)
 
     def save_model(self, output):
-        torch.save(self.actor.state_dict(), '{}/actor_{}.pkl'.format(output, self.nb_actions))
+        torch.save(self.actor.state_dict(), '{}/actor_{}.pkl'.format(output, self.actor_tag))
         torch.save(self.critic_p.state_dict(), '{}/critic_p_{}.pkl'.format(output, self.nb_actions))
         torch.save(self.critic_p2.state_dict(), '{}/critic_p2_{}.pkl'.format(output, self.nb_actions))
         torch.save(self.critic_c.state_dict(), '{}/critic_c_{}.pkl'.format(output, self.nb_actions))
@@ -974,7 +1090,7 @@ class SP_TD3(object):
         ckpt_dir = os.path.join(output, 'checkpoint_{}'.format(step))
         os.makedirs(ckpt_dir, exist_ok=True)
         torch.save(self.actor.state_dict(),
-                   '{}/actor_{}.pkl'.format(ckpt_dir, self.nb_actions))
+                   '{}/actor_{}.pkl'.format(ckpt_dir, self.actor_tag))
         torch.save(self.critic_p.state_dict(),
                    '{}/critic_p_{}.pkl'.format(ckpt_dir, self.nb_actions))
         torch.save(self.critic_p2.state_dict(),
