@@ -497,6 +497,85 @@ class StructCostModel(nn.Module):
 FARM_CENTRE = [0.3418, 0.4247, 0.2889, 0.2562, 0.3705]
 
 
+def _round_half_away_ste(x, decimals=2):
+    """四舍五入到 `decimals` 位小数，**前向真取整、反向恒等**（straight-through）。
+
+    为什么必须用 STE：`torch.round` / `floor` 的导数几乎处处为 0。若投影里直接
+    取整，actor 对 a0/a4 的梯度会被这一步清零 ⇒ 整个 actor 学不动（不是"梯度小"，
+    是**严格 0**）。STE 把前向值换成量化值，同时让反向按 `∂y/∂x = 1` 传回去：
+    训练仍在连续插值流形上做梯度，实际执行/回放的却是两位小数动作。
+    """
+    scale = float(10.0 ** int(decimals))
+    # +1e-6（缩放后 = 动作量 1e-8）只吸收 float32 输入在 .xx5 边界上的表示抖动
+    # （actor 输出是 float32，0.12 实际是 0.1199999973…），不改变正常的四舍五入。
+    y = torch.sign(x) * torch.floor(torch.abs(x) * scale + 0.5 + 1e-6) / scale
+    return x + (y - x).detach()
+
+
+def _round_half_away_np(x, decimals=2):
+    """`_round_half_away_ste` 的 numpy 版（无梯度，四舍五入 away-from-zero）。
+
+    与 torch 版一样在缩放后加 1e-6 容差 ⇒ 同一输入的两个实现给出同一位小数。
+    """
+    scale = float(10.0 ** int(decimals))
+    v = np.asarray(x, dtype=np.float64)
+    return np.sign(v) * np.floor(np.abs(v) * scale + 0.5 + 1e-6) / scale
+
+
+def proj_lin_wt(a, nt=5, decimals=2):
+    """**线性行为分支**的动作投影：只保留首尾两维，中间维沿机组线性插值。
+
+    定义（前 `nt` 维风机动作，第 6 维 g 原样保留）：
+        a_i = a_0 + (a_{nt-1} − a_0) · i/(nt−1)      i = 1 … nt−2
+    并对**中间维**四舍五入到 `decimals` 位（默认 2）；首尾维保持 actor 原始输出
+    （不取整、不 clip —— 越界仍交给 `check_action_H_hsrl` + pen5 处理）。
+
+    设计动机（`agentutil/probe_turbine_wake_attribution.py` 的实测）：
+    单排 5 台里两端 T1/T5 是**符号稳定、量级大**的动作通道（T1 占出力 44.4%，
+    T5 的下游耦合恒 0），而中间 T2–T4 的净灵敏度被"自身项 vs 下游耦合"近抵消
+    （符号一致率 43%~48%，接近抛硬币）。⇒ 把 5 个自由度压成"首尾 2 个 + 线性型线"，
+    既减少近零方向的维数，又保持整排动作的连贯形状。
+
+    ⚠ 有效自由度只有 2：第 1..nt−2 维的 actor 输出**存在但无用**，
+    对它们的梯度恒为 0（与 `--scalar_wt` 的"第 1..4 维存在但无用"同构）。
+
+    不改变第 6 维（g），也不做 clip。
+    """
+    out = a.clone()
+    n = int(nt)
+    if n <= 2:
+        return out
+    if a.shape[-1] < n:
+        raise ValueError('proj_lin_wt: 动作维数 %d < nt=%d' % (a.shape[-1], n))
+    # 插值与取整在 float64 上做：float32 的 0.65/4 之类会在 .xx5 附近抖到边界另一侧，
+    # 导致 torch 与 numpy 对同一输入给出不同两位小数。结果写回原 dtype。
+    work = a.to(torch.float64)
+    a0 = work[..., 0]
+    a_end = work[..., n - 1]
+    t = torch.arange(1, n - 1, dtype=torch.float64, device=a.device) / float(n - 1)
+    mid = a0.unsqueeze(-1) + (a_end - a0).unsqueeze(-1) * t
+    if decimals is not None and int(decimals) >= 0:
+        mid = _round_half_away_ste(mid, int(decimals))
+    out[..., 1:n - 1] = mid.to(out.dtype)
+    return out
+
+
+def proj_lin_wt_np(a, nt=5, decimals=2):
+    """`proj_lin_wt` 的 numpy 版（供主循环 / select_action 用）。"""
+    out = np.array(a, dtype=np.float64, copy=True).reshape(-1)
+    n = int(nt)
+    if n <= 2:
+        return out
+    if out.size < n:
+        raise ValueError('proj_lin_wt_np: 动作维数 %d < nt=%d' % (out.size, n))
+    t = np.arange(1, n - 1, dtype=np.float64) / float(n - 1)
+    mid = out[0] + (out[n - 1] - out[0]) * t
+    if decimals is not None and int(decimals) >= 0:
+        mid = _round_half_away_np(mid, int(decimals))
+    out[1:n - 1] = mid
+    return out
+
+
 def proj_scalar_wt(a, nt=5):
     """把前 nt 维风机动作压成**同一个值** a_0：`a_i = a_0`（i<nt），其余维不变。
 

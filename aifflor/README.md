@@ -540,7 +540,9 @@ AifflorPhysics(nt=5, calibrated=False, power_scale=AT.LEVEL_COEF)
 
 ## 3.8 `--hsrl` 方法分支：**"块总放电量"语义**（2026-10 新增）
 
-`aifflor` 现在有**两条方法分支**，靠命令行开关区分（**不加开关 = 旧口径，逐位不变**）：
+`aifflor` 现在有**两条方法分支**，靠命令行开关区分（**不加开关 = 旧口径，逐位不变**）；
+另有三个**动作流形开关**（`--farm_level` / `--scalar_wt` / `--lin_wt`，见 §3.10），
+它们只改"actor 输出到 5 维风机动作"的映射，不改方法语义：
 
 ```powershell
 python aifflor\aifflor_main.py            # 旧口径: SOC 目标信号 + 规则残余动作 + 平抑窗口
@@ -985,3 +987,99 @@ aifflor 用回 `--env TD3PER`。
 
 > ⚠ 成本：`--branch_every 10` 实测口径是 **1.40×**（每 10 块 50 步 + 20 步），
 > 不是计划书写的 1.3×（那按"每块 5 动作"的近似估的）。
+
+---
+
+## 3.10 `--lin_wt`：线性行为分支（2026-10 新增）
+
+> 设计/取舍/局限的完整版 = `documentation/aifflor_linear_behavior_branch.md`。
+> 契约测试 = `python agentutil/test_aifflor_lin_wt.py`。
+
+### 一句话
+
+**actor 只决定首尾两台的动作 `a0` / `a4`，中间三台由线性插值得到并保留两位小数**；
+其余（HSRL 语义、奖励/成本、critic、探索、warmup、日志）一律不动。
+默认 `--lin_wt 0` ⇒ 旧路径逐位不变。
+
+```powershell
+python aifflor/aifflor_main.py --hsrl --lin_wt 1 --seed 0
+```
+
+### 动作定义
+
+```
+a0 = actor[0]                              （首端，原样，不取整）
+a4 = actor[4]                              （末端，原样，不取整）
+a_i = round(a0 + (a4 − a0) · i/4, 2)        i = 1, 2, 3
+```
+
+例：`a0=0.12, a4=0.25` ⇒ `[0.12, 0.15, 0.19, 0.22, 0.25]`。
+
+* **有效自由度 = 2（+g）**；actor 第 1..3 维输出"存在但无用"（投影只读第 0/4 维
+  ⇒ 对它们的梯度恒为 `0`）。
+* 首尾维**不取整、不 clip**：越界仍由 `check_action_H_hsrl` / `CheckAction`
+  裁 + `pen5` 罚；首尾越界会连带推出中间维越界，`pen5` 按实际越界维数累计。
+* 第 6 维 `g`（HSRL 的块总放电量）完全独立。
+
+### 为什么是"首尾 + 线性"
+
+`agentutil/probe_turbine_wake_attribution.py` 的实测：单排 5 台里两端 T1/T5 是
+**符号稳定、量级大**的动作通道（T1 占出力 44.4%；T5 下游耦合恒 0；
+真实 `∂c1/∂a` 符号稳定率 84% / 90%），而中间 T2–T4 的净灵敏度被"自身项 vs
+下游耦合"近抵消（符号一致率 43%~48%，接近抛硬币）。⇒ 把 5 维压成
+"两端 2 维 + 整排线性型线"，去掉近零方向，同时保留连贯形状
+（区别于 `--scalar_wt` 的"五台全相等"）。
+
+### 与其它动作流形开关的区别（三者互斥）
+
+| 开关 | 流形 | 有效自由度 | 中间维 |
+|---|---|---:|---|
+| 默认 | 5 维独立 | 5 | 自由 |
+| `--farm_level 1` | `a_i = s·c_i` | 1（+g） | 射线决定，保留形状 |
+| `--scalar_wt 1` | `a_i = a_0` | 1（+g） | 全等于首端 |
+| **`--lin_wt 1`** | **首尾 + 线性插值** | **2（+g）** | **线性型线，两位小数** |
+
+### 实现落点（缺一处就会被绕过）
+
+| 位置 | 作用 |
+|---|---|
+| `model.proj_lin_wt` / `proj_lin_wt_np` | 投影唯一真源（torch / numpy） |
+| `model._round_half_away_ste` / `_round_half_away_np` | 四舍五入 + straight-through |
+| `SP_TD3._project` | 所有 actor 前向（含 target actor、critic 的演员评估点） |
+| `SP_TD3._project_np` + `select_action` | 加完探索噪声之后的实际执行动作 |
+| `aifflor_main._apply_lin_wt` | warmup / `diag_fix` / `explore_mix` 之后、动作检查之前 |
+| `train()` 与 `train_hsrl()` | 两条主循环的 warmup 与 actor 路径都调用 |
+
+* **下层 BESS 不受影响**：L 层只有 1 维动作，`SP_TD3` 构造时按
+  `nb_actions >= na_box` 自动把 `lin_wt` 置 `False`；否则会把 1 维动作误扩成 5 维。
+* **`--branch_*` 的动作集不经过线性投影**（"其他不变"）。同时开
+  `--branch_every` 时 critic 会同时看到流形外的 branch 动作；只想验证线性分支
+  建议 `--branch_every 0`。
+
+### 两位小数：前向量化 + 反传 STE
+
+直接 `round` 会把中间维对 `a0/a4` 的梯度贡献清零（`round/floor` 导数几乎处处 0）。
+因此投影用 **straight-through**：前向是真两位小数，反向按连续插值传梯度
+（`∂y/∂x ≡ 1`）。另外：
+
+* `1e-6`（缩放后 = 动作量 `1e-8`）只吸收 float32 在 `.xx5` 边界上的表示抖动
+  （`0.12` 实际是 `0.1199999973…`），不改变正常四舍五入；
+* 插值与取整中间量用 **float64** 再写回原 dtype ⇒ torch 与 numpy 对同一输入
+  给出同一位小数；
+* 量化使"动作 → 奖励"在 0.01 网格上分段常值；STE 不改变执行的动作，只改变
+  反向传播的近似。`--lin_wt_decimals` 可改小数位（`<0` 关闭取整）。
+
+### 已知局限（刻意保留）
+
+1. **型线被强制为线性**：真实最优型线未必线性（`FARM_CENTRE` 就不线性）；
+   这条臂测的是"两端 + 线性"这个结构假设，不是"最优型线"。
+2. **只有 2 个自由度**：中间三台无法独立微调；需要非单调型线时这条臂会系统性吃亏。
+3. **量化**：中间维在带内是 51 级格点；改 `--lin_wt_decimals` 会改变动作集，跨 run 不可直接比。
+4. **首尾越界的连带罚**：一次可能计 3~5 维 `pen5`，是"2 维驱动 5 台"的必然结果。
+
+### 验证
+
+`python agentutil/test_aifflor_lin_wt.py`（只读；单点 FLORIS 求值，不跑 episode）：
+投影语义 / 梯度（`∂/∂a1..a3 ≡ 0`、`∂/∂a0`·`∂/∂a4`·`∂/∂g` 非零、STE 对照）/
+agent 噪声后的流形 / 下层 1 维自动跳过 / 物理不变性 / 默认臂恒等 / 两条主循环接线，
+全绿。回归：`test_aifflor_scalar_wt.py` 与 `test_aifflor_hsrl_contract.py` 仍全过。

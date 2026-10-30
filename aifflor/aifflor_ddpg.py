@@ -6,6 +6,7 @@ import torch.nn as nn
 from torch.optim import Adam
 
 from model import (Actor, Critic, AuxModel, proj_farm_level,
+                   proj_lin_wt, proj_lin_wt_np,
                    proj_scalar_wt, proj_scalar_wt_np)
 from PER_buffer import PrioritizedReplayBuffer
 from random_process import OrnsteinUhlenbeckProcess
@@ -169,6 +170,15 @@ class SP_TD3(object):
         #   第 1..4 维"存在但无用"（投影线性 ⇒ 对它们的梯度恒为 0）。
         #   ⚠ 与 --farm_level 互斥（main 里 assert）；两者都开时 scalar 后生效。
         self.scalar_wt = bool(int(getattr(args, 'scalar_wt', 0) or 0))
+        # 线性行为分支（--lin_wt 1）：只保留首尾两维 a_0 / a_{nt−1}，中间维线性插值
+        #   并四舍五入到 `lin_decimals` 位（默认 2）。有效自由度 = 2；
+        #   第 1..nt−2 维"存在但无用"（投影只读首尾 ⇒ 对它们的梯度恒为 0）。
+        #   ⚠ 只作用于上层（nb_actions ≥ na_box）：下层 L 是 1 维动作，
+        #      同一个 --lin_wt 不能把它的动作扩成 5 维。
+        #   ⚠ 与 --scalar_wt / --farm_level 互斥（main 里 assert）。
+        self.lin_wt = (bool(int(getattr(args, 'lin_wt', 0) or 0))
+                       and self.nb_actions >= int(getattr(args, 'na_box', 5)))
+        self.lin_decimals = int(getattr(args, 'lin_wt_decimals', 2))
         # ---- k=1 的 1-step 监督模型（model-based 策略改进）----
         self.aux_model = bool(int(getattr(args, 'aux_model', 0) or 0))
         self.aux_mix = float(getattr(args, 'aux_mix', 1.0))
@@ -840,9 +850,13 @@ class SP_TD3(object):
     def _project(self, a):
         """动作投影（**所有 actor 前向都必须走这里**）。
 
-        顺序：先 farm_level（射线 a_i=s·c_i），再 scalar_wt（a_i=a_0）。
+        顺序：先 lin_wt（首尾 + 线性插值），再 farm_level（射线 a_i=s·c_i），
+        再 scalar_wt（a_i=a_0）。三者在 main 里互斥 ⇒ 实际只会命中一个。
         对 v1/v2/... 的 6 维动作只改前 na_box 维，第 6 维 g 原样保留。
         """
+        if getattr(self, 'lin_wt', False):
+            a = proj_lin_wt(a, nt=int(getattr(self, 'na_box', 5)),
+                            decimals=int(getattr(self, 'lin_decimals', 2)))
         if getattr(self, 'farm_level', False):
             a = proj_farm_level(a)
         if getattr(self, 'scalar_wt', False):
@@ -851,7 +865,10 @@ class SP_TD3(object):
 
     def _project_np(self, a):
         """numpy 版投影（用于**加完探索噪声之后**的实际执行动作）。"""
-        if getattr(self, 'scalar_wt', False):
+        if getattr(self, 'lin_wt', False):
+            a = proj_lin_wt_np(a, nt=int(getattr(self, 'na_box', 5)),
+                               decimals=int(getattr(self, 'lin_decimals', 2)))
+        elif getattr(self, 'scalar_wt', False):
             a = proj_scalar_wt_np(a, nt=int(getattr(self, 'na_box', 5)))
         elif getattr(self, 'farm_level', False):
             a = to_numpy(proj_farm_level(to_tensor(np.asarray(a, dtype=float).reshape(1, -1)))).reshape(-1)
@@ -897,12 +914,12 @@ class SP_TD3(object):
                 amp = self.explore_amp * eps + self.explore_floor * (1.0 - eps)
                 action = action + (np.random.random(self.nb_actions) - 0.5) * 2.0 * amp
 
-        # ⚠ --scalar_wt 的**定义**是"五台风机的轴向因子必须相等" ⇒ 噪声加完之后
-        #   必须再投影一次，否则实际执行的动作会散开成 5 个不同值、第 1..4 维重新
-        #   变成有意义的自由度，baseline 就不是 baseline 了。
-        #   等价于"探索只发生在第 0 维"（第 1..4 维的噪声被丢弃）。
+        # ⚠ --scalar_wt / --lin_wt 的**定义**是"风机动作必须落在指定流形上" ⇒
+        #   噪声加完之后必须再投影一次，否则实际执行的动作会散开、第 1..4 维
+        #   重新变成有意义的自由度，分支就不是分支了。
+        #   等价于"探索只发生在有效维（scalar: 第 0 维；lin: 第 0/4 维）"。
         #   farm_level 本条**故意不套用**（保持 FARM1 臂已跑的语义不变，单独议）。
-        if getattr(self, 'scalar_wt', False):
+        if getattr(self, 'lin_wt', False) or getattr(self, 'scalar_wt', False):
             action = self._project_np(action)
 
         if decay_epsilon and self.is_training:   # 评测(is_training=False) 不消耗 ε 预算

@@ -47,6 +47,11 @@ I/O 映射（**本次任务的核心**）
 * `aifflor_branch.py`  —— **新写**：同块首宽动作覆盖（branch）的全部口径
   （块首快照/恢复、测试动作集、5 步 branch 块、触发/诊断），见 §3.9 与
   `documentation/aifflor_branch_wide_coverage_plan.md`；默认 `--branch_every 0` 关闭
+* **线性行为分支（`--lin_wt 1`）**：无新文件 —— 投影在 `model.proj_lin_wt` /
+  `proj_lin_wt_np`（+ `_round_half_away_ste`），接在 `aifflor_ddpg._project` /
+  `_project_np` 与 `aifflor_main._apply_lin_wt`（旧 `train()` 与 `train_hsrl()`
+  两条主循环都接）；默认关闭。口径见 `aifflor/README.md` §3.10 与
+  `documentation/aifflor_linear_behavior_branch.md`
 
 克隆的**唯一真源**是 `agentutil/port_aifflor.py`（替换表 + `--check` 可逆性校验）。
 

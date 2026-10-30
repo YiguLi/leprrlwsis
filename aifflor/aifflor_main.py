@@ -94,6 +94,7 @@ from aifflor.aifflor_env import AifflorPhysics, WindBatteryAIF
 from aifflor import aifflor_turbine as aturb
 from aifflor.aifflor_ddpg import SP_TD3
 from model import proj_farm_level as _proj_farm_level   # 场级降载投影 (--farm_level)
+from model import proj_lin_wt_np as _proj_lin_wt_np     # 线性行为分支 (--lin_wt)
 from aifflor import aifflor_hsrl as hsrl   # --hsrl 分支的全部口径 (单一真源)
 from aifflor import aifflor_branch as abr  # 同块首宽动作覆盖 (branch) 的全部口径
 from util import *
@@ -304,11 +305,20 @@ def train(num_iterations_H,
                 # 下层用规则组件**完全追踪**该目标(Δ≡0 ⇒ trackerr≡0)。
                 # --warmup_sig fixed 可退回"信号恒 0"的旧口径。
                 _wa = warmup_sched.action(float(observation[0]))   # None ⇒ 对照臂 (--warmup_sched random)
-                applied_action_H = original_action_H = (
-                    agent_H.random_action() if _wa is None else _wa)
+                _raw_H = agent_H.random_action() if _wa is None else _wa
+                if int(getattr(args, 'lin_wt', 0) or 0):
+                    # 线性行为分支：warmup 的 LHS/统一调度也要落在流形上
+                    _raw_H = np.asarray(_raw_H, dtype=float).copy()
+                    _apply_lin_wt(_raw_H, args)
+                applied_action_H = original_action_H = _raw_H
                 penalty_NN_H = 0
             else:
                 original_action_H = agent_H.select_action(norm_observation)
+                if int(getattr(args, 'lin_wt', 0) or 0):
+                    # select_action 内部已投影；这里再落一次是为了与 warmup 共用同一入口，
+                    # 且保证后续任何就地改写之后仍是线性型线（幂等）。
+                    original_action_H = np.asarray(original_action_H, dtype=float).copy()
+                    _apply_lin_wt(original_action_H, args)
                 applied_action_H, penalty_NN_H = CheckAction(original_action_H)
             # 越界乘性系数 (每块一个 H 动作 ⇒ 块内恒定; 系数<=0 时恒 1.0 ⇒ 旧口径逐位不变)
             viol_derate = violation_derate(original_action_H, args.viol_derate)
@@ -965,6 +975,29 @@ def _apply_scalar_wt(a, args):
     a[:nt] = float(a[0])
 
 
+def _apply_lin_wt(a, args):
+    """--lin_wt：把前 `na_box` 维就地压成"首尾两维 + 中间线性插值（两位小数）"。
+
+    线性行为分支（**刻意设计的动作流形**）：
+        a_i = a_0 + (a_{nt-1} − a_0) · i/(nt−1)，i = 1 … nt−2
+    中间维四舍五入到 `--lin_wt_decimals` 位（默认 2）；首尾维保持 actor 原值。
+    ⇒ 有效自由度 2（第 0 与第 nt−1 维），第 1..nt−2 维"存在但无用"。
+
+    为什么放在主循环（而不是只放在 agent 里）：warmup 的 LHS/统一调度、
+    `--diag_scalar`、`--explore_mix_blocks` 都会改写前 5 维，必须在它们**之后**、
+    `check_action_H_hsrl` / `CheckAction` **之前**落地，否则实际执行的动作就不在
+    线性流形上。
+
+    注：不做 clip —— 越界仍由动作检查裁 + pen5 罚。因此当首尾维越界时，由它们
+    推出来的中间维可能同时越界，pen5 按实际越界维数累计（不是 bug）。
+    """
+    if not int(getattr(args, 'lin_wt', 0) or 0):
+        return
+    nt = int(getattr(args, 'na_box', 5) or 5)
+    dec = int(getattr(args, 'lin_wt_decimals', 2))
+    a[:nt] = _proj_lin_wt_np(np.asarray(a[:nt], dtype=float), nt=nt, decimals=dec)
+
+
 # =============================================================================
 # HSRL 分支的训练主循环（--hsrl；口径总表见 aifflor/aifflor_hsrl.py）
 # =============================================================================
@@ -1164,6 +1197,7 @@ def train_hsrl(num_iterations_H,
                     original_action_H = _proj_farm_level(
                         torch.tensor(original_action_H[None, :], dtype=torch.float32)).numpy()[0]
                 original_action_H = _diag_fix_action(original_action_H)
+                _apply_lin_wt(original_action_H, args)
                 _apply_scalar_wt(original_action_H, args)
                 applied_action_H, _pen5_w, _pen6_w = hsrl.check_action_H_hsrl(
                     original_action_H, E_block_start,
@@ -1185,8 +1219,9 @@ def train_hsrl(num_iterations_H,
                         _ar = _wt_lhs_rng.uniform(0.0, 0.5, 5)
                         original_action_H = np.asarray(original_action_H, dtype=float).copy()
                         original_action_H[:5] = _eps * original_action_H[:5] + (1.0 - _eps) * _ar
-                # --scalar_wt 必须在**所有改写之后、clip 之前**落地（diag_fix / explore_mix
-                # 都会打散前 5 维）；否则实际执行的动作不是"五台同一个因子"。
+                # --lin_wt / --scalar_wt 必须在**所有改写之后、clip 之前**落地（diag_fix /
+                # explore_mix 都会打散前 5 维）；否则实际执行的动作不在目标流形上。
+                _apply_lin_wt(original_action_H, args)
                 _apply_scalar_wt(original_action_H, args)
                 applied_action_H, penalty_NN_H, pen6_H = hsrl.check_action_H_hsrl(
                     original_action_H, E_block_start,
@@ -2143,6 +2178,15 @@ if __name__ == "__main__":
                              '动作第 0 维（a_i=a_0）⇒ 只剩 1 个自由度，第 1..4 维"存在但无用"'
                              '（投影线性 ⇒ 对它们的梯度恒为 0）。第 6 维 g 不受影响。'
                              '与 --farm_level 互斥；warmup/探索噪声/diag 改写之后仍强制相等')
+    parser.add_argument('--lin_wt', default=0, type=int,
+                        help='1=**线性行为分支**：actor 只使用首尾两维 a0/a{na_box-1}，'
+                             '中间维沿机组线性插值并四舍五入到 --lin_wt_decimals 位小数'
+                             '（默认 2）⇒ 有效自由度 2，第 1..na_box-2 维"存在但无用"'
+                             '（投影只读首尾 ⇒ 对它们的梯度恒为 0）。第 6 维 g 不受影响。'
+                             '与 --scalar_wt / --farm_level 互斥；warmup/探索噪声/diag 改写之后'
+                             '仍强制落在“首尾 + 线性插值”流形上')
+    parser.add_argument('--lin_wt_decimals', default=2, type=int,
+                        help='--lin_wt 的中间维小数位数（默认 2；<0 关闭取整）')
     parser.add_argument('--aux_model', default=0, type=int,
                         help='1=k=1 的 1-step 监督模型 f_r/f_c（MSE, 无 bootstrap），actor 的梯度改用 '
                              '∇_a[f_r − λ f_c]（model-based 策略改进）；0=关闭（默认）')
@@ -2287,10 +2331,15 @@ if __name__ == "__main__":
     # ---- baseline 动作空间（--scalar_wt）：与场级射线投影互斥 ----
     #   --farm_level: 1 个自由度，但保留逐台形状 a_i = s·c_i
     #   --scalar_wt : 1 个自由度，且**连形状也不要** a_i = a_0（第 1..4 维无用）
+    #   --lin_wt    : 2 个自由度，首尾 a_0/a_4 + 中间线性插值（第 1..3 维无用）
     # 同时开会让"到底投影到哪条流形"变得不可判读 ⇒ 直接拒绝。
     assert not (int(getattr(args, 'scalar_wt', 0) or 0)
                 and int(getattr(args, 'farm_level', 0) or 0)), \
         '--scalar_wt 与 --farm_level 互斥（两者都是把动作压到 1 个自由度，语义不同）'
+    assert not (int(getattr(args, 'lin_wt', 0) or 0)
+                and (int(getattr(args, 'scalar_wt', 0) or 0)
+                     or int(getattr(args, 'farm_level', 0) or 0))), \
+        '--lin_wt 与 --scalar_wt / --farm_level 互斥（动作流形不同，不能叠加）'
     args = hwarm.resolve_warmup(args)   # WARMUP_AUTO: 正式口径 warmup=bsize*mult, 期零网络更新
     hc.set_mode(args.c1_mode)
     hc.set_value_scale(args.value_scale)   # 值函数回归空间归一化 (单一真源)
@@ -2379,6 +2428,15 @@ if __name__ == "__main__":
                   'warmup/探索噪声之后仍强制相等。c1 平滑={} critic_arch={}'.format(
                       int(getattr(args, 'c1_smooth', 0) or 0),
                       getattr(args, 'critic_arch', 'v6')))
+    if int(getattr(args, 'lin_wt', 0) or 0):
+        prLightPurple('[linear] 动作空间 = 2 个自由度: 首尾 a0/a{}，中间维线性插值并四舍五入到 {} 位小数'
+                      '（第 1..{} 维存在但无用, 梯度恒 0）；g 独立。warmup/探索噪声之后仍强制落在'
+                      '该流形上。c1 平滑={} critic_arch={}'.format(
+                          int(getattr(args, 'na_box', 5) or 5) - 1,
+                          int(getattr(args, 'lin_wt_decimals', 2)),
+                          int(getattr(args, 'na_box', 5) or 5) - 2,
+                          int(getattr(args, 'c1_smooth', 0) or 0),
+                          getattr(args, 'critic_arch', 'v6')))
     _c1b = float(getattr(args, 'c1_bound_coef', 10.0))
     if _c1b > 0.0:
         prCyan('[c1] 越界项已开启: c1 += {} × Σ[max(0,-a)+max(0,a-0.5)]  (MW·step)'.format(_c1b))
