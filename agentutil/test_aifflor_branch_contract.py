@@ -293,6 +293,54 @@ def section_d():
     ck(res4['done'] is True, 'done=True 透传')
 
 
+def section_d2():
+    """branch + `--critic_wind5 1`（8 维 critic state）—— 计划 §3.1 的"完整块首 state"扩展。
+
+    关键不变量：branch 的 `s′` 里 `u2..u5` 必须是**块末之后**的 4 步
+    （⇒ 与 actor 分支的 `s′` 同源，因为风速序列是外生的、两条分支走的是同一段）。
+    `run_branch_block` 里 `make_state` 在 `restore_env` **之前**调用，就是为了这个。
+    """
+    print('\n[D2] branch + wind5（8 维 critic state）')
+    from aifflor.aifflor_myfunc import Normalize_H
+
+    env = make_env(cw=10)
+
+    # 基类 `env.WindBattery` 没有 `_upcoming_wind`（只有 `WindBatteryAIF` 有）；
+    # 这里按同一定义补一个，`make_state` 与主循环的 `_make_critic_state` 同式。
+    def _upcoming(k):
+        n = len(env.wind_day)
+        cw = int(env.count_wind)
+        return np.asarray([env.wind_day[(cw + 1 + i) % n] for i in range(k)], dtype=float)
+    env._upcoming_wind = _upcoming
+
+    def make_state5(obs, e, minute):
+        return np.concatenate([Normalize_H(obs, minute, 0, None),
+                               np.asarray(e._upcoming_wind(4), dtype=float) / 10.0])
+
+    snap = abr.snapshot_env(env)
+    a5 = np.array([0.05, 0.12, 0.20, 0.33, 0.47])
+    res = abr.run_branch_block(env, _StubRBB(), a5, 0.0, snap, False,
+                               make_state5, minute_end=5, freeze_lower=True,
+                               return_details=True)
+    ck(res['s2'].shape == (8,), 'branch 的 s′ 是 8 维（4 obs + 4 风速），得到 %r'
+       % (res['s2'].shape,))
+    wd = np.asarray(env.wind_day, dtype=float)
+    n = len(wd)
+    cw = int(snap['count_wind'])
+    exp_end = np.asarray([wd[(cw + 6 + i) % n] for i in range(4)], dtype=float) / 10.0
+    ck(np.allclose(res['s2'][4:], exp_end, atol=1e-12),
+       'branch 的 s′ 里 u2..u5 = **块末之后**的 4 步（与 actor 的 s′ 同源）')
+    ck(np.allclose(res['s2'][:4], Normalize_H(np.array(res['obs2']), 5, 0, None),
+                   atol=1e-12), 's′ 的前 4 维 = Normalize_H(块末 obs)')
+    # 块首 s 的 wind5 = 块**内**的 4 步（branch 这 5 步真正经历的风）
+    s0 = make_state5(np.array([snap['pr'], snap['u'], snap['E'], snap['P_G_prev']]),
+                     env, 5)
+    exp_start = np.asarray([wd[(cw + 1 + i) % n] for i in range(4)], dtype=float) / 10.0
+    ck(np.allclose(s0[4:], exp_start, atol=1e-12),
+       '块首 s 的 u2..u5 = 块内后续 4 步（不是块末之后）')
+    ck(abr.snapshot_diff(env, snap) == [], 'wind5 模式下 branch 后 env 仍逐位还原')
+
+
 class _StubRBB(object):
     """与 HSRL 下的 RBB 同形（`fluctuation_limit=inf` ⇒ 纯物理裁剪）。"""
 
@@ -545,7 +593,9 @@ def section_i():
     _orig = agent.actor.forward
 
     def _rec(x):
-        seen.append(int(x.shape[0]))
+        # (行数, 列数)：列数必须 = nb_states(=4) ⇒ **asymmetric critic**（wind5 的 8 维
+        # 只在 critic 侧），actor 永远不吃那 4 个特权风速维；行数必须 = actor 行数。
+        seen.append((int(x.shape[0]), int(x.shape[1])))
         return _orig(x)
 
     agent.actor.forward = _rec
@@ -561,8 +611,12 @@ def section_i():
        'branch 占比在 [0.30, 0.55]（得到 %.3f）' % agent.last_batch_branch_frac)
     n_actor_expect = agent.batch_size - int(round(0.45 * agent.batch_size))
     ck(len(seen) >= 6, 'actor 至少被前向 6 次')
-    ck(all(k == n_actor_expect for k in seen),
-       'actor loss **只用 actor 行**（每批 %d 行；实际 %r）' % (n_actor_expect, seen))
+    ck(all(k[0] == n_actor_expect for k in seen),
+       'actor loss **只用 actor 行**（每批 %d 行；实际 %r）'
+       % (n_actor_expect, [k[0] for k in seen]))
+    ck(all(k[1] == agent.nb_states for k in seen),
+       'actor 只吃前 nb_states(=%d) 维（wind5 的 8 维只进 critic；实际 %r）'
+       % (agent.nb_states, sorted({k[1] for k in seen})))
 
     # 关闭 branch ⇒ 走历史整池采样路径，且不崩
     agent2 = _make_agent(branch_mix=0.0)
@@ -598,6 +652,7 @@ def main():
     section_b()
     section_c()
     section_d()
+    section_d2()
     section_e()
     section_f()
     section_g()
