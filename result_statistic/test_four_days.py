@@ -347,8 +347,10 @@ def parse_args():
     p.add_argument('--episode-length', type=int, default=1440,
                    help='每天步数（默认 1440 = 完整一天；调小仅用于冒烟）')
     p.add_argument('--soc-init', choices=['uniform', 'train'], default='uniform',
-                   help='初始 SOC：uniform=统一 3.0（默认，跨方法公平）；'
+                   help='初始 SOC：uniform=统一 --soc0（默认 0.25，跨方法公平）；'
                         'train=镜像各方法训练时的重置方式（td3 系为 U(0.5,5.5)）')
+    p.add_argument('--soc0', type=float, default=0.25,
+                   help='--soc-init uniform 时的初始 SOC [MWh]（默认 0.25 = env.reset() 的 E）')
     p.add_argument('--viol-limit', type=float, default=3.0, help='波动越限阈值 MW（默认 3.0）')
     p.add_argument('--deg-cost', type=float, default=490.0,
                    help='放电退化成本 元/MWh（默认 490）')
@@ -412,6 +414,10 @@ def main():
              ', '.join(T.PROJECTS[k]['label'] for k in keys)))
     print('计划: %d 组模型 × %d 天 = %d 个 episode（每 episode %d 步）→ 合计 %d 步'
           % (n_runs, len(days), n_ep, args.episode_length, n_ep * args.episode_length))
+    print('口径: 初始 SOC = %s | 越限阈值 %.1f MW | 退化成本 %.0f 元/MWh'
+          % ('%.3f MWh（--soc-init uniform）' % args.soc0
+             if args.soc_init == 'uniform' else '训练重置（--soc-init train）',
+             args.viol_limit, args.deg_cost))
     wf = [k for k in keys if T.PROJECTS[k].get('matlab', True)]
     if wf:
         n_wf_steps = n_ep * args.episode_length
@@ -427,6 +433,9 @@ def main():
     T.EPISODE_LENGTH = int(args.episode_length)
     T.FLUCT_LIMIT = float(args.viol_limit)
     T.BESS_DEG_RMB_PER_MWH = float(args.deg_cost)
+    # uniform 臂的初始 SOC：默认 0.25 MWh = `env.reset()` 的 E（与 max_E=0.5 同量级，
+    # 不会像 3.0 那样在第一分钟被 GetBatteryActions 夹到 max_E 并计入 penalty_L）。
+    T.SOC_INIT = float(args.soc0)
 
     # ---- 4. 设备 ----
     import torch

@@ -30,6 +30,10 @@
 `step(H, L, pw_tru)` 推进电价/风速/储能并回 `P_F`/`P_G`、`PowerOutput(u, a)` 算风机出力；
 逐 (方法 × run × 天) 记录三项指标（越限次数 / 越限总量 / 利润）与 SOC、充放电、峰值。
 
+**初始 SOC 默认 0.25 MWh**（`--soc0`）= `env.reset()` 的 `E`，与 `max_E=0.5` 同量级，
+不会像 3.0 那样在第一分钟被 `GetBatteryActions` 夹到 `max_E`、把 25 单位的 `penalty_L`
+记进第一步。`--soc-init train` 仍可切回"镜像各方法训练时的重置方式"。
+
 **不做**：不更新网络、不写 replay、不做 PER 采样 / λ 对偶 / curriculum / checkpoint；
 `agent.is_training=False` ⇒ 探索噪声恒为 0，动作完全确定。
 
