@@ -37,6 +37,26 @@
 **不做**：不更新网络、不写 replay、不做 PER 采样 / λ 对偶 / curriculum / checkpoint；
 `agent.is_training=False` ⇒ 探索噪声恒为 0，动作完全确定。
 
+## 固定基线臂（`--fixed-a`，不需要模型）
+
+`--fixed-a A` 表示"风机行为固定、电池不操作"的参照点：五台轴向因子恒为 `A`，
+`pb ≡ 0`（SOC 恒定，实测末 SOC 全程 = 初值）。它与模型臂共用同一环境与同一段推进/记录
+代码；差别只在动作来源 —— 没有 agent、没有观测、没有噪声。
+
+为什么 RBB 用 `fluctuation_limit=inf`：3 MW 爬坡约束会把 `pb` 推到窗口内以满足约束，
+那就不是"不动作"了；`inf` 下 RBB 退化成纯物理域裁剪，`pb_original=0 ⇒ pbrule ≡ 0`。
+
+`--fixed-a` 可与模型臂同时给，**基线先跑**，最后进同一张汇总/排名表：
+
+```bash
+python result_statistic/test_four_days.py \
+    --fixed-a 0.33 --td3per output/TD3PER-run18 output/TD3PER-run19 \
+    --output output/result_statistic/3arms_4days
+```
+
+⚠ 一次调用只写一个 `--output` 目录（`four_day_steps.csv` 会先删再追加，其余表整体重写）
+⇒ 想把几条臂放进同一张表，就**在同一次调用里**把参数都给了；分开跑请用不同目录。
+
 推理路径**不重写**：直接复用 `test_five_days.py` 的 `PROJECTS` 注册表（11 个方法）与
 `ProjectRunner`（每方法自己的 H/L 观测、残余动作或规则下层、RBB 硬裁剪、piecewise
 权重、相位特征），只把"取天"换成固定四天 ⇒ 不会与生产口径漂移。要加新方法，去

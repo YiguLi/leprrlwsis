@@ -84,6 +84,7 @@ import argparse
 import os
 import sys
 import time
+from copy import deepcopy
 
 # ---------------------------------------------------------------------------
 # 路径 bootstrap（可被任意 CWD / 任意路径调用）
@@ -326,6 +327,145 @@ def install_stub_engine():
 
 
 # ===========================================================================
+# 固定动作基线臂（无模型）：风机动作恒为 A、BESS 不动作
+# ===========================================================================
+class FixedActionRunner:
+    """`--fixed-a A`：五台轴向因子恒为 `A`，BESS **完全不动作**（pb ≡ 0，SOC 恒定）。
+
+    用途 = 一切学习方法的参照点：固定桨距风场 + 空电池，不含任何学习成分。
+    与模型臂的区别只有"动作从哪来"：没有 agent、没有观测归一化、没有探索噪声；
+    环境仍是 `env.WindBattery`（`env.py` 的同一实现），推进顺序与
+    `ProjectRunner.run_day` 一致（每 5 步算一次风机出力，逐步推进）。
+
+    为什么 `fluctuation_limit=inf`：RBB 在 `limit=3 MW` 时会把 pb 推到可行窗口内
+    以满足爬坡约束，那就**不是**"不动作"了。`inf` ⇒ 退化为纯物理域裁剪，
+    `pb_original=0` 时 `pbrule ≡ 0` ⇒ 储能真的一动不动。
+    """
+
+    def __init__(self, fixed_a, goal, engine, soc0, episode_length, verbose=True):
+        import env as envmod
+        from rbb.rbb_rule_bess import RuleBasedBESS
+        self.a = float(fixed_a)
+        self.goal = float(goal)
+        self.episode_length = int(episode_length)
+        self.soc0 = float(soc0)
+        self.env = envmod.WindBattery(T.MAX_E, T.NB_TURBINE, False, engine)
+        self.rbb = RuleBasedBESS(max_E=T.MAX_E, min_E_factor=0.0,
+                                 rated_power=T.RATED_POWER, eta_c=T.ETA_C,
+                                 eta_d=T.ETA_D, time=T.DT,
+                                 fluctuation_limit=float('inf'))
+        if verbose:
+            print('    [FIXED-A] a_i ≡ %.4f（五台）| BESS 不动作（pb≡0，SOC 恒 %.3f）'
+                  % (self.a, self.soc0))
+
+    def run_day(self, wind_series, day_idx, wind_iloc, wind_col):
+        env = self.env
+        # ---- episode 起点：复刻 env.reset()，再把风速日换成固定那天 ----
+        obs = deepcopy(env.reset())
+        env.wind_day = wind_series
+        env.count_wind = 0
+        env.u = float(wind_series.iloc[0])
+        obs[1] = env.u
+        temp = env.PowerOutput(env.u, env.nominal())
+        env.P_G_prev = temp                    # 波动基准 = 当日首分钟出力
+        obs[-1] = temp
+        env.E = self.soc0                      # 初始 SOC（与模型臂同值 ⇒ 可比）
+        obs[2] = self.soc0
+
+        action_H = np.concatenate([np.full(T.NB_TURBINE, self.a), [self.goal]])
+
+        viol_count = 0
+        viol_excess = 0.0
+        profit = 0.0
+        soc_sum = 0.0
+        soc_end = self.soc0
+        charge_mwh = 0.0
+        discharge_mwh = 0.0
+        max_pf = 0.0
+        step_rows = []
+        pw_tru = None
+        n_steps = self.episode_length
+
+        for t in range(n_steps):
+            if t % 5 == 0:                     # 块首：风机出力只在动作变化时重算
+                pw_tru = env.PowerOutput(obs[1], action_H)
+            ptur = float(pw_tru)
+            E_now = float(obs[2])
+            pg_prev = float(obs[-1])
+
+            # 下层：pb 命令恒 0；RBB 只做物理域裁剪（limit=inf ⇒ 不为了爬坡而动）
+            pbrule, _info = self.rbb.compute_pbrule(
+                pb_original=0.0, ptur=ptur, pg_prev=pg_prev, E=E_now)
+
+            action = np.concatenate([action_H, np.array([0.0])])
+            action[-1] = pbrule
+
+            pw_tru2, obs2, _aL, _pen, _done, _done_L, info = \
+                env.step(action[:6], action[6:], pw_tru)
+
+            P_F = float(info['P_F'])
+            excess = (max(P_F - T.FLUCT_LIMIT, 0.0)
+                      if P_F > T.FLUCT_LIMIT + T.VIOL_TOL else 0.0)
+            if excess > 0.0:
+                viol_count += 1
+                viol_excess += excess
+            pb_used = float(pbrule)
+            profit_step = (float(obs2[-1]) * float(obs[0])
+                           - T.BESS_DEG_RMB_PER_MWH * max(-pb_used, 0.0)) * T.DT
+            profit += profit_step
+            soc_sum += float(obs2[2])
+            soc_end = float(obs2[2])
+            max_pf = max(max_pf, P_F)
+            if pb_used > 0:
+                charge_mwh += pb_used * T.ETA_C * T.DT
+            else:
+                discharge_mwh += -pb_used * T.DT / T.ETA_D
+
+            step_rows.append({
+                'project': 'FIXED-A%g' % self.a,
+                'day_idx': day_idx,
+                'wind_iloc': wind_iloc,
+                'step': t,
+                'price': float(obs[0]),
+                'wind': float(obs[1]),
+                'P_G': float(obs2[-1]),
+                'P_F': P_F,
+                'viol': int(excess > 0.0),
+                'excess_mw': excess,
+                'pb_cmd': 0.0,
+                'pbrule': pb_used,
+                'SOC': float(obs2[2]),
+                'profit_step': profit_step,
+            })
+
+            obs = deepcopy(obs2)
+            pw_tru = pw_tru2
+
+        day = {
+            'project': 'FIXED-A%g' % self.a,
+            'project_key': 'fixed',
+            'day_idx': day_idx,
+            'wind_iloc': wind_iloc,
+            'wind_col': wind_col,
+            'wind_mean': float(wind_series.mean()),
+            'wind_min': float(wind_series.min()),
+            'wind_max': float(wind_series.max()),
+            'viol_count': viol_count,
+            'viol_excess_mw': viol_excess,
+            'viol_excess_mwh': viol_excess * T.DT,
+            'profit_rmb': profit,
+            'soc_init': self.soc0,
+            'soc_mean': soc_sum / n_steps,
+            'soc_end': soc_end,
+            'charge_mwh': charge_mwh,
+            'discharge_mwh': discharge_mwh,
+            'max_PF': max_pf,
+            'n_steps': n_steps,
+        }
+        return day, step_rows
+
+
+# ===========================================================================
 # 主流程
 # ===========================================================================
 def parse_args():
@@ -351,6 +491,11 @@ def parse_args():
                         'train=镜像各方法训练时的重置方式（td3 系为 U(0.5,5.5)）')
     p.add_argument('--soc0', type=float, default=0.25,
                    help='--soc-init uniform 时的初始 SOC [MWh]（默认 0.25 = env.reset() 的 E）')
+    p.add_argument('--fixed-a', type=float, default=None, metavar='A',
+                   help='**不需要模型**的基线臂：五台轴向因子恒为 A（如 0.33），'
+                        'BESS 完全不动作（pb≡0，SOC 恒定）。可与模型臂同时给（基线先跑）')
+    p.add_argument('--goal', type=float, default=0.0,
+                   help='配合 --fixed-a：第 6 维信号值（本臂不使用，只为动作形状与模型一致）')
     p.add_argument('--viol-limit', type=float, default=3.0, help='波动越限阈值 MW（默认 3.0）')
     p.add_argument('--deg-cost', type=float, default=490.0,
                    help='放电退化成本 元/MWh（默认 490）')
@@ -398,31 +543,38 @@ def main():
     print('=' * 96)
     print_days(days)
 
-    # ---- 2. 模型路径（无参数直接退出，避免交互式卡住）----
+    # ---- 2. 待测对象：固定基线臂 与/或 模型目录（无参数直接退出，避免交互式卡住）----
     explicit = any(getattr(args, k, None) for k in T.PROJECT_ORDER) or args.models
-    if not explicit:
-        raise SystemExit('未提供任何模型路径。示例：\n'
+    fixed_arm = args.fixed_a is not None
+    if not explicit and not fixed_arm:
+        raise SystemExit('未提供任何待测对象。示例：\n'
                          '  python result_statistic/test_four_days.py '
                          '--td3per output/TD3PER-run19\n'
+                         '  python result_statistic/test_four_days.py '
+                         '--fixed-a 0.33 --td3per output/TD3PER-run18 output/TD3PER-run19\n'
                          '用 --list-projects 看支持的方法。')
-    paths = T.resolve_model_paths(args)
+    paths = T.resolve_model_paths(args) if explicit else {}
     keys = list(paths.keys())
-    n_runs = sum(len(v) for v in paths.values())
+    n_runs = sum(len(v) for v in paths.values()) + (1 if fixed_arm else 0)
     n_ep = n_runs * len(days)
-    print('\n将测试 %d 个方法、共 %d 组模型: %s'
-          % (len(keys), n_runs,
-             ', '.join(T.PROJECTS[k]['label'] for k in keys)))
-    print('计划: %d 组模型 × %d 天 = %d 个 episode（每 episode %d 步）→ 合计 %d 步'
+    if fixed_arm:
+        print('\n固定动作基线臂: 风机 a_i ≡ %.4f（五台），BESS 不动作' % args.fixed_a)
+    if keys:
+        print('将测试 %d 个方法、共 %d 组模型: %s'
+              % (len(keys), sum(len(v) for v in paths.values()),
+                 ', '.join(T.PROJECTS[k]['label'] for k in keys)))
+    print('计划: %d 组对象 × %d 天 = %d 个 episode（每 episode %d 步）→ 合计 %d 步'
           % (n_runs, len(days), n_ep, args.episode_length, n_ep * args.episode_length))
     print('口径: 初始 SOC = %s | 越限阈值 %.1f MW | 退化成本 %.0f 元/MWh'
           % ('%.3f MWh（--soc-init uniform）' % args.soc0
              if args.soc_init == 'uniform' else '训练重置（--soc-init train）',
              args.viol_limit, args.deg_cost))
-    wf = [k for k in keys if T.PROJECTS[k].get('matlab', True)]
-    if wf:
+    # 固定臂走 `env.WindBattery`（WFSim 后端），也需要 MATLAB
+    need_matlab = fixed_arm or any(T.PROJECTS[k].get('matlab', True) for k in keys)
+    if need_matlab:
         n_wf_steps = n_ep * args.episode_length
-        print('⚠ 其中 %d 个方法走 WFSim（约 0.3~1 s/步）⇒ 本计划约 %.1f~%.1f 小时'
-              % (len(wf), n_wf_steps * 0.3 / 3600.0, n_wf_steps * 1.0 / 3600.0))
+        print('⚠ 本计划含 WFSim 后端（约 0.3~1 s/步）⇒ 约 %.1f~%.1f 小时'
+              % (n_wf_steps * 0.3 / 3600.0, n_wf_steps * 1.0 / 3600.0))
 
     if args.dry_run:
         print('\n[dry-run] 不加载权重、不推进仿真。')
@@ -457,7 +609,7 @@ def main():
         print('  ⚠ --stub-engine：WFSim 已被**确定性 stub 物理**取代（无需 MATLAB）。')
         print('    本次结果只用于验证"状态 → 动作 → 推进 → 记录"管线，指标数值无物理意义。')
         print('!' * 96)
-    elif wf:
+    elif need_matlab:
         engine = T.ensure_engine()
     else:
         print('  跳过 MATLAB 引擎（所选方法全部为纯 Python 后端）')
@@ -484,17 +636,64 @@ def main():
     # ---- 7. 主循环：每 (方法 × run) 加载一次，跑完四天 ----
     all_days, step_rows_total = [], 0
     t_all = time.time()
+
+    def _run_days(runner, label, run_no, model_name, model_dir, header):
+        """跑完四天并记录（固定臂与模型臂共用这一段）。"""
+        nonlocal step_rows_total
+        print('\n' + '-' * 96)
+        print(header)
+        print('-' * 96)
+        for i, d in enumerate(days):
+            day_idx = i + 1
+            t0 = time.time()
+            day, rows = runner.run_day(d['series'], day_idx, d['iloc'], d['col'])
+            day.update(dict(run=run_no, model=model_name, model_dir=model_dir,
+                            day_tag=d['tag'], day_label=d['label']))
+            all_days.append(day)
+            print('    %-16s (iloc=%3d, 日均 %5.2f m/s): 越限 %4d 次, '
+                  '越限总量 %8.4f MW, 利润 %11.2f 元, 末SOC %5.3f  [%.0fs]'
+                  % (d['tag'], d['iloc'], d['mean'], day['viol_count'],
+                     day['viol_excess_mw'], day['profit_rmb'],
+                     day['soc_end'], time.time() - t0))
+
+            # 逐步明细（带 project/run/model/day 列，便于逐日回看）
+            if not args.no_save_steps and rows:
+                df_rows = pd.DataFrame(rows)
+                df_rows.insert(0, 'run', run_no)
+                df_rows.insert(1, 'model', model_name)
+                df_rows.insert(2, 'day_tag', d['tag'])
+                df_rows.to_csv(steps_csv, mode='a',
+                               header=(step_rows_total == 0), index=False)
+                step_rows_total += len(df_rows)
+
+            if writer is not None:
+                for m in METRICS:
+                    writer.add_scalar('%s/%s' % (label, m), float(day[m]), day_idx)
+                for r in rows:
+                    writer.add_scalar('%s/%s/P_F' % (label, d['tag']),
+                                      float(r['P_F']), int(r['step']))
+                    writer.add_scalar('%s/%s/SOC' % (label, d['tag']),
+                                      float(r['SOC']), int(r['step']))
+
+        # 每跑完一组就把逐日表落盘（中途崩了也不丢）
+        pd.DataFrame(all_days).to_csv(days_csv, index=False, encoding='utf-8-sig')
+
     try:
+        # ---- 7a. 固定动作基线臂（先跑；无模型、无学习成分）----
+        if args.fixed_a is not None:
+            tag = 'FIXED-A%g' % float(args.fixed_a)
+            runner = FixedActionRunner(args.fixed_a, args.goal, engine,
+                                       T.SOC_INIT, args.episode_length)
+            _run_days(runner, tag, 1, tag, '',
+                      '  基线臂 %s：风机动作恒 %.4f（五台），BESS 不动作' % (tag, args.fixed_a))
+
+        # ---- 7b. 模型臂 ----
         for key in keys:
             spec = T.PROJECTS[key]
             label = spec['label']
             for run_idx, model_dir in enumerate(paths[key]):
                 run_no = run_idx + 1
                 model_name = os.path.basename(model_dir.rstrip('\\/'))
-                print('\n' + '-' * 96)
-                print('  方法 %s (%s)  第 %d/%d 组模型  <- %s'
-                      % (label, key, run_no, len(paths[key]), model_dir))
-                print('-' * 96)
                 run_args = T._build_args(device, args.seed,
                                          T._detect_hidden(model_dir, 6))
                 if args.seg_method:
@@ -504,43 +703,9 @@ def main():
                                          soc_init=args.soc_init,
                                          rng=np.random.RandomState(args.seed),
                                          verbose=True)
-                run_days = []
-                for i, d in enumerate(days):
-                    day_idx = i + 1
-                    t0 = time.time()
-                    day, rows = runner.run_day(d['series'], day_idx, d['iloc'], d['col'])
-                    day.update(dict(run=run_no, model=model_name, model_dir=model_dir,
-                                    day_tag=d['tag'], day_label=d['label']))
-                    all_days.append(day)
-                    run_days.append(day)
-                    print('    %-16s (iloc=%3d, 日均 %5.2f m/s): 越限 %4d 次, '
-                          '越限总量 %8.4f MW, 利润 %11.2f 元, 末SOC %5.3f  [%.0fs]'
-                          % (d['tag'], d['iloc'], d['mean'], day['viol_count'],
-                             day['viol_excess_mw'], day['profit_rmb'],
-                             day['soc_end'], time.time() - t0))
-
-                    # 逐步明细（带 project/run/model/day 列，便于逐日回看）
-                    if not args.no_save_steps and rows:
-                        df_rows = pd.DataFrame(rows)
-                        df_rows.insert(0, 'run', run_no)
-                        df_rows.insert(1, 'model', model_name)
-                        df_rows.insert(2, 'day_tag', d['tag'])
-                        df_rows.to_csv(steps_csv, mode='a',
-                                       header=(step_rows_total == 0), index=False)
-                        step_rows_total += len(df_rows)
-
-                    if writer is not None:
-                        for m in METRICS:
-                            writer.add_scalar('%s/%s' % (label, m), float(day[m]), day_idx)
-                        for r in rows:
-                            writer.add_scalar('%s/%s/P_F' % (label, d['tag']),
-                                              float(r['P_F']), int(r['step']))
-                            writer.add_scalar('%s/%s/SOC' % (label, d['tag']),
-                                              float(r['SOC']), int(r['step']))
-
-                # 每跑完一组模型就把该组的逐日表落盘（中途崩了也不丢）
-                pd.DataFrame(all_days).to_csv(days_csv, index=False,
-                                              encoding='utf-8-sig')
+                _run_days(runner, label, run_no, model_name, model_dir,
+                          '  方法 %s (%s)  第 %d/%d 组模型  <- %s'
+                          % (label, key, run_no, len(paths[key]), model_dir))
     finally:
         if writer is not None:
             writer.close()
