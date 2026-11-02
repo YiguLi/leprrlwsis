@@ -39,11 +39,13 @@ U_EDGES = (3.5, 5.0, 7.0, 9.0, 11.0, 13.0, 16.0, 20.0, 25.001)
 def load_ckpt(path):
     ck = torch.load(path, map_location='cpu', weights_only=False)
     m = ck['meta']
-    if m.get('arch', 'v1') == 'v6':
-        q = Critic(m['state_dim'], 1, arch='v6')
-    else:
+    arch = str(m.get('arch', 'v1'))
+    if arch == 'v1':
         q = C.make_critic(m['state_dim'], 1, m.get('hidden1', 16),
                           m.get('hidden2', 100), seed=None, bias=m.get('bias0'))
+    else:
+        q = Critic(m['state_dim'], 1, hidden1=m.get('hidden1', 16),
+                   hidden2=m.get('hidden2', 100), arch=arch)
     q.load_state_dict(ck['model'])
     q.eval()
     return q, m

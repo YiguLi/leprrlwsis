@@ -42,6 +42,16 @@ def fanout_init(size, fanout=None):
 #: 合并输入恒为 96 ⇒ H(nb_actions=6) 与 L(nb_actions=1) 共用同一套 merge 形状。
 V6_DIMS = dict(s=(32, 32), a=(64, 64), merge=(128, 256, 256, 128))
 
+#: v7 critic 的固定宽度（**与 --hidden1/--hidden2 无关**）。
+#:
+#: 2026-11-02 按用户口径新增：**action 与 state 在最开始直接拼接**，然后
+#:     input (= ns + na') → 400 → 300 → 400 → 1
+#: 即"动作首层进网"的 3 隐藏层版本（v1af 是 4·hidden1 → hidden2 → 80 → 50）。
+#: 动机：v1af 的 4·hidden1=1600 首层对 10 维输入是 160 倍扩张，参数几乎全在首层，
+#: 后面的 300→80→50 才是真正的非线性栈；v7 把宽度改成 **400→300→400（宽-窄-宽）**，
+#: 参数量 245 501（ns=4, na=6），且不需要 --critic_action_first。
+V7_DIMS = (400, 300, 400)
+
 class Actor(nn.Module):
     def __init__(self, nb_states, nb_actions, hidden1=400, hidden2=300, init_w=3e-3):
         super(Actor, self).__init__()
@@ -109,13 +119,15 @@ class Critic(nn.Module):
                  feat_power=False, feat_power_k=1.357e-3, feat_u_index=1,
                  feat_u_scale=10.0, feat_nt=5):
         super(Critic, self).__init__()
-        # 六种结构（默认 v1 = 历史口径，逐位不变）：
+        # 七种结构（默认 v1 = 历史口径，逐位不变）：
         #   v1    : fc1(x)→fc4→cat(a)→fc2→fc5→fc3
         #   v1af  : cat(x,a)→fc1(4·hidden1)→fc4→fc2→fc5→fc3        （动作首层进网）
         #   v2    : s: ns→hidden1→hidden2  ∥  a: na→32→64
         #           合并 [hidden2+64] →(square, 带残差)→128→64→1   （双流 + 慢压缩）
         #   v6    : s: ns→32→32  ∥  a: na'→64→64
         #           合并 [32+64]=96 →128→256→256→128→1   （**原始 a 不再重复拼入**）
+        #   v7    : cat(x,a) → 400→300→400→1   （**动作与状态一开始就拼接**，
+        #           与 v1af 同一动机但宽度是显式规格 V7_DIMS）
         #   v6old : 2026-10-24 的旧 v6（s 4→32 ∥ a→32，cat(32+32+na)→256→256→128→1；
         #           合并时把原始 a 再传一次）。**只保留给历史 checkpoint 复现**
         #           （output/V6/AIFFLOR-run1、documentation/critic_arch_v6_review.md），
@@ -197,6 +209,18 @@ class Critic(nn.Module):
             self.m2 = nn.Linear(w, 128)
             self.m3 = nn.Linear(128, 64)
             self.out = nn.Linear(64, 1)
+        elif self.arch == 'v7':
+            # 用户口径（2026-11-02）：action 与 state **在最开始直接拼接**，然后
+            #   input (ns + na') → 400 → 300 → 400 → 1
+            # 与 v1af 的区别只在宽度口径：v1af = 4·hidden1(1600) → hidden2(300) → 80 → 50，
+            # 参数几乎全压在首层（10→1600 是 160 倍扩张）；v7 是 400→300→400 的
+            # "宽-窄-宽"栈，深度相同但容量分布均匀（见 documentation/critic_arch_v7.md）。
+            # ⚠ 与 v5/v6 一样，宽度写死在 V7_DIMS ⇒ --hidden1/--hidden2 不生效。
+            _h1, _h2, _h3 = V7_DIMS
+            self.h1 = nn.Linear(nb_states + self.in_actions, _h1)
+            self.h2 = nn.Linear(_h1, _h2)
+            self.h3 = nn.Linear(_h2, _h3)
+            self.out = nn.Linear(_h3, 1)
         elif self.arch == 'v1af':
             self.fc1 = nn.Linear(nb_states + self.in_actions, 4 * hidden1)
             self.fc4 = nn.Linear(4 * hidden1, hidden2)
@@ -238,6 +262,11 @@ class Critic(nn.Module):
                 self.out.weight.data.uniform_(-init_w, init_w)
         elif self.arch in ('v2', 'v3'):
             for m in (self.s1, self.s2, self.a1, self.a2, self.m1, self.m2, self.m3):
+                m.weight.data = fanout_init(m.weight.data.size())
+            if self.out_init != 'fanin':
+                self.out.weight.data.uniform_(-init_w, init_w)
+        elif self.arch == 'v7':
+            for m in (self.h1, self.h2, self.h3):
                 m.weight.data = fanout_init(m.weight.data.size())
             if self.out_init != 'fanin':
                 self.out.weight.data.uniform_(-init_w, init_w)
@@ -296,6 +325,12 @@ class Critic(nn.Module):
             m = self.relu(self.m2(m))
             m = self.relu(self.m3(m))
             return self.out(m)
+        if self.arch == 'v7':
+            z = torch.cat([x, a], 1)                  # **动作与状态一开始就拼接**
+            z = self.relu(self.h1(z))
+            z = self.relu(self.h2(z))
+            z = self.relu(self.h3(z))
+            return self.out(z)
         if self.action_first:
             out = self.relu(self.fc1(torch.cat([x, a], 1)))
             out = self.fc4(out)
@@ -357,12 +392,16 @@ class Critic_L(nn.Module):
         return out
 
 def infer_arch(sd, ns=4, na=6):
-    """按 state_dict 推断 critic 结构（v1 / v1af / v2 / v3 / v4 / v5 / v6 / v6old）。
+    """按 state_dict 推断 critic 结构（v1 / v1af / v2 / v3 / v4 / v5 / v6 / v6old / v7）。
 
     ⚠ 判据必须用 m1 的**完整形状**，不能只看 `shape[1]`：v4 的 m1 是方阵 (w,w)，
       v5 的是 (100,48)，v6 的是 (128,96)，旧 v6（v6old）的是 (256, 32+32+na')
       —— 只看输入维时 v4/v5 在 hidden1=16 会撞车（都是 48）。
+    v7 用 h1/h2/h3/out 命名且**没有** s1/fc1，判据唯一（`h1.weight` 只有 v7 有）。
     """
+    # v7: cat(x,a) → 400→300→400→1（无 s1/a1/fc1，只有 h1/h2/h3/out）
+    if 'h1.weight' in sd:
+        return 'v7'
     if 's1.weight' in sd:
         if 'm4.weight' in sd:                         # v6 独有：96→128→256→256→128
             return 'v6'
@@ -385,6 +424,8 @@ def infer_arch(sd, ns=4, na=6):
 
 def feat_from_sd(sd, ns=4, na=6, hidden1=16, hidden2=100):
     """按 state_dict 判断是否启用了 P(a,u)/5 特征（动作输入多 1 维）。"""
+    if 'h1.weight' in sd:                        # v7: 动作与状态首层拼接
+        return sd['h1.weight'].shape[1] == ns + na + 1
     if 'a1.weight' in sd:
         return sd['a1.weight'].shape[1] == na + 1
     if 'fc1.weight' in sd:                       # v1af: 动作与状态先拼接

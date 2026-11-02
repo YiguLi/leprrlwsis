@@ -315,13 +315,21 @@ corr(WFSim, FLORIS 标定后) = 0.999959        ← 轨迹几乎一致
 `--critic_arch` 的**默认值 = `v6`**（2026-10-29 起；2026-10 之前是 `v2`，更早是 `v1`）：
 
 ```text
+v7 : cat(state, action) → 400→300→400→1                        # 动作与状态一开始就拼接（2026-11-02 新增）
 v6 : s→32→32 ∥ a→64→64 → [32+64]=96 → 128→256→256→128→1   # 原始 a 不再重复拼入
 v2 : s: ns→hidden1→hidden2 ∥ a→32→64 → square(带残差)→128→64→1   # 旧生产默认
 v1 : fc1(x)→fc4→cat(a)→fc2→fc5→fc3                            # 历史口径
 ```
 
+- `v7` 的宽度写死在 `model.V7_DIMS`（`--hidden1/--hidden2` 对它**不生效**，与 v5/v6 同口径）；
+  参数量 245 501（ns=4, na=6）/ 247 101（`--critic_wind5 1` 的 8 维 state）。
+  与 `v1af` 同属"动作首层进网"，但宽度是显式 400/300/400 的规格。
+  离线 C1 基准（`agentutil/critictest`）上与 v6 的对照见
+  `documentation/critic_arch_v7.md`。
 - 该开关同时作用于 **H 和 L 两个 critic**（HSRL 下 `agent_L` 共用同一 `args`；
   L 的动作维 = 1，`--critic_feat_power` 会因 `nb_actions ≠ feat_nt+1` 自动关闭）。
+- `infer_arch` 按 checkpoint 的 `h1/h2/h3/out` 键唯一识别 v7（`build_critic_from_sd`、
+  `td3per.SP_TD3.load_weights` 都能自动重建）。
 - 其它默认：`--critic_act relu`、`--critic_out_init fanin`、`--critic_bias_init none`。
 - **`--critic_wind5` 仍默认 0（关闭）** —— 需要 8 维 critic state 时必须显式传 1。
 - 复现 2026-10 之前的 v2 run：显式传 `--critic_arch v2`。

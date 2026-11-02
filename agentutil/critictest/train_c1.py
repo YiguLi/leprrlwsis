@@ -84,20 +84,32 @@ def inverse_of(out, kind):
     raise ValueError(kind)
 
 
+def _out_head(net):
+    """与 `hsrl_agent_init._out_head` 同口径：v1/v1af 用 fc3，其它结构用 out。"""
+    for name in ('fc3', 'out'):
+        layer = getattr(net, name, None)
+        if layer is not None and hasattr(layer, 'bias'):
+            return layer
+    return None
+
+
 def make_pair(ns, na, arch, seed, bias0, hidden1=16, hidden2=100):
-    """v1 用 PER 原结构；v6 用 `model.Critic(arch='v6')`（固定 V6_DIMS）。"""
-    if arch == 'v6':
-        if seed is not None:
-            torch.manual_seed(int(seed))
-        q = Critic(int(ns), int(na), arch='v6')
-        qt = Critic(int(ns), int(na), arch='v6')
-        if bias0 is not None:
-            with torch.no_grad():
-                q.out.bias.fill_(float(bias0))
-                qt.out.bias.fill_(float(bias0))
-        C.hard_update(qt, q)
-        return q, qt
-    return C.make_critic_pair(ns, na, hidden1, hidden2, seed=seed, bias=bias0)
+    """v1 用 PER 原结构（逐位不变）；其它 arch 直接用 `model.Critic(arch=arch)`。
+
+    v6/v7 的宽度写死在 `model.V6_DIMS` / `model.V7_DIMS`，`hidden1/hidden2` 不生效。
+    """
+    if arch == 'v1':
+        return C.make_critic_pair(ns, na, hidden1, hidden2, seed=seed, bias=bias0)
+    if seed is not None:
+        torch.manual_seed(int(seed))
+    q = Critic(int(ns), int(na), arch=str(arch))
+    qt = Critic(int(ns), int(na), arch=str(arch))
+    if bias0 is not None:
+        with torch.no_grad():
+            _out_head(q).bias.fill_(float(bias0))
+            _out_head(qt).bias.fill_(float(bias0))
+    C.hard_update(qt, q)
+    return q, qt
 
 
 def predict(model, state, a, kind, batch=8192):
@@ -122,7 +134,8 @@ def main():
     ap.add_argument('--bsize', type=int, default=256)
     ap.add_argument('--lr', type=float, default=1e-3)
     ap.add_argument('--eta_min', type=float, default=1e-4)
-    ap.add_argument('--arch', default='v1', choices=('v1', 'v6'))
+    ap.add_argument('--arch', default='v1',
+                    choices=('v1', 'v1af', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7'))
     ap.add_argument('--hidden1', type=int, default=16)
     ap.add_argument('--hidden2', type=int, default=100)
     ap.add_argument('--tau', type=float, default=1e-3)
