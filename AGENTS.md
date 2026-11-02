@@ -72,6 +72,9 @@
   `compare_*.py`、`extract_training_wind_days.py`、`generate_day_sequence.py`。
 - **方向性约束**：`agentutil/` 可以 import 项目模块；**项目代码不得 import
   `agentutil/`**（否则训练路径会被工具目录绑架）。
+- **已登记的例外**：根目录 `result_statistic/`（用户 2026-11 明确要求放在仓库根）
+  = 四固定风速日的评测脚本目录。它同样**只能** import 项目模块，项目代码不得
+  反向 import 它。
 - **新脚本必须自带路径 bootstrap**（可被任意 CWD、任意路径调用）：
 
   ```python
