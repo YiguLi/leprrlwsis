@@ -52,6 +52,14 @@ V6_DIMS = dict(s=(32, 32), a=(64, 64), merge=(128, 256, 256, 128))
 #: 参数量 245 501（ns=4, na=6），且不需要 --critic_action_first。
 V7_DIMS = (400, 300, 400)
 
+#: v7 的 **actor** 隐层宽度（2026-11-03 用户口径：actor 与 critic 同宽 400-300-400）。
+#:
+#: `model.Actor` 的形状恒为 `ns → hidden1 → hidden2 → hidden1 → nb_actions`，
+#: 所以 `hidden1=400, hidden2=300` 恰好就是 400→300→400；输出层仍是 fc4（未做 squash）。
+#: 只对显式声明 `actor_arch='v7'` 的 agent 生效（aifflor 只对 **H 层** 传；
+#: L 层 1 维动作仍用 `--hidden1/--hidden2`，避免 1 维动作网被放大 100 倍）。
+V7_ACTOR_DIMS = (400, 300)
+
 class Actor(nn.Module):
     def __init__(self, nb_states, nb_actions, hidden1=400, hidden2=300, init_w=3e-3):
         super(Actor, self).__init__()

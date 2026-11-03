@@ -326,6 +326,13 @@ v1 : fc1(x)→fc4→cat(a)→fc2→fc5→fc3                            # 历史
   与 `v1af` 同属"动作首层进网"，但宽度是显式 400/300/400 的规格。
   离线 C1 基准（`agentutil/critictest`）上与 v6 的对照见
   `documentation/critic_arch_v7.md`。
+- **v7 的 actor 也改为 400-300-400**（2026-11-03）：`model.Actor` 的形状恒为
+  `state→hidden1→hidden2→hidden1→action`，所以 v7 下 H 层 actor 用
+  `model.V7_ACTOR_DIMS=(400,300)` ⇒ **state→400→300→400→action**，参数量 **245 106**
+  （ns=4, na=6；此前 16/100 只有 3 445）。`--hidden1/--hidden2` 在 v7 下**只作用于 L 层**
+  （L 是 1 维 BESS 动作，仍 16/100，避免无谓放大）。
+  ⚠ 因此 v7 的 actor checkpoint（`actor_6.pkl`）与 2026-11-03 之前的 v7 run
+  （如 `AIFFLOR-V7-run20`，16/100）**形状不兼容**，不能直接续训/加载。
 - 该开关同时作用于 **H 和 L 两个 critic**（HSRL 下 `agent_L` 共用同一 `args`；
   L 的动作维 = 1，`--critic_feat_power` 会因 `nb_actions ≠ feat_nt+1` 自动关闭）。
 - `infer_arch` 按 checkpoint 的 `h1/h2/h3/out` 键唯一识别 v7（`build_critic_from_sd`、

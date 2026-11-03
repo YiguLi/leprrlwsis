@@ -273,7 +273,8 @@ def section_g():
     import ast
     path = os.path.join(ROOT, 'aifflor', 'aifflor_main.py')
     with open(path, encoding='utf-8') as f:
-        tree = ast.parse(f.read(), filename=path)
+        src = f.read()
+    tree = ast.parse(src, filename=path)
     arg = None
     for node in ast.walk(tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
@@ -299,6 +300,13 @@ def section_g():
               encoding='utf-8') as f:
         tsrc = f.read()
     ok("'v7'" in tsrc, '离线 C1 基准 train_c1.py 支持 --arch v7')
+    # ---- v7 的 actor 宽度接线（2026-11-03：actor 与 critic 同宽）----
+    ok(tuple(M.V7_ACTOR_DIMS) == (400, 300), 'model.V7_ACTOR_DIMS = (400, 300)')
+    ok('V7_ACTOR_DIMS' in dsrc and "actor_arch" in dsrc,
+       'aifflor_ddpg 按 actor_arch 覆写 actor 宽度')
+    ok('actor_arch=' in src and "_arch_eff == 'v7'" in src,
+       'aifflor_main 只给 H 层传 actor_arch=v7（L 层不放大）')
+    ok("'[actor] v7" in src, 'main 启动日志会打印 v7 的 actor 结构')
 
 
 def section_h():
@@ -325,12 +333,30 @@ def section_h():
         warmup_wt_sched='lhs',
     )
     torch.manual_seed(0)
-    ag = SP_TD3(nb_states=4, nb_actions=6, args=args)
+    ag = SP_TD3(nb_states=4, nb_actions=6, args=args, actor_arch='v7')
     names = ('critic_p', 'critic_target_p', 'critic_p2', 'critic_target_p2',
              'critic_c', 'critic_target_c', 'critic_c2', 'critic_target_c2')
     ok(all(getattr(ag, n).arch == 'v7' for n in names),
        '8 个 critic/target 全部是 v7')
     ok(npar(ag.critic_p) == 245501, 'critic_p 参数 = 245501（ns=4, na=6）')
+    # ---- v7 的 actor 与 critic 同宽：ns→400→300→400→na ----
+    shapes = [tuple(m.weight.shape) for m in (ag.actor.fc1, ag.actor.fc2,
+                                              ag.actor.fc3, ag.actor.fc4)]
+    ok(shapes == [(400, 4), (300, 400), (400, 300), (6, 400)],
+       'v7: H actor 层形状 = state→400→300→400→action（实测 %s）' % (shapes,))
+    ok(npar(ag.actor) == 245106, 'v7: H actor 参数 = 245 106（实测 %d）' % npar(ag.actor))
+    ok(tuple(ag.actor_target.fc2.weight.shape) == (300, 400),
+       'v7: actor_target 同宽（软更新对象一致）')
+    # ---- L 层不跟着放大：actor_arch=None ⇒ 仍是 --hidden1/--hidden2 ----
+    args_l = SimpleNamespace(**vars(args))
+    args_l.critic_arch = 'v7'
+    agL = SP_TD3(nb_states=6, nb_actions=1, args=args_l)
+    ok(npar(agL.critic_p) == 244301, 'L: v7 critic 参数 = 244 301（ns=6, na=1）')
+    ok(tuple(agL.actor.fc1.weight.shape) == (16, 6)
+       and tuple(agL.actor.fc2.weight.shape) == (100, 16),
+       'L: actor 仍 16/100（不被 v7 放大；实测 fc1=%s, fc2=%s）'
+       % (tuple(agL.actor.fc1.weight.shape), tuple(agL.actor.fc2.weight.shape)))
+    ok(npar(agL.actor) == 3445, 'L: actor 参数 = 3 445（实测 %d）' % npar(agL.actor))
     # 注：这里**不调用 update_policy()** —— 它要经过 PER_buffer 的 `np.array(obs, copy=False)`，
     #   该写法在 NumPy 2.x 下对"需要拷贝"的输入会抛错（与本结构无关的既有问题）。
     #   改为直接对 agent 里的 critic 做 1 步 Adam，验证优化器/反向真的接通。
@@ -368,8 +394,11 @@ def section_h():
     os.makedirs(d, exist_ok=True)          # save_model 不会自己建目录
     try:
         ag.save_model(d)          # 只存 4 个 online critic（+actor），target 由 load_weights 同步
-        ag2 = SP_TD3(nb_states=4, nb_actions=6, args=args)
+        ag2 = SP_TD3(nb_states=4, nb_actions=6, args=args, actor_arch='v7')
         ag2.load_weights(d)
+        ok(tuple(ag2.actor.fc2.weight.shape) == (300, 400) and
+           bool(torch.equal(ag.actor.fc4.weight, ag2.actor.fc4.weight)),
+           'v7 actor checkpoint（400-300-400）能存能读')
         online = names[::2]       # critic_p / critic_p2 / critic_c / critic_c2
         same = all(bool(torch.equal(getattr(ag, n).out.weight.nan_to_num(),
                                     getattr(ag2, n).out.weight.nan_to_num()))

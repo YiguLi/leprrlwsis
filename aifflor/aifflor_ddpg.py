@@ -6,6 +6,7 @@ import torch.nn as nn
 from torch.optim import Adam
 
 from model import (Actor, Critic, AuxModel, proj_farm_level,
+                   V7_ACTOR_DIMS,
                    proj_lin_wt, proj_lin_wt_np,
                    expand_lin_wt, expand_lin_wt_np,
                    proj_scalar_wt, proj_scalar_wt_np)
@@ -55,7 +56,7 @@ class SP_TD3(object):
                  wt_noise_floor=0.01,
                  nstep=1, target_agg='min', critic_nb_states=None,
                  wt_noise_mode='wide', wt_noise_min=0.0, wt_noise_max=0.05,
-                 branch_mix=0.0, branch_sup_beta=0.0):
+                 branch_mix=0.0, branch_sup_beta=0.0, actor_arch=None):
 
         # Determine device first
         self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -108,8 +109,16 @@ class SP_TD3(object):
         critic_cfg['out_init'] = str(getattr(args, 'critic_out_init', '3e3') or '3e3')
         critic_cfg['feat_power'] = bool(int(getattr(args, 'critic_feat_power', 0) or 0))
         critic_cfg['feat_power_k'] = float(getattr(args, 'critic_feat_power_k', 1.357e-3))
-        self.actor = Actor(self.nb_states, self.actor_nb_actions, **net_cfg)
-        self.actor_target = Actor(self.nb_states, self.actor_nb_actions, **net_cfg)
+        # ---- actor 宽度（2026-11-03，用户口径：v7 下 actor 与 critic 同宽）----
+        #   `model.Actor` 的形状恒为 ns→hidden1→hidden2→hidden1→na ⇒ 400/300 即 400-300-400。
+        #   只对**显式传 `actor_arch='v7'`** 的 agent 生效：aifflor 主循环只给 **H 层** 传
+        #   （L 层是 1 维 BESS 动作，仍用 --hidden1/--hidden2，不把 1 维网放大 100 倍）。
+        self.actor_arch = str(actor_arch or 'inherit')
+        actor_cfg = dict(net_cfg)
+        if self.actor_arch == 'v7':
+            actor_cfg['hidden1'], actor_cfg['hidden2'] = V7_ACTOR_DIMS
+        self.actor = Actor(self.nb_states, self.actor_nb_actions, **actor_cfg)
+        self.actor_target = Actor(self.nb_states, self.actor_nb_actions, **actor_cfg)
         self.actor_optim = Adam(self.actor.parameters(), lr=args.prate)
 
         # ---- TD3: twin critics per channel ----

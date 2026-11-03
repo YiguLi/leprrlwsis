@@ -96,6 +96,7 @@ from aifflor.aifflor_ddpg import SP_TD3
 from model import proj_farm_level as _proj_farm_level   # 场级降载投影 (--farm_level)
 from model import proj_lin_wt_np as _proj_lin_wt_np     # 线性行为分支 (--lin_wt)
 from model import wt_bias_values as _wt_bias_values     # 3 输出头的 bias 映射
+from model import V7_ACTOR_DIMS as _V7_ACTOR_DIMS       # v7 的 actor 宽度 (400, 300)
 from aifflor import aifflor_hsrl as hsrl   # --hsrl 分支的全部口径 (单一真源)
 from aifflor import aifflor_branch as abr  # 同块首宽动作覆盖 (branch) 的全部口径
 from util import *
@@ -2436,11 +2437,17 @@ if __name__ == "__main__":
             DIAG['lam_fixed'], DIAG['pen_h']))
     # 生产口径的 critic 结构（**v6** + 无 bias，2026-10-29 起为默认；--critic_arch/--critic_bias_init 可覆盖）
     #   历史：2026-10 之前是 v2；`--critic_wind5` 仍**默认关闭**（0）。
+    _arch_eff = ('v1af' if int(getattr(args, 'critic_action_first', 0) or 0)
+                 else str(getattr(args, 'critic_arch', 'v6') or 'v6'))
     prCyan('[critic] arch={} act={} out_init={} bias_init={} rate={} cost_clip={} warmup_wt_sched={}'.format(
-        'v1af' if int(getattr(args, 'critic_action_first', 0) or 0) else getattr(args, 'critic_arch', 'v6'),
+        _arch_eff,
         getattr(args, 'critic_act', 'relu'), getattr(args, 'critic_out_init', '3e3'),
         getattr(args, 'critic_bias_init', 'none'), getattr(args, 'rate', 0.01),
         getattr(args, 'cost_clip', 1), getattr(args, 'warmup_wt_sched', 'lhs')))
+    if _arch_eff == 'v7':
+        prCyan('[actor] v7 ⇒ actor 与 critic 同宽: state→{0}→{1}→{0}→action '
+               '(model.V7_ACTOR_DIMS={2}; --hidden1/--hidden2 只作用于 L 层)'
+               .format(_V7_ACTOR_DIMS[0], _V7_ACTOR_DIMS[1], _V7_ACTOR_DIMS))
     if int(getattr(args, 'scalar_wt', 0) or 0):
         prLightPurple('[baseline] 动作空间 = 1 个自由度: 五台风机轴向因子全部 = a[0]'
                   '（a_i = a_0；第 1..4 维存在但无用, 梯度恒 0）；g 独立。'
@@ -2592,7 +2599,8 @@ if __name__ == "__main__":
                      sig_noise_min=args.sig_noise_min,
                      wt_noise_floor=args.wt_noise_floor,
                      nstep=args.nstep, target_agg=args.target_agg,
-                     branch_mix=_branch_frac, branch_sup_beta=_branch_beta)
+                     branch_mix=_branch_frac, branch_sup_beta=_branch_beta,
+                     actor_arch=('v7' if _arch_eff == 'v7' else None))
     print('[H] nstep={} target_agg={} (n 步回报: 自助传播深度 50->{:.1f}; '
           '复现历史 run1~run10 请传 --nstep 1)'.format(
               args.nstep, args.target_agg, 50.0 / max(1, args.nstep)))

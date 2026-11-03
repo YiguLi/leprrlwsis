@@ -1,8 +1,10 @@
 # v7 critic：动作与状态首层拼接（input → 400 → 300 → 400 → 1）
 
-> 实施日期：2026-11-02 ｜ 契约测试：`python agentutil/test_critic_arch_v7.py`（69 项）
+> 实施日期：2026-11-02（critic）｜ 2026-11-03 追加：**v7 的 actor 也改为 400-300-400**（见 §1.2）
+> 契约测试：`python agentutil/test_critic_arch_v7.py`（80 项）
 > 离线性能对照：`agentutil/critictest`（C1 五步块基准），见 §4
-> 结构定义：`model.Critic(arch='v7')`，宽度常量 `model.V7_DIMS = (400, 300, 400)`
+> 结构定义：`model.Critic(arch='v7')`，宽度常量 `model.V7_DIMS = (400, 300, 400)`；
+> actor 宽度 `model.V7_ACTOR_DIMS = (400, 300)`
 
 ## 1. 口径
 
@@ -46,6 +48,30 @@ input = cat(state, action)          # ns + na'（na' = na，或 na+1 开 --criti
 | 下层 L（5 维 state + 1 维动作） | 6 | 243 901 |
 | `--critic_feat_power 1`（动作 +1） | 11 | 245 901 |
 
+### 1.2 actor 也改为 400-300-400（2026-11-03）
+
+`model.Actor` 的形状恒为 `state → hidden1 → hidden2 → hidden1 → action`
+（输出层 `fc4` 不做 squash），所以 v7 下把 `hidden1/hidden2` 设成
+`model.V7_ACTOR_DIMS = (400, 300)` 就得到 **state→400→300→400→action**：
+
+| 层 | 形状（ns=4, na=6） | 参数 |
+|---|---|---|
+| fc1 | 4→400 | 2 000 |
+| fc2 | 400→300 | 120 300 |
+| fc3 | 300→400 | 120 400 |
+| fc4（输出，±3e-3 初始化） | 400→6 | 2 406 |
+| **合计** | | **245 106**（旧 16/100 只有 3 445） |
+
+接线的三条边界：
+
+1. **只对 H 层生效**：`aifflor_main` 只给 `agent_H` 传 `actor_arch='v7'`
+   （`SP_TD3(..., actor_arch='v7')`）；`agent_L` 不传 ⇒ L 的 1 维 BESS actor
+   仍是 `--hidden1/--hidden2`（16/100，3 445 参数），避免 1 维动作网被放大 100 倍。
+2. `--hidden1/--hidden2` 在 v7 下**只作用于 L 层**；H actor 宽度写死在 `V7_ACTOR_DIMS`。
+3. ⚠ **checkpoint 形状变了**：2026-11-03 之前训练的 v7 run（如 `AIFFLOR-V7-run20`）
+   actor 是 16/100，**不能**直接加载进新 actor（`load_state_dict` 会报形状不符）；
+   续训/评测旧 run 需要按旧宽度重建 actor。
+
 ## 2. 接线与可恢复性
 
 - 层名 `h1/h2/h3/out`：输出层叫 **`out`** ⇒ `hsrl_agent_init._out_head` 能认到它
@@ -55,7 +81,10 @@ input = cat(state, action)          # ns + na'（na' = na，或 na+1 开 --criti
   `feat_from_sd` 按 `h1.weight.shape[1] == ns + na (+1)` 判 `--critic_feat_power`。
 - `aifflor_main.py --critic_arch v7`：choices 已含 v7，**默认仍是 v6**（不改生产口径）；
   `--critic_action_first 1` 仍优先映射到 `v1af`。
-- `aifflor_ddpg.SP_TD3` 把 `args.critic_arch` 透传给 4 个 critic（+4 个 target）。
+- `aifflor_ddpg.SP_TD3` 把 `args.critic_arch` 透传给 4 个 critic（+4 个 target）；
+  v7 时 H 层的 `agent_H = SP_TD3(..., actor_arch='v7')` 会把 actor/actor_target
+  建成 400-300-400，并在启动日志打印
+  `[actor] v7 ⇒ actor 与 critic 同宽: state→400→300→400→action`。
 
 ## 3. 静态性能（契约测试实测）
 
