@@ -11,9 +11,14 @@
                             第 1..4 维存在但无用（投影线性 ⇒ 对它们的梯度恒为 0）。
                             第 6 维 g（块总放电量）仍是独立自由度。
 
-其余全部沿用 aifflor 当前默认（HSRL、nstep=5、γ=0.95、utd_h=4、bsize=256、
+其余全部沿用 aifflor 当前默认（HSRL、nstep=5、γ=0.95、utd_h=4、
 rmsize=40000、PER α=0.6/β=0.4、warmup=7200、wt_noise=0.05→0、s_p=1000/s_c=100、
 λ∈[2,50]、d_block=15、FLORIS 环境、加噪风速池）。
+
+⚠ 2026-11-03 起 aifflor 的 `--bsize`/`--rate` 默认改成 **32 / 0.01**
+（tau 仍 0.001），本 launcher 不固定这三项 ⇒ **现在跑 baseline 会自动用新默认**。
+要复现 2026-11-03 之前的历史 baseline（256 / 0.003），加：
+`--extra --bsize 256 --rate 0.003`。
 
 用法：
     python agentutil/launch_baseline_scalar_a.py                  # 跑满（默认输出目录）

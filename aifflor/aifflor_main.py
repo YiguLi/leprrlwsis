@@ -1940,9 +1940,10 @@ if __name__ == "__main__":
                         type=int,
                         help='hidden num of second fully connect layer')
     parser.add_argument('--rate',
-                        default=0.003,
+                        default=0.01,
                         type=float,
-                        help='learning rate')
+                        help='critic 学习率（2026-11-03 起默认 **0.01**；此前 0.003。'
+                             '依据：v7 run20 的表现，用户口径）')
     parser.add_argument('--prate',
                         default=0.0001,
                         type=float,
@@ -1994,8 +1995,9 @@ if __name__ == "__main__":
                         help='越界乘性惩罚系数 c: 风机收益 × exp(-c·Σ前5维越界量) '
                              '(默认 %.1f = **关闭**; 5.0 = 已证伪的旧口径, 见 README run14 分析)'
                              % VIOL_DERATE_COEF)
-    parser.add_argument('--bsize', default=256, type=int,
-                        help='minibatch size')
+    parser.add_argument('--bsize', default=32, type=int,
+                        help='minibatch size（2026-11-03 起默认 **32**；此前 256。'
+                             '依据：v7 run20 的表现，用户口径）')
     # ---- memory 容量 ----
     #   ✅ 口径 = **条数直接就是环境步数**（2026-10 更正，去掉历史遗留的 x5）:
     #   旧注释写 "1 条 = n 个块 = 5n 个环境步 ⇒ rmsize x 5n"，那是**基于一个错误前提**
@@ -2014,7 +2016,8 @@ if __name__ == "__main__":
     parser.add_argument('--tau',
                         default=0.001,
                         type=float,
-                        help='moving average for target network')
+                        help='目标网络软更新系数（moving average for target network）。'
+                             '2026-11-03 核对：默认**本来就是 0.001**，未改动')
     parser.add_argument('--ou_theta',
                         default=0.15,
                         type=float,
@@ -2436,7 +2439,7 @@ if __name__ == "__main__":
     prCyan('[critic] arch={} act={} out_init={} bias_init={} rate={} cost_clip={} warmup_wt_sched={}'.format(
         'v1af' if int(getattr(args, 'critic_action_first', 0) or 0) else getattr(args, 'critic_arch', 'v6'),
         getattr(args, 'critic_act', 'relu'), getattr(args, 'critic_out_init', '3e3'),
-        getattr(args, 'critic_bias_init', 'none'), getattr(args, 'rate', 0.003),
+        getattr(args, 'critic_bias_init', 'none'), getattr(args, 'rate', 0.01),
         getattr(args, 'cost_clip', 1), getattr(args, 'warmup_wt_sched', 'lhs')))
     if int(getattr(args, 'scalar_wt', 0) or 0):
         prLightPurple('[baseline] 动作空间 = 1 个自由度: 五台风机轴向因子全部 = a[0]'
