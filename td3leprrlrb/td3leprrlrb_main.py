@@ -991,6 +991,11 @@ if __name__ == "__main__":
                         default='TD3LEPRRLRB',
                         type=str,
                         help='open-ai gym environment (决定 output/<env>-runN 目录名)')
+    parser.add_argument('--critic_arch', default='v7',
+                        choices=['v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7'],
+                        help='critic/actor 结构（2026-11-04 起默认 **v7**）: '
+                             'v7 = critic cat(s,a)→400→300→400→1 + actor s→400→300→400→a；'
+                             'v1 = 历史 16/100（复现旧 run / 加载旧 checkpoint 用）')
     parser.add_argument('--hidden1',
                         default=16,
                         type=int,

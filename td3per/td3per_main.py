@@ -1109,14 +1109,16 @@ if __name__ == "__main__":
                         type=int,
                         help='hidden num of second fully connect layer')
     # ---- 上层/下层 critic 结构（v6 = model.Critic 的双流新结构）----
-    #   2026-10 起**默认 v6**（与 aifflor 同源，`model.V6_DIMS`）:
-    #       s: 4(+相位) → 32 → 32  ∥  a: 6 → 64 → 64
-    #       cat(32+64)=96 → 128 → 256 → 256 → 128 → 1   （原始 a 不再重复拼入）
+    #   2026-11-04 起**默认 v7**（与 aifflor 同源）:
+    #       critic: cat(s,a) → 400 → 300 → 400 → 1
+    #       actor : s → 400 → 300 → 400 → a
+    #   此前默认 v6（s: 4(+相位)→32→32 ∥ a: 6→64→64，cat=96→128→256→256→128→1）。
     #   `v1` = 改造前的历史结构（`--hidden1/--hidden2` 生效）⇒ 复现历史 run 请传
-    #   `--critic_arch v1`。v6 下 `--hidden1/--hidden2` **不生效**（宽度写死在 V6_DIMS）。
-    parser.add_argument('--critic_arch', default='v6',
-                        choices=['v1', 'v1af', 'v2', 'v3', 'v4', 'v5', 'v6'],
-                        help='critic 结构（默认 **v6**，2026-10 起）: '
+    #   `--critic_arch v1`。v6/v7 下 `--hidden1/--hidden2` **不生效**（宽度写死）。
+    parser.add_argument('--critic_arch', default='v7',
+                        choices=['v1', 'v1af', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7'],
+                        help='critic/actor 结构（**默认 v7**，2026-11-04 起；此前 v6）: '
+                             'v7=critic cat(s,a)→400→300→400→1 + actor s→400→300→400→a; '
                              'v6=双流(s→32→32 ∥ a→64→64)→128→256→256→128→1; '
                              'v1=历史结构（--hidden1/--hidden2 生效，复现旧 run 用）; '
                              'v2=双流(s16-100 ∥ a32-64→square 残差); v1af=动作首层进网')
@@ -1125,10 +1127,10 @@ if __name__ == "__main__":
     parser.add_argument('--critic_out_init', default='3e3', choices=['3e3', 'fanin'],
                         help='critic 输出层权重初始化: 3e3=历史(±3e-3); fanin=PyTorch 默认(±1/√fan_in)')
     parser.add_argument('--l_critic_arch', default='inherit',
-                        choices=['inherit', 'v1', 'v2', 'v6'],
+                        choices=['inherit', 'v1', 'v2', 'v6', 'v7'],
                         help='**下层 L** 的 critic 结构（默认 inherit = 与 H 相同）。'
-                             'L 只有 1 维动作、每块 10 次更新 ⇒ v6 在这里的算力占比比 H 高；'
-                             '想省算力可传 --l_critic_arch v1（H 仍是 v6）')
+                             'L 只有 1 维动作、每块 10 次更新 ⇒ v6/v7 在这里的算力占比比 H 高；'
+                             '想省算力可传 --l_critic_arch v1（H 仍是 v7）')
     parser.add_argument('--rate',
                         default=0.01,
                         type=float,
@@ -1491,11 +1493,15 @@ if __name__ == "__main__":
                      critic_arch=args.critic_arch,
                      critic_act=args.critic_act,
                      critic_out_init=args.critic_out_init,
-                     branch_mix=_branch_frac, branch_sup_beta=_branch_beta)
+                     branch_mix=_branch_frac, branch_sup_beta=_branch_beta,
+                     actor_arch=('v7' if str(args.critic_arch) == 'v7' else None))
     _n_crit = sum(p.numel() for p in agent_H.critic_p.parameters())
     prCyan('[critic] arch={} act={} out_init={} → 单个 critic 参数量 {:,} '
-           '（对照: ns=4/na=6 时 v1=14,441, v6=150,081）'.format(
-               agent_H.critic_arch, args.critic_act, args.critic_out_init, int(_n_crit)))
+           '（对照: ns=4/na=6 时 v1=14,441, v6=150,081, v7=245,501）; '
+           'actor={}'.format(
+               agent_H.critic_arch, args.critic_act, args.critic_out_init, int(_n_crit),
+               ('400-300-400' if agent_H.actor_arch == 'v7'
+                else '{}-{}-{}'.format(args.hidden1, args.hidden2, args.hidden1))))
     if _branch_on:
         prCyan('[branch] critic 批 branch 占比 = {:.2f} | 每 {} 块一次 | pilot 前 {} 块每块 | '
                'lower={} signal={} | sup_beta={} (衰减跨度 {} 块) | csv={}'.format(

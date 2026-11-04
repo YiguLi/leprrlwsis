@@ -901,6 +901,11 @@ if __name__ == "__main__":
     # 网络宽度 (H/L 共用): **旧格式 16/100**（2026-09-29 曾提升到 64/128,
     #   2026-09-30 按用户要求退回旧格式, 与 50de2d7 之前的 run / 旧 3 个项目口径一致）。
     #   ⚠ 改维度后旧 run 的 .pkl 不可直接复载 (fc1/fc3 形状不同)。
+    parser.add_argument('--critic_arch', default='v7',
+                        choices=['v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7'],
+                        help='critic/actor 结构（2026-11-04 起默认 **v7**）: '
+                             'v7 = critic cat(s,a)→400→300→400→1 + actor s→400→300→400→a；'
+                             'v1 = 历史 16/100（复现旧 run / 加载旧 checkpoint 用）')
     parser.add_argument('--hidden1',
                         default=16,
                         type=int,

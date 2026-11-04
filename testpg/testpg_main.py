@@ -1153,8 +1153,11 @@ if __name__ == "__main__":
     parser.add_argument('--progress', default=1, type=int,
                         help='1=打印 diag 同款进度行（每 --progress_every 步）与训练结束汇总行')
     parser.add_argument('--progress_every', default=500, type=int, help='进度行间隔（环境步）')
-    parser.add_argument('--critic_arch', default='v2', choices=['v1', 'v1af', 'v2', 'v3', 'v4', 'v5', 'v6'],
-                        help='critic 结构: v1=历史; v1af=动作首层; v2=双流(s16-100 ∥ a32-64 → square(残差)→128→64)')
+    parser.add_argument('--critic_arch', default='v7',
+                        choices=['v1', 'v1af', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7'],
+                        help='critic/actor 结构（**默认 v7**，2026-11-04 起；此前 v2）: '
+                             'v7=critic cat(s,a)→400→300→400→1 + actor s→400→300→400→a; '
+                             'v1=历史; v1af=动作首层; v2=双流(s16-100 ∥ a32-64 → square(残差)→128→64)')
     parser.add_argument('--critic_act', default='relu', choices=['relu', 'leaky'],
                         help='critic 激活: relu=历史; leaky=LeakyReLU(0.01)（防死单元）')
     parser.add_argument('--critic_out_init', default='fanin', choices=['3e3', 'fanin'],
@@ -1384,7 +1387,8 @@ if __name__ == "__main__":
                         policy_noise=args.policy_noise,
                         noise_clip=args.noise_clip,
                         cost_critic_mode=args.cost_critic_mode,
-                        nstep=args.nstep, target_agg=args.target_agg)
+                        nstep=args.nstep, target_agg=args.target_agg,
+                        actor_arch=('v7' if str(args.critic_arch) == 'v7' else None))
     print('[H] nstep={} target_agg={} (n 步回报: 自助传播深度 50->{:.1f}; '
           '复现历史 run1~run10 请传 --nstep 1)'.format(
               args.nstep, args.target_agg, 50.0 / max(1, args.nstep)))

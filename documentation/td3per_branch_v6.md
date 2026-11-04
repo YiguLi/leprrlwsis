@@ -1,7 +1,12 @@
 # `td3per` 的两项移植：branch（同块首宽动作覆盖）+ critic v6
 
 > 实施日期：2026-10-30 ｜ 契约测试：`python agentutil/test_td3per_branch_v6_contract.py`
-> （1627 条断言，纯静态/纯算术，**不跑仿真、不需要 MATLAB**）
+> （1628 条断言，纯静态/纯算术，**不跑仿真、不需要 MATLAB**）
+>
+> ⚠ **2026-11-04 起 `--critic_arch` 的 CLI 默认由 `v6` 改为 `v7`**
+> （`cat(s,a)→400→300→400→1` + actor `s→400→300→400→a`，
+> 见 `documentation/critic_arch_v7.md`）。本文的 v6 口径仍完整保留：
+> `--critic_arch v6` 可逐位复现；`SP_TD3` 在拿不到 `args.critic_arch` 时仍回落 **v1**。
 
 本文记录把 `aifflor` 的两项方法移植进 `td3per` 的口径。两项互不依赖，可单独开关：
 

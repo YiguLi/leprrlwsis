@@ -37,11 +37,13 @@ Key differences from SP_DDPG:
 
 2026-10 新增（两项，均可单独关闭）
 ---------------------------------
-  * **critic v6**（`--critic_arch`，默认 v6）: `model.Critic(arch='v6')` 双流结构
-    `s→32→32 ∥ a→64→64 → cat(96) →128→256→256→128→1`（原始 a 不再重复拼入；
-    ns=4/na=6 时 150,081 参数）。`--critic_arch v1` = 改造前结构（逐位复现历史）。
+  * **critic 结构**（`--critic_arch`，**默认 v7**，2026-11-04 起；此前默认 v6）:
+    `v7` = `model.Critic(arch='v7')` 的 `cat(s,a)→400→300→400→1`（ns=4/na=6 时 245,501
+    参数）+ actor `s→400→300→400→a`（245,106）；`v6` = 双流
+    `s→32→32 ∥ a→64→64 → cat(96) →128→256→256→128→1`（150,081）；`v1` = 改造前结构
+    （逐位复现历史）。`--critic_arch v1/v6` 仍可复现旧 run。
     ⚠ `SP_TD3` 构造函数在拿不到 `args.critic_arch` 时回落 **v1**（探针/契约测试不变）。
-    `load_weights` 会按 checkpoint 的 state_dict 自动推断 arch 并重建（v1↔v6）。
+    `load_weights` 会按 checkpoint 的 state_dict 自动推断 arch 并重建（v1↔v6↔v7）。
   * **branch**（`--branch_every` / `--branch_pilot_blocks`，默认关闭）: 同块首宽动作覆盖，
     口径唯一真源 = `td3per/td3per_branch.py`（移植自 `aifflor`，见
     `documentation/td3per_branch_v6.md`）。branch 只进 critic TD（分池采样 + actor 掩码），

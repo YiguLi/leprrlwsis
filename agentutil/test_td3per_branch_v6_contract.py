@@ -785,8 +785,9 @@ def sec_k_wiring_static():
     src = open(path, encoding='utf-8').read()
     ok('from td3per import td3per_branch as tbr' in src, 'main 导入分支模块 tbr')
     ok('tbr.add_branch_args(parser)' in src, 'CLI 里挂了 tbr.add_branch_args')
-    ok("parser.add_argument('--critic_arch', default='v6'" in src,
-       '--critic_arch 的 CLI 默认 = v6')
+    ok("parser.add_argument('--critic_arch', default='v7'" in src,
+       '--critic_arch 的 CLI 默认 = v7（2026-11-04 起）')
+    ok("'v7'" in src and "'v6'" in src, 'choices 同时保留 v7 与 v6（旧 run 可复现）')
     ok('--l_critic_arch' in src and "'inherit'" in src, '--l_critic_arch 默认 inherit')
     # agent 构造传了三个 critic 参数 + branch_mix
     i_agent = src.index('agent_H = SP_TD3(')

@@ -511,6 +511,30 @@ def _detect_hidden(model_dir, nb_actions=6):
     return int(sd['fc1.weight'].shape[0]), int(sd['fc2.weight'].shape[0])
 
 
+def _detect_critic_arch(model_dir, nb_actions=6, nb_states=4):
+    """从 `critic_p_<na>.pkl` 反推 critic 结构（v1/v1af/v2/v3/v4/v5/v6/v7）。
+
+    2026-11-04 起**训练默认 v7**，但历史模型是 v1/v6 ⇒ 评测必须按权重重建
+    （`load_state_dict` 在结构不符时只会报形状错误，不会自动换结构）。
+    识别不出来时返回 None（调用方保持"不设 critic_arch" ⇒ agent 用历史回落值）。
+    """
+    import torch
+    from model import infer_arch
+    path = os.path.join(model_dir, 'critic_p_{}.pkl'.format(nb_actions))
+    if not os.path.isfile(path):
+        return None
+    try:
+        sd = torch.load(path, map_location='cpu')
+    except Exception:
+        return None
+    if not isinstance(sd, dict):
+        return None
+    try:
+        return str(infer_arch(sd, int(nb_states), int(nb_actions)))
+    except Exception:
+        return None
+
+
 def _build_args(device, seed, hidden=None):
     """构造 agent 构造函数需要的 args 命名空间。
 
@@ -663,6 +687,12 @@ class ProjectRunner:
             self.soc_target_from_signal = myf_mod.soc_target_from_signal
 
         # ---- 智能体 ----
+        # critic 结构：按 checkpoint 识别（v7 默认时代 / 历史 v1/v6 模型都要能加载）
+        _arch = _detect_critic_arch(model_dir, 6, nb_H)
+        if _arch:
+            args.critic_arch = _arch
+            if verbose:
+                print('    [{}] critic arch = {}（按 checkpoint 识别）'.format(key, _arch))
         AgentCls, _ = _resolve(self.spec['agent'])
         agent_H = AgentCls(nb_states=nb_H, nb_actions=6, args=args,
                            **self.spec['h_kwargs'])

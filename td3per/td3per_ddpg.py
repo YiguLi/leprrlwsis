@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 
-from model import (Actor, Critic, infer_arch)
+from model import (Actor, Critic, infer_arch, V7_ACTOR_DIMS)
 from PER_buffer import PrioritizedReplayBuffer
 from random_process import OrnsteinUhlenbeckProcess
 from util import *
@@ -60,7 +60,7 @@ class SP_TD3(object):
                  wt_noise_floor=0.01,
                  nstep=1, target_agg='min',
                  critic_arch=None, critic_act='relu', critic_out_init='3e3',
-                 branch_mix=0.0, branch_sup_beta=0.0):
+                 branch_mix=0.0, branch_sup_beta=0.0, actor_arch=None):
 
         # Determine device first
         self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -94,8 +94,15 @@ class SP_TD3(object):
         critic_cfg['out_init'] = str(critic_out_init or '3e3')
         #: 重建 critic 时复用（`load_weights` 遇到 checkpoint 的 arch 不同会重建）
         self._critic_cfg = dict(critic_cfg)
-        self.actor = Actor(self.nb_states, self.nb_actions, **net_cfg)
-        self.actor_target = Actor(self.nb_states, self.nb_actions, **net_cfg)
+        # ---- actor 宽度（2026-11-04，v7 口径：actor 与 critic 同宽 400-300-400）----
+        #   只有显式 `actor_arch='v7'` 才放大（main 只给 **H 层** 传；L 层 1 维动作
+        #   仍用 --hidden1/--hidden2）。`model.Actor` 形状 = ns→h1→h2→h1→na。
+        self.actor_arch = str(actor_arch or 'inherit')
+        actor_cfg = dict(net_cfg)
+        if self.actor_arch == 'v7':
+            actor_cfg['hidden1'], actor_cfg['hidden2'] = V7_ACTOR_DIMS
+        self.actor = Actor(self.nb_states, self.nb_actions, **actor_cfg)
+        self.actor_target = Actor(self.nb_states, self.nb_actions, **actor_cfg)
         self.actor_optim = Adam(self.actor.parameters(), lr=args.prate)
 
         # ---- TD3: twin critics per channel ----

@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 
-from model import (Actor, Critic)
+from model import (Actor, Critic, V7_ACTOR_DIMS)
 from td3leprrlrb.td3leprrlrb_buffer import LEPRRLRBBuffer
 from random_process import OrnsteinUhlenbeckProcess
 from util import *
@@ -71,27 +71,38 @@ class SP_TD3_LEPRRLRB(object):
             'hidden2': args.hidden2,
             'init_w': args.init_w
         }
-        self.actor = Actor(self.nb_states, self.nb_actions, **net_cfg)
-        self.actor_target = Actor(self.nb_states, self.nb_actions, **net_cfg)
+        # ---- 网络结构（--critic_arch）: 2026-11-04 起**默认 v7** ----
+        #   v7 = critic cat(state,action)→400→300→400→1 + actor state→400→300→400→action。
+        #   ⚠ 回落仍是 v1：**不传 args.critic_arch 的探针/评测脚本**保持历史网络（逐位不变）。
+        _arch = str(getattr(args, 'critic_arch', 'v1') or 'v1')
+        actor_cfg = dict(net_cfg)
+        critic_cfg = dict(net_cfg)
+        critic_cfg['arch'] = _arch
+        #   actor 只在 **H 层**（nb_actions>1）跟着放大；L 层是 1 维动作，
+        #   保持 --hidden1/--hidden2（与 aifflor 口径一致，避免无谓放大 100 倍）。
+        if _arch == 'v7' and self.nb_actions > 1:
+            actor_cfg['hidden1'], actor_cfg['hidden2'] = V7_ACTOR_DIMS
+        self.actor = Actor(self.nb_states, self.nb_actions, **actor_cfg)
+        self.actor_target = Actor(self.nb_states, self.nb_actions, **actor_cfg)
         self.actor_optim = Adam(self.actor.parameters(), lr=args.prate)
 
         # ---- TD3: twin critics per channel ----
         # profit channel: critic_p / critic_p2
-        self.critic_p = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_p = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_p = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_p = Critic(self.nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_p = Adam(self.critic_p.parameters(), lr=args.rate)
 
-        self.critic_p2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_p2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_p2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_p2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_p2 = Adam(self.critic_p2.parameters(), lr=args.rate)
 
         # cost channel: critic_c / critic_c2
-        self.critic_c = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_c = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_c = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_c = Critic(self.nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_c = Adam(self.critic_c.parameters(), lr=args.rate)
 
-        self.critic_c2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_c2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_c2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_c2 = Critic(self.nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_c2 = Adam(self.critic_c2.parameters(), lr=args.rate)
 
         hard_update(self.actor_target, self.actor)  # Make sure target is with the same weight

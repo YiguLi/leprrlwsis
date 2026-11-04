@@ -198,7 +198,8 @@ $PY = 'C:\Users\yigul\anaconda3\envs\llmenhancedwsis\python.exe'
 ```powershell
 $PY = 'C:\Users\yigul\anaconda3\envs\llmenhancedwsis\python.exe'
 
-# 1) 结构契约（69 项：参数量/前向/反向/动作入口/infer_arch/bias 接线/CLI/SP_TD3 端到端）
+# 1) 结构契约（119 项：参数量/前向/反向/动作入口/infer_arch/bias 接线/CLI/
+#    SP_TD3 端到端/9 个方法的默认 v7 接线 + 评测侧 arch 识别）
 & $PY agentutil\test_critic_arch_v7.py
 
 # 2) 两个 run 并排对比（读 metrics.json）
@@ -210,10 +211,41 @@ $PY = 'C:\Users\yigul\anaconda3\envs\llmenhancedwsis\python.exe'
 产物（`c1_obs_v7_log/`、`c1_obs_v6ctl_log/`）含 `c1_best.pt` / `metrics.json` /
 `summary.txt` / `history.csv` / `plots/`，均被 `.gitignore` 排除。
 
-## 6. 一句话
+## 6. 2026-11-04：v7 成为**所有方法**的默认结构
+
+用户口径："v7 是极为成功的结构，将所有方法的神经网络结构改为默认 v7"。
+
+| 方法 | 改动 | 说明 |
+|---|---|---|
+| `aifflor` | CLI 默认 `v6 → v7` | critic + actor 都变（actor 自 2026-11-03 起已接） |
+| `td3per` | CLI 默认 `v6 → v7`，`--l_critic_arch` choices + `v7` | `SP_TD3` 新增 `actor_arch`（只给 H 传） |
+| `testpg` | CLI 默认 `v2 → v7` | 继承 `aifflor.SP_TD3`，H 传 `actor_arch='v7'` |
+| `prle` / `singleaif` / `td3leprrlrb` / `td3perrb` / `td3perseg` / `td3prle` / `td3prrbb` / `td3prrlrb` / `yawflor` | **新增** `--critic_arch`（默认 `v7`）；`<pkg>_ddpg.py` 按 `arch` 分 `actor_cfg`/`critic_cfg` | 迁移脚本 `agentutil/port_v7_default.py`（dry-run/`--apply`，幂等） |
+
+**刻意保留的两条"安全边界"**（否则历史模型与探针会静默失效）：
+
+1. **构造函数的回落仍是 `v1`**：不传 `args.critic_arch` 的脚本（`agentutil/` 探针、
+   `test_five_days.py`、`test_simple.py` 等手工构造 args 的地方）拿到的还是历史网络。
+   只有真正走 CLI 起训练时才默认 v7。
+2. **评测按 checkpoint 识别结构**：`test_five_days._detect_critic_arch()` 用
+   `model.infer_arch(critic_p_<na>.pkl)` 反推 v1/v2/v5/v6/v7 并写进 `args.critic_arch`
+   ⇒ 旧 v1/v6 模型与新的 v7 模型可以在同一次评测里共存；
+   actor 宽度本来就由 `_detect_hidden()` 从 `actor_6.pkl` 反推（v7 = 400/300）。
+
+另外，**actor 的 400/300 只给 H 层（`nb_actions > 1`）**：L 层是 1 维 BESS 动作，
+仍用 `--hidden1/--hidden2`（16/100）——与 aifflor/td3per 的口径一致，避免 1 维动作网
+被放大 100 倍。L 的 **critic** 仍是 v7（`--l_critic_arch v1` 可降级）。
+
+验证：`agentutil/test_critic_arch_v7.py` **119 项全过**（含 9 个方法的"构造即 v7：
+critic 245 501 参数、actor 400-300-400"）；`test_td3per_branch_v6_contract.py` 1628 条、
+`test_phase_uniform.py` 全过。
+
+## 7. 一句话
 
 > **v7 = 把动作和状态在最开始就拼起来，再走 400→300→400。**
-> 静态接线全绿（69 项契约），离线 C1 基准上成本拟合与整体梯度标定明显优于 v6
+> 静态接线全绿（119 项契约），离线 C1 基准上成本拟合与整体梯度标定明显优于 v6
 > （real RMSE −39%、MAE −43%、折点 F1 0.959→0.987、slope 0.89→0.98），
 > 代价是参数量 +63%（245k vs 150k）与 hinge 组方向一致性略降；
-> **闭环（FLORIS 训练 + WFSim 评测）尚未验证**。
+> 2026-11-04 起 **aifflor / td3per / testpg 与 9 个老方法的默认结构都是 v7**，
+> 旧口径用 `--critic_arch v1/v6` 复现；
+> **闭环（FLORIS 训练 + WFSim 评测）仅在 aifflor 上验证到 130k 步（`AIFFLOR-V7-run20`）**。

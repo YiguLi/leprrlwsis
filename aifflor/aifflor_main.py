@@ -2228,11 +2228,11 @@ if __name__ == "__main__":
     parser.add_argument('--c1_bound_coef', default=0.0, type=float,
                         help='把越界量也计入 c1（MW·step / 单位 a）: c1 += 该系数 × Σ[max(0,-a)+max(0,a-0.5)]'
                              '；让 cost critic 看到"界"（否则它会外推界内斜率、把界外估成更便宜）。0=关')
-    parser.add_argument('--critic_arch', default='v6',
+    parser.add_argument('--critic_arch', default='v7',
                         choices=['v1', 'v1af', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7'],
-                        help='critic 结构（默认 **v6**，2026-10-29 起）: '
+                        help='critic/actor 结构（**默认 v7**，2026-11-04 起；此前 v6）: '
+                             'v7=critic cat(state,action)→400→300→400→1 + actor state→400→300→400→action; '
                              'v6=双流(s→32→32 ∥ a→64→64)→128→256→256→128→1（原始 a 不重复拼入）; '
-                             'v7=cat(state,action)→400→300→400→1（动作与状态一开始就拼接, 2026-11-02 新增）; '
                              'v1=历史; v1af=动作首层; '
                              'v2=双流(s16-100 ∥ a32-64 → square(残差)→128→64)（2026-10 之前的生产默认）')
     parser.add_argument('--critic_act', default='relu', choices=['relu', 'leaky'],

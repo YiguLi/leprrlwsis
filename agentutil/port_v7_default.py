@@ -57,11 +57,13 @@ PROJECTS = [
 NET_BLOCK = """        # ---- 网络结构（--critic_arch）: 2026-11-04 起**默认 v7** ----
         #   v7 = critic cat(state,action)→400→300→400→1 + actor state→400→300→400→action。
         #   ⚠ 回落仍是 v1：**不传 args.critic_arch 的探针/评测脚本**保持历史网络（逐位不变）。
+        #   actor 只在 **H 层**（nb_actions>1）跟着放大；L 层是 1 维动作，
+        #   保持 --hidden1/--hidden2（与 aifflor 口径一致，避免无谓放大 100 倍）。
         _arch = str(getattr(args, 'critic_arch', 'v1') or 'v1')
         actor_cfg = dict(net_cfg)
         critic_cfg = dict(net_cfg)
         critic_cfg['arch'] = _arch
-        if _arch == 'v7':
+        if _arch == 'v7' and self.nb_actions > 1:
             actor_cfg['hidden1'], actor_cfg['hidden2'] = V7_ACTOR_DIMS
 """
 

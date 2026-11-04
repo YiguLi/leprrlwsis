@@ -289,7 +289,7 @@ def section_g():
         choices = [e.value for e in kw['choices'].elts]
         default = kw['default'].value
         ok('v7' in choices, '--critic_arch 的 choices 含 v7（%s）' % choices)
-        ok(default == 'v6', '--critic_arch 默认仍是 v6（不改生产口径）')
+        ok(default == 'v7', '--critic_arch 默认 = v7（2026-11-04 起；此前 v6）')
     with open(os.path.join(ROOT, 'aifflor', 'aifflor_ddpg.py'), encoding='utf-8') as f:
         dsrc = f.read()
     ok("critic_cfg['arch']" in dsrc and "getattr(args, 'critic_arch'" in dsrc,
@@ -419,6 +419,74 @@ def section_h():
     ok(synced, 'load_weights 之后 target 被 hard_update 成 online（与训练口径一致）')
 
 
+#: 2026-11-04 起默认 v7 的**老方法**：(包名, 主脚本, ddpg 模块, 智能体类名)
+V7_PORTED = [
+    ('prle', 'prle_main.py', 'prle_ddpg.py', 'PRLE_DDPG'),
+    ('singleaif', 'singleaif_main.py', 'singleaif_ddpg.py', 'SP_TD3'),
+    ('td3leprrlrb', 'td3leprrlrb_main.py', 'td3leprrlrb_ddpg.py', 'SP_TD3_LEPRRLRB'),
+    ('td3perrb', 'td3perrb_main.py', 'td3perrb_ddpg.py', 'SP_TD3'),
+    ('td3perseg', 'td3perseg_main.py', 'td3perseg_ddpg.py', 'SP_TD3'),
+    ('td3prle', 'td3prle_main.py', 'td3prle_ddpg.py', 'SP_TD3_PRLE'),
+    ('td3prrbb', 'td3prrbb_main.py', 'td3prrbb_ddpg.py', 'SP_TD3'),
+    ('td3prrlrb', 'td3prrlrb_main.py', 'td3prrlrb_ddpg.py', 'SP_TD3'),
+    ('yawflor', 'yawflor_main.py', 'yawflor_ddpg.py', 'SP_TD3'),
+]
+
+
+def _args_v7():
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        seed=0, cuda=False, hidden1=16, hidden2=100, init_w=3e-3,
+        prate=1e-4, rate=3e-3, rmsize=64, bsize=8, tau=1e-3, discount=0.95,
+        epsilon=4000, lam=1.0, lr_lam=0.0, cost_single_limit=1000.0,
+        PER_alpha=0.6, PER_beta=0.4, PER_epsilon=0.01,
+        beta_increment_per_sampling=0.0, nb_turbine=5,
+        ou_theta=0.15, ou_mu=0.0, ou_sigma=0.2, max_episode_length=1440,
+        critic_arch='v7', critic_act='relu', critic_out_init='3e3',
+        critic_feat_power=0, critic_feat_power_k=1.357e-3, cost_clip=1,
+        farm_level=0, scalar_wt=0, na_box=5, aux_model=0,
+        critic_action_first=0, critic_bias_init='none', warmup_wt_sched='lhs')
+
+
+def section_i():
+    """2026-11-04：v7 成为**所有方法**的默认结构（老方法补 --critic_arch）。"""
+    print('\n[I] 9 个老方法的默认 v7 接线（静态 + 运行期构造）')
+    import importlib
+    for pkg, main_name, ddpg_name, cls_name in V7_PORTED:
+        msrc = open(os.path.join(ROOT, pkg, main_name), encoding='utf-8').read()
+        dsrc = open(os.path.join(ROOT, pkg, ddpg_name), encoding='utf-8').read()
+        ok("'--critic_arch', default='v7'" in msrc,
+           '%s: CLI 默认 v7' % pkg)
+        ok(('actor_cfg' in dsrc and 'critic_cfg' in dsrc
+            and 'V7_ACTOR_DIMS' in dsrc), '%s: ddpg 按 arch 分 actor/critic cfg' % pkg)
+        ok("getattr(args, 'critic_arch', 'v1')" in dsrc,
+           '%s: 回落仍是 v1（探针/评测不被静默改义）' % pkg)
+        try:
+            mod = importlib.import_module('%s.%s' % (pkg, ddpg_name[:-3]))
+            cls = getattr(mod, cls_name)
+            torch.manual_seed(0)
+            ag = cls(4, 6, _args_v7())
+            nc = npar(ag.critic_p)
+            shapes = tuple(ag.actor.fc1.weight.shape)
+            ok(nc == 245501 and shapes == (400, 4),
+               '%s: 构造即 v7（critic %d 参数, actor %s）' % (pkg, nc, shapes))
+            # L 层（1 维动作）不跟着放大：actor 仍 --hidden1/--hidden2
+            agL = cls(5, 1, _args_v7())
+            ok(tuple(agL.actor.fc1.weight.shape) == (16, 5) and npar(agL.actor) == 3429,
+               '%s: L 层 actor 仍 16/100（不放大）' % pkg)
+        except Exception as e:                       # noqa: BLE001
+            ok(False, '%s: 构造失败 %s: %s' % (pkg, type(e).__name__, e))
+    # td3per / testpg 默认也改成 v7
+    for pkg, main_name in (('td3per', 'td3per_main.py'),
+                           ('testpg', 'testpg_main.py')):
+        msrc = open(os.path.join(ROOT, pkg, main_name), encoding='utf-8').read()
+        ok("'--critic_arch', default='v7'" in msrc, '%s: CLI 默认 v7' % pkg)
+    # 评测侧：test_five_days 按 checkpoint 识别 arch（新旧模型可共存）
+    tsrc = open(os.path.join(ROOT, 'test_five_days.py'), encoding='utf-8').read()
+    ok('def _detect_critic_arch' in tsrc and 'args.critic_arch = _arch' in tsrc,
+       'test_five_days: 按 checkpoint 自动识别 critic arch')
+
+
 def main():
     print('=' * 96)
     print('v7 critic 结构契约（input=cat(state,action) → 400 → 300 → 400 → 1）')
@@ -433,6 +501,7 @@ def main():
     section_f()
     section_g()
     section_h()
+    section_i()
     print('\n' + '=' * 96)
     print('结果：%d 项通过 / %d 项失败' % (N_OK, N_BAD))
     print('=' * 96)
