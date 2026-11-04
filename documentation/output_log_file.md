@@ -56,11 +56,18 @@
 
 | flag | 默认 | 作用 |
 |---|---|---|
-| `--log_file` | **0** | 0 = 不动输出（历史行为）；1 = `sys.stdout` 重定向到 `<output>/train.log`（行缓冲） |
+| `--log_file` | **0** | 0 = 不动输出（历史行为）；1 = `sys.stdout` **与 fd 1** 双重定向到 `<output>/train.log` |
 | `--progress` | 1 | 1 = 每 `--progress_every` 步打一行进度（**只在 `--log_file 1` 时生效**） |
 | `--progress_every` | 500 | 进度行间隔（环境步） |
 
-- 进度行写到 `sys.__stdout__`（真实控制台），不受重定向影响；
+**为什么要 fd 级重定向**：`WFSim.m:110/133` 的
+`disp('Performing N forward simulations..')` 是 **MATLAB 侧**的输出，MATLAB engine 把它
+直接写到进程的 **fd 1**，不经过 Python 的 `sys.stdout`；只重绑 `sys.stdout` 抓不到，
+所以会"仍然每步刷屏"。`run_io` 现在会：先 `os.dup(1)` 留一个控制台副本 → `os.dup2(log_fd, 1)`
+→ 所有写 fd 1 的东西（MATLAB、C 扩展）都进 `train.log`；进度行则写到那个控制台副本
+（用控制台自己的编码，避免 cp936 下中文乱码）。`close()` 时 `os.dup2` 恢复 fd 1。
+
+- 进度行写到真实控制台副本，不受重定向影响；
 - 总步数在 `train(...)` 调用前由 `run_io.set_total(args.train_iter_H)` 设定
   （`args.train_iter_H` 在 `get_output_folder()` 之后才会被 `1000*max_episode_length`
   或 `--max_steps` 定稿，所以不能在建目录时就取）；

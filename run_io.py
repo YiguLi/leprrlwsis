@@ -39,11 +39,42 @@ _STATE = {
     't0': None,
     'fh': None,
     'old_stdout': None,
+    #: 真实控制台的 fd 副本（`os.dup(1)`）—— fd 级重定向后仍要能打进度行
+    'console_fd': None,
 }
 
 
+def _console_write(text):
+    """写到**真实控制台**：优先用保存的 fd（fd 级重定向后依然有效）。
+
+    编码用控制台自己的编码（Windows 下通常是 cp936 / utf-8）——直接写 utf-8 字节
+    会在 cp936 控制台上把中文变成乱码。
+    """
+    fd = _STATE.get('console_fd')
+    if fd is None:
+        print(text, file=sys.__stdout__, flush=True)
+        return
+    enc = getattr(sys.__stdout__, 'encoding', None) or 'utf-8'
+    try:
+        data = (text + '\n').encode(enc, errors='replace')
+    except LookupError:
+        data = (text + '\n').encode('utf-8', errors='replace')
+    try:
+        os.write(fd, data)
+    except OSError:
+        print(text, file=sys.__stdout__, flush=True)
+
+
 def setup(output_dir, log_file=0, progress=1, every=500, total=0):
-    """在 `args.output = get_output_folder(...)` 之后调用一次。"""
+    """在 `args.output = get_output_folder(...)` 之后调用一次。
+
+    `log_file=1` 时做**两层**重定向：
+      1. Python 层：`sys.stdout = <output>/train.log`；
+      2. **fd 层**：`os.dup2(log_fd, 1)` —— MATLAB/WFSim 的 `disp(...)`、
+         以及任何直接写 fd 1 的 C 扩展（torch/numpy 的 C 级输出）也会进 train.log。
+         这是必要的：`WFSim.m:110/133` 的 `Performing N forward simulations..`
+         是 **MATLAB 侧**的 `disp`，只重绑 `sys.stdout` 抓不到。
+    """
     _STATE['active'] = bool(int(log_file or 0))
     _STATE['progress'] = bool(int(progress or 0)) and _STATE['active']
     _STATE['every'] = max(1, int(every or 500))
@@ -57,15 +88,24 @@ def setup(output_dir, log_file=0, progress=1, every=500, total=0):
         path = os.path.join(str(output_dir), 'train.log')
         _STATE['fh'] = open(path, 'w', encoding='utf-8', buffering=1)
         _STATE['old_stdout'] = sys.stdout
+        # ---- fd 层：先留一个控制台副本，再把 fd 1 指到日志文件 ----
+        try:
+            _STATE['console_fd'] = os.dup(1)
+            try:
+                sys.stdout.flush()
+            except Exception:                                 # noqa: BLE001
+                pass
+            os.dup2(_STATE['fh'].fileno(), 1)
+        except OSError:
+            _STATE['console_fd'] = None                       # 退化：只重绑 sys.stdout
         sys.stdout = _STATE['fh']
-        print('[log] 详细输出 → {}（控制台只显示进度与汇总）'.format(path),
-              file=sys.__stdout__, flush=True)
+        _console_write('[log] 详细输出 → {}（控制台只显示进度与汇总；'
+                       'MATLAB/WFSim 的 disp 也一并写入）'.format(path))
     except Exception as e:                                   # noqa: BLE001
         # 重定向失败就保持原样（与 aifflor 的处理一致）
         _STATE['active'] = False
         _STATE['progress'] = False
-        print('[log] 重定向失败, 保持控制台输出: {}'.format(e),
-              file=sys.__stdout__, flush=True)
+        _console_write('[log] 重定向失败, 保持控制台输出: {}'.format(e))
 
 
 def set_total(total):
@@ -89,18 +129,28 @@ def tick(step):
     total = _STATE['total']
     if total > 0:
         left = max(0.0, (total - step) / max(1e-9, rate))
-        print('  [{}] {:>7}/{} ({:5.1f}%)  {:5.1f} 步/秒  已用 {:4.0f} min  剩余约 {:4.0f} min'
-              .format(_STATE['tag'], step, total,
-                      100.0 * step / max(1, total), rate, el / 60.0, left / 60.0),
-              file=sys.__stdout__, flush=True)
+        _console_write(
+            '  [{}] {:>7}/{} ({:5.1f}%)  {:5.1f} 步/秒  已用 {:4.0f} min  剩余约 {:4.0f} min'
+            .format(_STATE['tag'], step, total,
+                    100.0 * step / max(1, total), rate, el / 60.0, left / 60.0))
     else:
-        print('  [{}] {:>7} 步  {:5.1f} 步/秒  已用 {:4.0f} min'
-              .format(_STATE['tag'], step, rate, el / 60.0),
-              file=sys.__stdout__, flush=True)
+        _console_write('  [{}] {:>7} 步  {:5.1f} 步/秒  已用 {:4.0f} min'
+                       .format(_STATE['tag'], step, rate, el / 60.0))
 
 
 def close():
-    """恢复 stdout 并关闭日志文件（幂等；进程退出也会 flush）。"""
+    """恢复 stdout / fd 1 并关闭日志文件（幂等；进程退出也会 flush）。"""
+    fd = _STATE.get('console_fd')
+    if fd is not None:
+        try:
+            os.dup2(fd, 1)          # 先把 fd 1 指回控制台
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        _STATE['console_fd'] = None
     fh = _STATE.get('fh')
     if fh is not None:
         try:
