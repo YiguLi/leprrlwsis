@@ -65,6 +65,8 @@ sys.path.insert(0, _HSRL_DIR)
 from env import WindBattery
 from td3perseg.td3perseg_ddpg import SP_TD3
 from util import *
+
+import run_io   # 输出简化（--log_file/--progress，aifflor 同款）
 from td3perseg.td3perseg_myfunc import (
     CheckAction, Normalize, Normalize_H,
     Cal_Rew_RB, gap_penalty, soc_target_from_signal, nine_case_test,
@@ -832,6 +834,7 @@ def train(num_iterations_H,
 
         # update
         step += 1
+        run_io.tick(step)
         episode_steps += 1
         episode_reward += r1
         episode_cost += c1_step + gap_pen
@@ -939,6 +942,14 @@ if __name__ == "__main__":
                         help='critic/actor 结构（2026-11-04 起默认 **v7**）: '
                              'v7 = critic cat(s,a)→400→300→400→1 + actor s→400→300→400→a；'
                              'v1 = 历史 16/100（复现旧 run / 加载旧 checkpoint 用）')
+    parser.add_argument('--log_file', default=0, type=int,
+                        help='1 = 把逐行详细输出写入 <output>/train.log，控制台只留 --progress 进度行'
+                             '（与 aifflor 同款；默认 0 = 输出与改造前逐位相同）')
+    parser.add_argument('--progress', default=1, type=int,
+                        help='1 = 每 --progress_every 步打印一行进度（步/秒 + ETA）；'
+                             '只在 --log_file 1 时生效（默认 1）')
+    parser.add_argument('--progress_every', default=500, type=int,
+                        help='进度行间隔（环境步）')
     parser.add_argument('--hidden1',
                         default=16,
                         type=int,
@@ -1193,6 +1204,12 @@ if __name__ == "__main__":
                  '(朝 SOC=3 全力充放); 下层 RL 旁路。RUN_TAG={}, --env={}'.format(
                      RUN_TAG, args.env))
     args.output = get_output_folder(args.output, args.env)
+    # ---- 输出简化（aifflor 同款）：--log_file 1 ⇒ 详细输出进 train.log ----
+    run_io.setup(args.output,
+                 log_file=int(getattr(args, 'log_file', 0) or 0),
+                 progress=int(getattr(args, 'progress', 1) or 1),
+                 every=int(getattr(args, 'progress_every', 500) or 500),
+                 total=0)          # 真正的总步数在 train(...) 调用前用 run_io.set_total 设
 
     # ---- piecewise（分段）奖励的接线 -------------------------------------------
     #   --seg off                        ⇒ 不启用：get_wT/get_wB 恒 1.0，整条奖励路径与
@@ -1343,6 +1360,7 @@ if __name__ == "__main__":
     # agent_L.load_weights('output/1_2310S-run18')
 
     if args.mode == 'train':
+        run_io.set_total(int(args.train_iter_H))
         train(args.train_iter_H,
               agent_H,
               agent_L,
