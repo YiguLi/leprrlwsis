@@ -503,6 +503,22 @@ def section_i():
     src_td3per = open(os.path.join(ROOT, 'td3per', 'td3per_main.py'),
                       encoding='utf-8').read()
     ok('rate={}' in src_td3per, 'td3per 的 [critic] 启动日志里能看到 rate')
+    # 2026-11-05: td3per 与 aifflor 的默认口径对齐（bsize/epsilon/out_init/bias_init/c1 平滑）
+    import ast as _ast
+    _t = _ast.parse(src_td3per)
+    _defs = {}
+    for _n in _ast.walk(_t):
+        if (isinstance(_n, _ast.Call) and getattr(_n.func, 'attr', '') == 'add_argument'
+                and _n.args and isinstance(_n.args[0], _ast.Constant)):
+            _kw = {k.arg: k.value for k in _n.keywords}
+            if 'default' in _kw:
+                _defs[_n.args[0].value] = _ast.unparse(_kw['default']).strip("'\"")
+    for _k, _v in (('--bsize', '32'), ('--epsilon', '10000'),
+                   ('--critic_out_init', 'fanin'), ('--critic_bias_init', 'none'),
+                   ('--c1_smooth', '1')):
+        ok(_defs.get(_k) == _v, 'td3per %s 默认 = %s（实测 %s）'
+           % (_k, _v, _defs.get(_k)))
+    ok('hc.set_smooth(' in src_td3per, 'td3per 真的调用了 hc.set_smooth（平滑生效）')
 
 
 def main():

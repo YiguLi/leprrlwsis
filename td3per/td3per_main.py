@@ -1135,8 +1135,9 @@ if __name__ == "__main__":
                              'v2=双流(s16-100 ∥ a32-64→square 残差); v1af=动作首层进网')
     parser.add_argument('--critic_act', default='relu', choices=['relu', 'leaky'],
                         help='critic 激活: relu=历史; leaky=LeakyReLU(0.01)（防死单元）')
-    parser.add_argument('--critic_out_init', default='3e3', choices=['3e3', 'fanin'],
-                        help='critic 输出层权重初始化: 3e3=历史(±3e-3); fanin=PyTorch 默认(±1/√fan_in)')
+    parser.add_argument('--critic_out_init', default='fanin', choices=['3e3', 'fanin'],
+                        help='critic 输出层权重初始化: 3e3=历史(±3e-3); fanin=PyTorch 默认(±1/√fan_in)。'
+                             '2026-11-05 起默认 **fanin**（与 aifflor 对齐；此前 3e3）')
     parser.add_argument('--l_critic_arch', default='inherit',
                         choices=['inherit', 'v1', 'v2', 'v6', 'v7'],
                         help='**下层 L** 的 critic 结构（默认 inherit = 与 H 相同）。'
@@ -1213,8 +1214,8 @@ if __name__ == "__main__":
                         help='越界乘性惩罚系数 c: 风机收益 × exp(-c·Σ前5维越界量) '
                              '(默认 %.1f = **关闭**; 5.0 = 已证伪的旧口径, 见 README run14 分析)'
                              % VIOL_DERATE_COEF)
-    parser.add_argument('--bsize', default=256, type=int,
-                        help='minibatch size')
+    parser.add_argument('--bsize', default=32, type=int,
+                        help='minibatch size（2026-11-05 起默认 **32**，与 aifflor 对齐；此前 256）')
     # ---- memory 容量 ----
     #   ✅ 口径 = **条数直接就是环境步数**（2026-10 更正，去掉历史遗留的 x5）:
     #   旧注释写 "1 条 = n 个块 = 5n 个环境步 ⇒ rmsize x 5n"，那是**基于一个错误前提**
@@ -1260,10 +1261,11 @@ if __name__ == "__main__":
                         type=int,
                         help='train iters each timestep')
     parser.add_argument('--epsilon',
-                        default=4000,
+                        default=10000,
                         type=int,
                         help='【H 层】探索噪声 ε 由 1 线性衰减到 0 所需的【决策次数】。'
-                             'H 每 5 个环境步决策一次 ⇒ 4000 次 = 20k 环境步'
+                             'H 每 5 个环境步决策一次 ⇒ 10000 次 = 50k 环境步'
+                             '（2026-11-05 起与 aifflor 对齐；此前 4000 = 20k 步）'
                              '(信号维幅值此后由地板 sig_noise_min 保底)')
     parser.add_argument('--l_epsilon',
                         default=50000,
@@ -1363,10 +1365,19 @@ if __name__ == "__main__":
                         choices=['uniform', 'legacy'],
                         help='H 层 c1 口径: uniform=波动当量(默认, hsrl_cost 单一真源); '
                              'legacy=各项目原公式(对照臂)')
-    parser.add_argument('--critic_bias_init', default='estimate',
+    parser.add_argument('--c1_smooth', default=1, type=int,
+                        help='1(默认)=c1 的两个折点(abs(dP) 与 20*(P_F-3)+)改为连续可导的 softplus 平滑'
+                             '（2026-11-05 起与 aifflor 对齐）；0=硬折点；'
+                             '取值偏差 ≤ eps + 20·ln2/β（默认 β=100, eps=0.05 ⇒ 0.19 MW·step）')
+    parser.add_argument('--c1_smooth_beta', default=100.0, type=float,
+                        help='softplus 温度 β（越大越接近硬折点）')
+    parser.add_argument('--c1_smooth_eps', default=0.05, type=float,
+                        help='平滑 abs(dP) 的 ε（MW）')
+    parser.add_argument('--critic_bias_init', default='none',
                         choices=['estimate', 'none'],
                         help='critic 输出层 bias 的价值基线初始化: estimate=用 warmup 观测的'
-                             '块收益估计 r̄/(1-γ) (默认); none=不初始化(对照臂)')
+                             '块收益估计 r̄/(1-γ); none=不初始化。'
+                             '2026-11-05 起默认 **none**（与 aifflor 对齐；此前 estimate）')
     parser.add_argument('--critic_bias_p', default=-1.0, type=float,
                         help='显式指定利润 critic 基线 (>0 生效, 覆盖 estimate)')
     parser.add_argument('--critic_bias_c', default=-1.0, type=float,
@@ -1402,6 +1413,17 @@ if __name__ == "__main__":
                 if _wm_dup else '足够 ⇒ 首个 minibatch 不复制同一条 transition'),
                _wm_bias))
     hc.set_mode(args.c1_mode)
+    # ---- c1 平滑（2026-11-05 起默认开启，与 aifflor 对齐）----
+    #   只改折点附近形状：c1 = P̃_F + 20·[softplus_β(P̃_F−3) − ln2/β]，P̃_F = √(ΔP²+ε²) − ε
+    #   取值偏差 ≤ ε + 20·ln2/β（默认 0.05 + 0.139 = 0.19 MW·step）。
+    hc.set_smooth(int(getattr(args, 'c1_smooth', 1) or 0),
+                  float(getattr(args, 'c1_smooth_beta', 100.0)),
+                  float(getattr(args, 'c1_smooth_eps', 0.05)))
+    if int(getattr(args, 'c1_smooth', 1) or 0):
+        prCyan('[c1] 平滑已开启: β={} ε={}（折点连续可导; 偏差 ≤ {:.3f} MW·step）'.format(
+            getattr(args, 'c1_smooth_beta', 100.0), getattr(args, 'c1_smooth_eps', 0.05),
+            float(getattr(args, 'c1_smooth_eps', 0.05))
+            + 20.0 * 0.693147 / float(getattr(args, 'c1_smooth_beta', 100.0))))
     hc.set_value_scale(args.value_scale)   # 值函数回归空间归一化 (单一真源)
     hc.set_cost_scale(args.cost_scale)   # cost 通道缩放 (λ 自动跟随)
     _HCFG = hc.h_settings()
