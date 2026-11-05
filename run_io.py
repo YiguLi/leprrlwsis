@@ -44,15 +44,43 @@ _STATE = {
 }
 
 
+def _write_console_w(fd, text):
+    """Windows 控制台：用 `WriteConsoleW`（UTF-16）写一行；不是控制台则返回 False。
+
+    为什么不能用 `os.write(fd, s.encode(enc))`：Python 3.6+ 在 Windows 控制台上
+    `sys.stdout.encoding` 是 **utf-8**（PEP 528，走 WriteConsoleW），但 `os.write`
+    是**原始字节**，控制台会按当前代码页（CP936）解释 ⇒ 中文变 `璇︾粏杈撳嚭`。
+    """
+    if os.name != 'nt':
+        return False
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+        handle = msvcrt.get_osfhandle(fd)
+        mode = wintypes.DWORD()
+        if not ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False                      # 不是控制台（管道/文件）
+        buf = text + '\n'
+        written = wintypes.DWORD()
+        ctypes.windll.kernel32.WriteConsoleW(
+            handle, buf, len(buf), ctypes.byref(written), None)
+        return True
+    except Exception:                         # noqa: BLE001
+        return False
+
+
 def _console_write(text):
     """写到**真实控制台**：优先用保存的 fd（fd 级重定向后依然有效）。
 
-    编码用控制台自己的编码（Windows 下通常是 cp936 / utf-8）——直接写 utf-8 字节
-    会在 cp936 控制台上把中文变成乱码。
+    * Windows 真控制台 ⇒ `WriteConsoleW`（UTF-16，中文不会乱码）；
+    * 否则（重定向到文件/管道/非 Windows）⇒ 按 `sys.__stdout__` 的编码写字节。
     """
     fd = _STATE.get('console_fd')
     if fd is None:
         print(text, file=sys.__stdout__, flush=True)
+        return
+    if _write_console_w(fd, text):
         return
     enc = getattr(sys.__stdout__, 'encoding', None) or 'utf-8'
     try:

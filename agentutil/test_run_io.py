@@ -126,6 +126,15 @@ def section_a2():
     os.remove(con_path)
     ok('这句应该进 train.log' in body, '详细输出写进了 train.log')
     ok('步/秒' not in console, 'progress=0 时不打进度行')
+    # 非控制台 fd（这里指向普通文件）⇒ WriteConsoleW 必须安全返回 False，不能崩
+    tmp = os.path.join(_HERE, '_tmp_wcw.txt')
+    f = open(tmp, 'w+b')
+    try:
+        ok(run_io._write_console_w(f.fileno(), '中文测试') is False,
+           '_write_console_w 对非控制台 fd 返回 False（不崩）')
+    finally:
+        f.close()
+        os.remove(tmp)
 
 
 def section_b():
