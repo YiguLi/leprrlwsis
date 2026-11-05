@@ -926,9 +926,9 @@ if __name__ == "__main__":
                         type=int,
                         help='hidden num of second fully connect layer')
     parser.add_argument('--rate',
-                        default=0.003,
+                        default=0.01,
                         type=float,
-                        help='learning rate')
+                        help='critic 学习率（2026-11-05 起默认 **0.01**，与其余方法统一；此前 0.003）')
     parser.add_argument('--prate',
                         default=0.0001,
                         type=float,

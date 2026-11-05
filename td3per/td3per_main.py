@@ -1513,10 +1513,11 @@ if __name__ == "__main__":
                      branch_mix=_branch_frac, branch_sup_beta=_branch_beta,
                      actor_arch=('v7' if str(args.critic_arch) == 'v7' else None))
     _n_crit = sum(p.numel() for p in agent_H.critic_p.parameters())
-    prCyan('[critic] arch={} act={} out_init={} → 单个 critic 参数量 {:,} '
+    prCyan('[critic] arch={} act={} out_init={} rate={} → 单个 critic 参数量 {:,} '
            '（对照: ns=4/na=6 时 v1=14,441, v6=150,081, v7=245,501）; '
            'actor={}'.format(
-               agent_H.critic_arch, args.critic_act, args.critic_out_init, int(_n_crit),
+               agent_H.critic_arch, args.critic_act, args.critic_out_init, args.rate,
+               int(_n_crit),
                ('400-300-400' if agent_H.actor_arch == 'v7'
                 else '{}-{}-{}'.format(args.hidden1, args.hidden2, args.hidden1))))
     if _branch_on:

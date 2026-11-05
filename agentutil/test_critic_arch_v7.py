@@ -485,6 +485,24 @@ def section_i():
     tsrc = open(os.path.join(ROOT, 'test_five_days.py'), encoding='utf-8').read()
     ok('def _detect_critic_arch' in tsrc and 'args.critic_arch = _arch' in tsrc,
        'test_five_days: 按 checkpoint 自动识别 critic arch')
+    # 2026-11-05: 所有方法的 critic 学习率默认统一 = 0.01
+    import glob
+    import re as _re
+    bad, n_rate = [], 0
+    for p in sorted(glob.glob(os.path.join(ROOT, '*', '*_main.py'))):
+        if os.sep + '未命名' + os.sep in p:            # 历史草稿目录，不参与
+            continue
+        s = open(p, encoding='utf-8').read()
+        m = _re.search(r"add_argument\('--rate',\s*default=([^,\n]+)", s)
+        n_rate += 1
+        if not m or float(m.group(1)) != 0.01:
+            bad.append('%s=%s' % (os.path.basename(os.path.dirname(p)),
+                                  m.group(1) if m else '?'))
+    ok(bool(n_rate >= 15) and not bad,
+       '所有 main 的 --rate 默认 = 0.01（%d 个；异常: %s）' % (n_rate, bad or '无'))
+    src_td3per = open(os.path.join(ROOT, 'td3per', 'td3per_main.py'),
+                      encoding='utf-8').read()
+    ok('rate={}' in src_td3per, 'td3per 的 [critic] 启动日志里能看到 rate')
 
 
 def main():
