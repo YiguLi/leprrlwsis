@@ -93,6 +93,18 @@ def _console_write(text):
         print(text, file=sys.__stdout__, flush=True)
 
 
+def console_write(text):
+    """公开入口：往**真实控制台**写一行（`--log_file 1` 下唯一安全的写法）。
+
+    ⚠ `setup()` 会 `os.dup2(log_fd, 1)` —— 这一步会**关掉 fd 1**，而
+    `sys.__stdout__` 仍持有那个旧的 fd/CRT 句柄 ⇒ 之后
+    `print(..., file=sys.__stdout__)` 会抛 `OSError: [WinError 6] 句柄无效`。
+    凡是"详细输出进 train.log、进度/汇总仍要上控制台"的调用点都必须走本函数
+    （`tick()` / `setup()` 内部也是用它）。
+    """
+    return _console_write(text)
+
+
 def setup(output_dir, log_file=0, progress=1, every=500, total=0):
     """在 `args.output = get_output_folder(...)` 之后调用一次。
 

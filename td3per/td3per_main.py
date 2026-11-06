@@ -51,7 +51,6 @@ L: r2 = −1·min(clip_amount, 20)   [MW] 命令与实际之差 (两段 clip 合
 """
 import os
 import sys
-import time as _time_mod   # 注意: 函数内 'time' 被时间步长(float)占用
 import numpy as np
 import argparse
 from copy import deepcopy
@@ -1228,8 +1227,6 @@ def train_hsrl(num_iterations_H,
 
     c1_bound_coef = float(getattr(args, 'c1_bound_coef', 10.0))   # c1 越界项系数（见 --c1_bound_coef）
     _progress = bool(int(getattr(args, 'progress', 1) or 0))
-    _prog_every = max(1, int(getattr(args, 'progress_every', 500) or 500))
-    _t0 = _time_mod.time()
     _tag = os.path.basename(str(output).rstrip('/\\'))
 
     # =================================================================
@@ -1883,15 +1880,9 @@ def train_hsrl(num_iterations_H,
 
         # ---- 推进 ----
         step += 1
-        if _progress and step % _prog_every == 0:
-            _el = _time_mod.time() - _t0
-            _rate = step / max(1e-9, _el)
-            _left = (num_iterations_H - step) / max(1e-9, _rate)
-            print('  [{}] {:>7}/{} ({:5.1f}%)  {:5.1f} 步/秒  已用 {:4.0f} min  剩余约 {:4.0f} min'
-                  .format(_tag, step, num_iterations_H,
-                          100.0 * step / max(1, num_iterations_H), _rate,
-                          _el / 60.0, max(0.0, _left) / 60.0),
-                  file=sys.__stdout__, flush=True)
+        # 进度行统一走 run_io：`--log_file 1` 时 fd 1 被 `os.dup2` 重定向到 train.log，
+        # `sys.__stdout__` 随之失效（WinError 6）⇒ 只能用 run_io 保存的控制台 fd 副本。
+        run_io.tick(step)
         episode_steps += 1
         episode_reward += r1
         episode_cost += c1_step
@@ -1968,9 +1959,10 @@ def train_hsrl(num_iterations_H,
         try:
             import hsrl_metrics
             _m = hsrl_metrics.summarize(output, tail=0.2, tag=_tag)
-            print('', file=sys.__stdout__)
-            print(hsrl_metrics.SUMMARY_HEADER, file=sys.__stdout__, flush=True)
-            print(hsrl_metrics.format_row(_m), file=sys.__stdout__, flush=True)
+            # 同进度行：必须走 run_io 的控制台副本（`sys.__stdout__` 在 dup2 后失效）
+            run_io.console_write('')
+            run_io.console_write(hsrl_metrics.SUMMARY_HEADER)
+            run_io.console_write(hsrl_metrics.format_row(_m))
         except Exception as _e:
             print('[summary] 汇总失败: {}'.format(_e), flush=True)
 
@@ -2710,6 +2702,8 @@ if __name__ == "__main__":
     # agent_L.load_weights('output/1_2310S-run18')
 
     if args.mode == 'train':
+        # 进度行（run_io.tick）需要总步数；两条路径都要设。
+        run_io.set_total(int(args.train_iter_H))
         if args.hsrl:
             # ---- HSRL 分支: 20 步测试的风速池 = 风速 CSV 的"天"列 ----
             _hsrl_wind_pool = None
@@ -2731,7 +2725,6 @@ if __name__ == "__main__":
                        upload=upload,
                        use_csv=use_csv)
         else:
-            run_io.set_total(int(args.train_iter_H))
             train(args.train_iter_H,
                   agent_H,
                   agent_L,
@@ -2745,6 +2738,8 @@ if __name__ == "__main__":
                   use_csv=use_csv)
         if upload:
             writer.close()
+        # 训练结束后恢复 fd 1 / 关闭 train.log（幂等；进程退出也会 flush）
+        run_io.close()
 
     else:
         raise RuntimeError('undefined mode {}'.format(args.mode))
