@@ -754,8 +754,17 @@ def update_batch_cost_rate(agent, stats=None, horizon='infinite', agg=None, gamm
 
       * `q_c_mean` / `q_c2_mean` = twin cost critic 在该次采样的 **PER 批**上、**行为动作**
         下的 Q 均值（`mean_i Q_c(s_i, a_i)`，`a_i` 来自 buffer）；
-      * ⚠ 这两个数在记录时**已经乘回 `s_c`**（见 `td3per_ddpg.update_policy` 末尾的口径还原）
-        ⇒ 它们**已是原始口径**，这里**不再乘 `s_c`**（重复乘会差 100 倍，是很隐蔽的坑）。
+      * ⚠ 这两个数在**值函数回归空间**（critic 实际回归的 `c1/s_c` 口径），**没有乘回 `s_c`**
+        —— 见 `td3per_ddpg.update_policy` 末尾那张表的说明（"每一列都在回归空间，不做任何
+        ×s 换算"）。故这里**必须 × `s_c`** 才能得到原始口径，与 `q_cost_rate` /
+        `policy_batch_cost_rate` 的 `q_raw = q_agg·s_c` 齐平。
+      * 【历史教训】此前本函数误信"已乘回 s_c"的过期注释而漏乘，导致 `rate` 恒小 `s_c`(=100)
+        倍 ⇒ `ratio = rate/d_block_H ≈ 0.005~0.08 ≪ 1` ⇒ λ1 从初值（= 下界）起就被一直往下压、
+        **永久钉在 0.2（= 物理 2.0 元/MW·step）**。`output/td3perv7branch10hsrl-run105`：
+        20201 步里 `lam1` 只有 1 个取值；对照 L 层 λ2（走 `policy_batch_cost_rate`，乘了 s_c）
+        反而顶到上限 50 ⇒ 一上一下的镜像症状就是本 bug 的指纹。
+      * 自检口径：`q_raw` 与同名的 `q_cost_H`（点估计，同为回归空间 ×s_c）应**同量级**；
+        若两者相差恰好 `s_c` 倍，就是这里又漏乘了。
 
     口径含义（用户选择）：该批均值随**缓冲的自然淘汰**（环形容量 = `--rmsize`）而更新 ——
     旧 transition 被覆盖后均值跟着当前行为分布走 ⇒ 作为"策略进步"的代理；且批是随机抽的、
@@ -778,8 +787,10 @@ def update_batch_cost_rate(agent, stats=None, horizon='infinite', agg=None, gamm
     q1 = float(np.mean([float(s['q_c_mean']) for s in st]))
     q2 = float(np.mean([float(s['q_c2_mean']) for s in st])) if 'q_c2_mean' in keys else q1
     _agg = HSRL_DUAL_Q_AGG if agg is None else str(agg)
-    q_raw = {'mean': 0.5 * (q1 + q2), 'min': min(q1, q2), 'max': max(q1, q2)}[_agg]
+    # 网络（回归）口径的批均值 —— 只是中间量，**不能**直接当 `rate` 的分子（见 docstring 的历史教训）
+    q_net = {'mean': 0.5 * (q1 + q2), 'min': min(q1, q2), 'max': max(q1, q2)}[_agg]
     sc = _cost_scale_of(agent) if cost_scale is None else float(cost_scale)
+    q_raw = q_net * sc                   # 口径还原: 回归空间 ⇒ 原始口径（与 q_cost_rate 一致）
     g = float(agent.discount if gamma is None else gamma)
     rate = cost_rate_from_q(q_raw, g, block=block, horizon=horizon)
     if return_info:

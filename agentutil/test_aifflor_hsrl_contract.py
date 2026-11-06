@@ -525,7 +525,7 @@ def main():
     check(H.HSRL_DUAL_Q_SRC == 'update_batch' and H.HSRL_DUAL_RECENT_N == 256,
           '默认口径: λ1 用 update_batch（本块 update 的 Qc 批均值）/ λ2 用 recent_batch N=256')
 
-    # ---- update_batch: 直接用 update_stats 里的 q_c_mean / q_c2_mean（**已是原始口径**）----
+    # ---- update_batch: 用 update_stats 里的 q_c_mean / q_c2_mean（**回归空间** ⇒ 必须 ×s_c）----
     class _AUpd:
         def __init__(self, stats, gamma=0.95, sc=100.0):
             self.device = 'cpu'
@@ -534,21 +534,31 @@ def main():
             self.value_scale = 1000.0
             self.update_stats = stats
 
-    _st4 = [{'q_c_mean': 300.0, 'q_c2_mean': 320.0}, {'q_c_mean': 340.0, 'q_c2_mean': 360.0}]
+    # 回归空间的取值（真实量级：0.6~3）；不是原始口径的 300+
+    _st4 = [{'q_c_mean': 3.0, 'q_c2_mean': 3.2}, {'q_c_mean': 3.4, 'q_c2_mean': 3.6}]
     _au = _AUpd(_st4, gamma=0.95, sc=100.0)
     _ru, _iu = H.update_batch_cost_rate(_au, horizon='infinite', agg='mean', return_info=True)
-    _q_exp = 0.5 * (0.5 * (300 + 320) + 0.5 * (340 + 360))          # = 330（先 twin 均值再批均值）
+    _q_net = 0.5 * (0.5 * (3.0 + 3.2) + 0.5 * (3.4 + 3.6))          # = 3.3（先 twin 均值再批均值）
+    _q_exp = _q_net * 100.0                                         # 原始口径 = 回归空间 ×s_c = 330
     check(abs(_iu['q_raw'] - _q_exp) < 1e-9 and abs(_ru - (1 - 0.95) * _q_exp) < 1e-9,
-          'update_batch（H 视界）: q_raw = %.1f（**不再乘 s_c**，因为它已是原始口径）⇒ rate = %.3f'
+          'update_batch（H 视界）: q_c_mean 在**回归空间** ⇒ 必须 ×s_c ⇒ q_raw = %.1f、rate = %.3f'
           % (_iu['q_raw'], _ru))
-    check(abs(_iu['q_agg'] - _q_exp / 100.0) < 1e-9,
+    check(abs(_iu['q_agg'] - _q_net) < 1e-9,
           '诊断列 q_agg 报网络口径（÷s_c = %.4f），便于与点估计/近端批的列比较' % _iu['q_agg'])
+    # 与 `q_cost_rate` / `policy_batch_cost_rate` 的**同口径**判据：
+    #   rate = (1−γ)·q̄·s_c。上面 q̄ = 3.3, s_c = 100, γ = 0.95 ⇒ 16.5
+    #   （对照本文件 q_cost_rate 那节：q̄ = 3、q_raw = 300 ⇒ rate = 15，两者同一把尺子）。
+    #   ⚠ 若把本函数的 `× s_c` 去掉（run105 的 bug），这里会得到 0.165 ⇒ 立即 FAIL。
+    check(abs(_ru - 16.5) < 1e-9,
+          'update_batch 与 q_cost_rate 同口径: rate = (1−γ)·q̄·s_c = %.3f（去掉 ×s_c 会变成 %.3f）'
+          % (_ru, _ru / 100.0))
     _rul, _iul = H.update_batch_cost_rate(_AUpd(_st4, gamma=0.98, sc=1.0), horizon='finite',
                                           agg='mean', return_info=True)
-    check(abs(_rul - _q_exp / _K98) < 1e-9,
+    check(abs(_rul - _q_net / _K98) < 1e-9,
           'update_batch（L 视界，若将来给 L 开 record_update_stats）: rate = Q/K = %.3f' % _rul)
     _rmax_u, _ = H.update_batch_cost_rate(_au, horizon='infinite', agg='max', return_info=True)
-    check(abs(_rmax_u - 0.05 * 340.0) < 1e-9, 'twin 聚合 max 作用在批均值上（%.1f）' % _rmax_u)
+    check(abs(_rmax_u - 0.05 * 3.4 * 100.0) < 1e-9,
+          'twin 聚合 max 作用在批均值上（%.1f）' % _rmax_u)
     _re, _ie = H.update_batch_cost_rate(_AUpd([]), horizon='infinite', return_info=True)
     check(_re is None and _ie['empty'] and _ie['n_update'] == 0,
           '统计为空（warmup / 未开 record_update_stats）⇒ 返回 None，由调用方回退 EMA')
