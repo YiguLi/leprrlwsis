@@ -28,7 +28,7 @@ C. `td3leprrlrb` 与统一口径**语义等价**（代表分钟映射相同；�
 D. 接线契约（静态扫描）：
    * 六个 main 都有 `--phase_feat default=1 choices=[0,1,2]`；
      五个统一 main 的 `nb_states_H = 4 + PHASE_DIM[...]`（旧口径为 `4 + _phase_dim`）；
-   * 六个 main 的 `--bsize 256` / `--rmsize 40000`（六个 TD3 方法已统一）；
+   * 六个 main 的 `--bsize`（td3per=32，2026-11-05 起；其余五个=256）/ `--rmsize 40000`；
    * 两个接收方（td3prrbb/td3prle）的 `nine_case_test` **接受** phase_mode/phase_table、
      **调用** `Normalize_H`、且函数体内**不再有** `Normalize(obs)` / `Normalize(obs2)`；
      main 向 `nine_case_test` 传 `phase_mode=phase_mode, phase_table=phase_table`；
@@ -171,18 +171,22 @@ print('=' * 100)
 print('D. 接线契约（静态扫描）')
 print('=' * 100)
 P_MAIN = {k: os.path.join(k, '%s_main.py' % k) for k in ALL6}
-# --bsize / --rmsize 默认 = 256 / 40000 (**六个 TD3 方法已统一**; 均启用 H 层 n 步滑窗,
+# --bsize / --rmsize 默认 = 256 / 40000（六个 TD3 方法原本统一；均启用 H 层 n 步滑窗,
 # 1 条 = n 块 = 5n 环境步 ⇒ 40000 条 ≈ 2M 环境步。更早的 "其余五方法 80000" 例外表
-# 已在批次 2 取消)。
+# 已在批次 2 取消）。
+# ⚠ 2026-11-05 用户要求 td3per 的 --bsize 改为 32（与 aifflor 对齐），
+#   因此 td3per 成为**唯一例外**；其余五个仍为 256。
 BSIZE_DEFAULT = 256
+BSIZE_EXCEPT = {'td3per': 32}
 RMSIZE_DEFAULT = 40000
 for k in ALL6:
     src = read_text(P_MAIN[k])
+    _bs = BSIZE_EXCEPT.get(k, BSIZE_DEFAULT)
     check("'--phase_feat', default=0, type=int, choices=[0, 1, 2]" in src,
           '%s: --phase_feat 默认 0（无时钟；时钟过拟合治理，2026 起）/ choices [0,1,2]' % k)
-    check("'--bsize', default=%d" % BSIZE_DEFAULT in src
+    check("'--bsize', default=%d" % _bs in src
           and 'default=%d,' % RMSIZE_DEFAULT in src,
-          '%s: --bsize %d / --rmsize %d' % (k, BSIZE_DEFAULT, RMSIZE_DEFAULT))
+          '%s: --bsize %d / --rmsize %d' % (k, _bs, RMSIZE_DEFAULT))
     check("'--nstep', default=5" in src and "'--target_agg', default='min'" in src,
           '%s: --nstep 默认 5 / --target_agg 默认 min' % k)
     check('nstep=args.nstep, target_agg=args.target_agg' in src,

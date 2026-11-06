@@ -1,4 +1,4 @@
-# AIFFLOR —— `td3per` 的 FLORIS 引擎版
+﻿# AIFFLOR —— `td3per` 的 FLORIS 引擎版
 
 > **一句话**：`aifflor` 基本上就是 `td3per` 把 **WFSim 风场仿真器换成 FLORIS**，
 > 其余完全一致。
@@ -9,16 +9,16 @@
 
 ---
 
-## 0. 与 `td3per` 的差异清单（**只有引擎**）
+## 0. 与 `td3per` 的差异清单（**默认路径只有引擎**；可选动作流形分支见 §3.10）
 
 | 项 | `td3per` | `aifflor` |
 |---|---|---|
 | 物理引擎 | WFSim（MATLAB，`WFSim_port`） | FLORIS（纯 Python） |
 | env 类 | `env.WindBattery`（`physics=None` ⇒ MATLAB 路径） | `WindBatteryAIF`（`physics=AifflorPhysics`） |
 | 尾流参数 | WFSim `meshing.m` 的 `forcescale` 等 | **FLORIS 随包默认**（`calibrated=False`）＋ **出口电平系数** `1/1.6696` |
-| **动作语义** | 轴向因子 `a∈[0,0.5]`（5 维）+ SOC 信号 | **完全相同** |
+| **动作语义** | 轴向因子 `a∈[0,0.5]`（5 维）+ SOC 信号 | **默认完全相同**；`--lin_wt` 时 actor 只输出 `a0/a4/g`（3 输出头） |
 | **奖励 / 成本 / 对偶 / n 步 / 相位特征** | `td3per_myfunc` | **逐字复用（零改动）** |
-| 算法本体（TD3+PER） | `td3per_ddpg` | **逐字复用（零改动）** |
+| 算法本体（TD3+PER） | `td3per_ddpg` | **默认逐位等价**；`--lin_wt` 分支改 actor 输出头/噪声/checkpoint |
 | 输出目录 | `output/TD3PER-runNN` | **`output/AIFFLOR-runNN`**（`--env` 默认值已改） |
 | TB scalar tag / CSV 列 | 与 `td3per` 逐字同名 | **逐字同名**（方法区分靠目录名 + CSV 名 `df_aifflor.csv`） |
 | 训练预算 | 1000 episode = 1,440,000 步 | **相同**（未改，与 `yawflor` 不同） |
@@ -133,16 +133,18 @@ WFSim 侧脚本 `agentutil/run_clip_check_wfsim.m`。）
 
 | 文件 | 关系 |
 |---|---|
-| `aifflor/aifflor_ddpg.py` | **逐字复制** `td3per/td3per_ddpg.py`（零改动） |
+| `aifflor/aifflor_ddpg.py` | `td3per` 本体 + aifflor 的动作流形接线（默认 6 输出逐位不变；`--lin_wt` 为 3 输出 actor） |
 | `aifflor/aifflor_myfunc.py` | **逐字复制** `td3per/td3per_myfunc.py`（**零改动**） |
 | `aifflor/aifflor_main.py` | `td3per/td3per_main.py` + 替换表（env 类 / 不启 MATLAB / **输出目录名 `--env`** / 文案 / RUN_TAG） |
 | `aifflor/aifflor_turbine.py` | **新写**：I/O 映射表 / 口径 / 模型构造 / 向量化求值（单一真源） |
 | `aifflor/aifflor_env.py` | **新写**：`AifflorPhysics`（NaN 守卫 + 预取）+ `WindBatteryAIF` |
+| `aifflor/aifflor_hsrl.py` | **新写**：`--hsrl` **方法分支**的全部口径（常量 + 纯函数，单一真源；见 §3.8） |
 
 ```bash
 python agentutil/port_aifflor.py --apply    # 落盘
 python agentutil/port_aifflor.py --check    # 校验磁盘 == 源 + 替换表（双向）
 python agentutil/test_aifflor_contract.py   # 环境契约（只读，不需 MATLAB）
+python agentutil/test_aifflor_hsrl_contract.py   # --hsrl 分支契约（纯算术 + 桩环境，见 §3.8）
 ```
 
 ---
@@ -308,6 +310,145 @@ corr(WFSim, FLORIS 标定后) = 0.999959        ← 轨迹几乎一致
 * 若要与 WFSim 精确对齐：把观测按 FLORIS 口径归一化，或训练时把 reward/cost
   统一乘 `1/1.037`（这正是早先实测的 `COST_SCALE` 等效值 1.816→0.972 的同一件事）。
 
+### 上层 critic 结构（`--critic_arch`，**默认 `v7`**）
+
+`--critic_arch` 的**默认值 = `v7`**（2026-11-04 起；2026-10-29~11-03 是 `v6`；
+2026-10 之前是 `v2`，更早是 `v1`）：
+
+```text
+v7   : cat(state, action) → 400→300→400→1  +  actor state→400→300→400→action   # 2026-11-04 起默认
+v7.1 : cat(state, action) → 500→400→500→1  +  actor state→500→400→500→action   # 2026-11-06
+v7.2 : (s→128 ∥ a→128) → cat(256) → 400→300→400→1
+       + actor state→128→400→300→400→action                                    # 2026-11-06
+v7.3 : (s→128 ∥ a→128) → cat(256) → 500→400→500→1
+       + actor state→128→500→400→500→action                                    # 2026-11-06
+v6   : s→32→32 ∥ a→64→64 → [32+64]=96 → 128→256→256→128→1   # 原始 a 不再重复拼入（旧默认）
+v2   : s: ns→hidden1→hidden2 ∥ a→32→64 → square(带残差)→128→64→1   # 更早的生产默认
+v1   : fc1(x)→fc4→cat(a)→fc2→fc5→fc3                            # 历史口径
+```
+
+- `v7` 的宽度写死在 `model.V7_DIMS`（`--hidden1/--hidden2` 对它**不生效**，与 v5/v6 同口径）；
+  参数量 245 501（ns=4, na=6）/ 247 101（`--critic_wind5 1` 的 8 维 state）。
+  与 `v1af` 同属"动作首层进网"，但宽度是显式 400/300/400 的规格。
+  离线 C1 基准（`agentutil/critictest`）上与 v6 的对照见
+  `documentation/critic_arch_v7.md`。
+- **v7 的 actor 也改为 400-300-400**（2026-11-03）：`model.Actor` 的形状恒为
+  `state→hidden1→hidden2→hidden1→action`，所以 v7 下 H 层 actor 用
+  `model.V7_ACTOR_DIMS=(400,300)` ⇒ **state→400→300→400→action**，参数量 **245 106**
+  （ns=4, na=6；此前 16/100 只有 3 445）。`--hidden1/--hidden2` 在 v7 下**只作用于 L 层**
+  （L 是 1 维 BESS 动作，仍 16/100，避免无谓放大）。
+  ⚠ 因此 v7 的 actor checkpoint（`actor_6.pkl`）与 2026-11-03 之前的 v7 run
+  （如 `AIFFLOR-V7-run20`，16/100）**形状不兼容**，不能直接续训/加载。
+- **v7.1 / v7.2 / v7.3（2026-11-06）**：在 v7 同一接线上新增的三个可选结构，
+  canonical CLI 值是 `v7.1/v7.2/v7.3`（也接受 `7.1/7.2/7.3`），**默认仍是 v7**：
+  - `v7.1`：critic `cat(s,a)→500→400→500→1` + actor `s→500→400→500→a`
+    （H critic 406 901 参数、actor 406 406）；
+  - `v7.2`：critic `(s→128 ∥ a→128)→cat(256)→400→300→400→1` +
+    actor `s→128→400→300→400→a`（H critic 345 437、actor 295 346）；
+  - `v7.3`：critic `(s→128 ∥ a→128)→cat(256)→500→400→500→1` +
+    actor `s→128→500→400→500→a`（H critic 531 437、actor 469 046）。
+  其中 256 是**拼接宽度**（128+128），不是额外隐藏层；v7.2/v7.3 的 actor 多一层
+  `fc0` state 编码器。`--hidden1/--hidden2` 对新结构同样**不生效**；L 层 actor 仍 16/100。
+  结构/参数/恢复/评测接线见 `documentation/critic_arch_v7x.md`，
+  契约测试 `python agentutil/test_critic_arch_v7x.py`（162 项，纯静态）。
+- **checkpoint 识别**：`infer_arch` 按 `h1` 形状区分 v7.1/v7，按 `s1/a1` 的 128 维 +
+  `m1` 输入 256 区分 v7.2/v7.3；`test_five_days` 还会从 `actor_6.pkl` 的 `fc0`
+  反推 v7.2/v7.3 的 actor 编码器。
+- 该开关同时作用于 **H 和 L 两个 critic**（HSRL 下 `agent_L` 共用同一 `args`；
+  L 的动作维 = 1，`--critic_feat_power` 会因 `nb_actions ≠ feat_nt+1` 自动关闭）。
+- `infer_arch` 按 checkpoint 的 `h1/h2/h3/out` 键唯一识别 v7（`build_critic_from_sd`、
+  `td3per.SP_TD3.load_weights` 都能自动重建）。
+- 其它默认：`--critic_act relu`、`--critic_out_init fanin`、`--critic_bias_init none`。
+- **`--critic_wind5` 仍默认 0（关闭）** —— 需要 8 维 critic state 时必须显式传 1。
+- 复现 2026-10 之前的 v2 run：显式传 `--critic_arch v2`。
+
+### 默认超参（2026-11-03 起）
+
+| 参数 | 旧默认 | **新默认** | 说明 |
+|---|---|---|---|
+| `--bsize` | 256 | **32** | critic 一次更新的 minibatch |
+| `--rate` | 0.003 | **0.01** | critic（H/L 共用）学习率 |
+| `--tau` | 0.001 | **0.001**（未变） | 目标网络软更新系数 |
+| `--critic_arch` | v6 | **v7**（2026-11-04） | critic `cat(s,a)→400→300→400→1` + actor `s→400→300→400→a` |
+
+- 依据：`output/AIFFLOR-V7-run20`（v7 critic，200k 预算跑到 130k）的表现明显好于 v6 时代的同区间，
+  用户 2026-11-03 指定把这三项作为**新默认**；2026-11-04 进一步把 v7 设为**所有方法**的默认结构
+  （见 `documentation/critic_arch_v7.md` §7）。
+- ⚠ 这会让"默认臂"与旧 run 不再逐位可比：复现旧口径请显式传
+  `--bsize 256 --rate 0.003 --critic_arch v6`。
+- `--prate`（actor 学习率，1e-4）未变。
+
+### 上层 critic 五风速（`--critic_wind5 1`）
+
+默认 `--critic_wind5 0`：上层 actor/critic 都是原 4 维 `obs`，历史路径逐位不变。
+
+`--critic_wind5 1` 时：
+
+```text
+actor  state  = 原 obs (4+phase)                     # 不看未来风速
+critic state  = 原 obs + [u2,u3,u4,u5]/10            # u1 已含在 obs 中
+```
+
+- 五风速来自 `env._upcoming_wind(4)`（块首当前步 `u1` 之后的四步）；
+- 这是 **asymmetric critic**：memory 存完整 critic state；`update_policy` 里 actor 只取前
+  `nb_states` 维，critics 用完整 state；`q_cost_rate` / `policy_batch_cost_rate` 也做同样切片；
+- actor 的 `select_action`、测试函数仍只用原 `obs`，不会把未来风速带进决策；
+- 与 v6 组合示例（`v6` 已是默认，这个 flag 现在可省；保留是为了显式可读）：
+
+```powershell
+python aifflor/aifflor_main.py --critic_arch v6 --critic_wind5 1 ...
+```
+
+实现入口：`_append_wind5_H`（`aifflor_main.py`）、`SP_TD3(critic_nb_states=...)`
+（`aifflor_ddpg.py`）、`aifflor_hsrl` 的 actor 切片。
+
+### 宽动作覆盖（aifflor 默认）
+
+aifflor 默认使用**宽动作覆盖**，用于 offline/在线 replay 的动作可辨识性：
+
+1. **每个固定风速日重复 3 个 episode**（`WindBatteryAIF.DAY_REPEAT = 3`）：
+   `episode 0..2 → day[0]`，`3..5 → day[1]`，依此类推；其他项目仍 `DAY_REPEAT=1`。
+2. **风机 5 维噪声**：
+   ```text
+   A_i ~ U[wt_noise_min, wt_noise_max]     # 默认 U[0.00, 0.05]，逐维、每次决策独立
+   noise_i ~ U[-A_i, A_i]
+   ```
+   若 `a_i + noise_i` 触到 `[0,0.5]`，只把该维**噪声**截到可行区间
+   （`noise_i ← clip(noise_i, −a_i, 0.5−a_i)`）；若 actor 输出本身越界，仍保留原动作，
+   `CheckAction` 照常记越界罚。
+3. **风机噪声不衰减**：wide 模式不乘 ε，训练全程保持同样幅度；
+   第 6 维 `g` 仍沿用 `--hsrl_sig_noise_max → --hsrl_sig_noise_min` 衰减。
+4. 口径开关：
+   ```powershell
+   # 默认 wide（幅度带 U[0.00, 0.05]）
+   python aifflor/aifflor_main.py ...
+   # 回到旧 ε 衰减口径
+   python aifflor/aifflor_main.py --wt_noise_mode legacy ...
+   ```
+
+> **⚠ 2026-10-29 改默认：幅度带 `U[0.05, 0.25]` → `U[0.00, 0.05]`。**
+> 依据（与 §3.9 的 branch 配套）：
+> * branch 的测试动作在带内的**设计间距**是 **0.20~0.25**（`prior≈0.20–0.33` /
+>   `low≈0–0.10` / `high≈0.40–0.50`）；
+> * 旧带的 **std ≈ 0.093、峰值 0.25** ⇒ 噪声幅度 **≈ 设计间距**，会把"同块 5 个动作"
+>   的配对结构抹平；且触边删失后质量堆在 0/0.5（run14 实测 `a>0.45` 占 **35.7%**、
+>   `a<0.05` 仅 2.7%），既不是"actor+对称噪声"也不是"平衡覆盖"；
+> * 新带 **std ≈ 0.017、峰值 0.05 = 间距的 1/4** ⇒ 只保留"局部光滑 + 少量状态探索"，
+>   而**覆盖率交给 `--branch_actions`**（平衡、无删失、不随 π 移动、且是干净的样本）。
+> * 副作用（刻意接受）：`c1=φ(P_F)` 是凸的 ⇒ 噪声越大，`E[c1(π+ε)]−c1(π)` 越大；
+>   旧宽带让 **λ 长期为探索噪声付费**（且风机维噪声**从不衰减**），收窄后这部分偏差显著变小。
+> * **兼容性**：`--wt_noise` 从此**只管 legacy**（起幅）；wide 的下界改用 **`--wt_noise_min`**。
+
+相关参数：
+
+| 参数 | 默认 | 说明 |
+|---|---:|---|
+| `--wt_noise_mode` | `wide` | `wide` / `legacy` |
+| `--wt_noise_min` | **0.0** | wide 的幅度**下界**（逐维 `A_i~U[min,max]`） |
+| `--wt_noise_max` | **0.05** | wide 的幅度**上界**（旧默认 0.25） |
+| `--wt_noise` | 0.05 | **仅 legacy**：起始幅度（随 ε 衰减） |
+| `--wt_noise_floor` | 0.0 | **仅 legacy**：地板 |
+
 ### ⚠ 两个**不能**平移的东西（别混淆）
 
 1. **`P_F` 平滑阈值（`P_F_LIMIT = 3 MW`）、`W_GAP = 10 MW`、`L_CLIP_CAP = 20 MW`
@@ -449,10 +590,296 @@ AifflorPhysics(nt=5, calibrated=False, power_scale=AT.LEVEL_COEF)
 
 ---
 
+## 3.8 `--hsrl` 方法分支：**"块总放电量"语义**（2026-10 新增）
+
+`aifflor` 现在有**两条方法分支**，靠命令行开关区分（**不加开关 = 旧口径，逐位不变**）；
+另有三个**动作流形开关**（`--farm_level` / `--scalar_wt` / `--lin_wt`，见 §3.10），
+它们改"actor 输出到 5 维风机动作"的映射（`--lin_wt` 是结构版，还改 actor
+输出维数与 checkpoint），但不改方法语义：
+
+```powershell
+python aifflor\aifflor_main.py            # 旧口径: SOC 目标信号 + 规则残余动作 + 平抑窗口
+python aifflor\aifflor_main.py --hsrl     # HSRL:  块总放电量 + 绝对 pb + 指数式追踪成本
+```
+
+* **`aifflor/aifflor_hsrl.py` 是 HSRL 口径的唯一真源**（常量 + 纯函数 + warmup 摊还执行器 +
+  20 步测试函数）。共享模块 `hsrl_soctarget.py` / `hsrl_warmup.py` / `aifflor_myfunc.py`
+  的既有口径不因本分支改变（2026-10-25 只在 `hsrl_warmup` **新增** `unified` 分支、
+  并让 aifflor 显式改默认 ⇒ 其余入口仍 `lhs`，行为不变）。
+* `aifflor_main.py` 里 `train_hsrl()` 与 `train()` **并列实现**（不共用循环）：
+  未加 `--hsrl` 时 `train_hsrl` 与 `aifflor_hsrl` 的函数**一行都不会被调用**，
+  因此旧路径可以断言"逐位不变"（见本文末的回归证据）。
+
+**warmup 上层（两条分支共用，2026-10-25 起）**：7200 步 = 1440 个块，默认
+`--warmup_wt_sched unified` —— **一半随机行为改成"五维统一随机升降噪声"**：
+
+* 奇数块（720 个）：整场只维护一个偏移 `o`，`a_i = prior_i + o`
+  （`prior = [0.2,0.2,0.2,0.2,1/3]`）；每块 `o ← o ± 0.05`（**五维共享同一个 δ**），
+  `o` 夹在 `[0.05−min(prior), 0.45−max(prior)] = [−0.15, 0.1167]`
+  ⇒ 五维同向升降、相对形状不变，且始终在 `[0.05,0.45]`。
+* 偶数块（719 个，含第 0 块起点）：仍走 LHS 全局覆盖 `[0,0.5]`，保住非相干的覆盖。
+* 动机：aifflor 的宏观自由度是"整场降载水平"（`model.proj_farm_level` 的射线投影），
+  critic 需要**五维同向**的样本才能辨识该方向；纯 LHS 几乎不提供相干样本。
+* 复现旧口径：`--warmup_wt_sched lhs`；其余 main 不传该参数 ⇒ 共享默认仍是 `lhs`。
+  契约测试：`python agentutil/test_warmup_unified.py`。
+
+### 口径对照表
+
+| 项 | 旧口径（`train()`） | `--hsrl`（`train_hsrl()`） |
+|---|---|---|
+| **H 第 6 维含义** | SOC 目标信号 `a6∈[−0.5,0.5]` → `soc_target=0.25+0.41667·a6` | **块总放电量 `g` [MW·min]，放电为正** |
+| H 第 6 维边界 | 人为信号带 `[−0.5, 0.5]` | **可行域** `[−C_max, +D_max]`（SOC + 额定功率，**不含波动**） |
+| H 第 6 维越界罚 | 400 元/单位（不封顶） | 400 元/MW·min（不封顶） |
+| H 第 6 维探索噪声 | `sig_noise_max 0.2 → min 0.01`（信号量纲） | `--hsrl_sig_noise_max 0.5 → 0.025` [MW·min]（= 满量程 2.5 的 20% → 1%） |
+| **H r1** | `pr·P_G·dt − 490·max(−pbrule,0)·dt − pen` | `pr·P_G·dt − pen5 − pen6`（**去掉 bessdeg**） |
+| H 块末 gap 罚 | `10·max(0,\|soc_target−SOC_末\|−tol)` | **删除**（执行偏差由 L 的 c_L 承接） |
+| H c1 | 波动当量 + `W_GAP·unfeasible_gap` | 同公式，但 `unfeasible_gap ≡ 0`（平抑窗口已关） |
+| **L 动作** | 残余 `pb = rule_action(基线) + Δ` | **绝对 `pb`**（正 = 充电，与 env 同号） |
+| L 动作裁剪 | `CheckAction` ±0.5 + RBB 平抑窗口 | **只按 SOC + 额定功率**（RBB 以 `fluctuation_limit=inf` 构造） |
+| **L r2** | `−1·min(clip_amount, 20)`（含波动裁剪那一段） | `−200·越界[MW] − 20·放电[MW·min]` |
+| **L c_L（图上公式）** | `+1·trackerr`（到"Soctrack 范围 ∩ 平抑窗口"的距离） | `1 − exp(−\|(g−Σ已放电)/(δ−t_L) − a_L\|)` |
+| L 观测 | `[pg(t−1)/10, ptur/10, SOC/0.5, target/0.5, n_rem/5]` | `[u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5, need/2.5]`（6 维，第 6 维 = c_L 的参照点） |
+| λ2 | `[0.5, 2]`，初值 1（MW↔MW 兑换率） | `[2, 50]`，初值 10（c_L 无量纲 vs r2 元量级） |
+| **对偶的分子** | 实际块成本的 EMA（α=0.02） | **critic cost 的 Q**，默认取**近端 256 条的批均值 × 当前策略动作**（S1；`--hsrl_dual_q_src point` 可退回单点、`--hsrl_dual_src ema` 可退回 EMA） |
+| **λ1 区间** | `[0.967, 4.833]` 元/(MW·step)（名义边际收益的 10%~50%） | **物理 `[2, 50]`**（= actor `[0.2, 5.0]`，初值 = 下限 2）：上界 = max(平抑资源边际成本 BESS 退化 20、峰价降载 16.33) 的 **2.5×**；界外波动单价 = `20·λ1` |
+| `d_block_L` | 1.2（地板 0.15） | 0.1（**地板 = 0**，见下；Q 口径下不再为探索噪声付费 ⇒ 由 0.5 收紧，把 λ2 的工作点抬回 20~50） |
+| warmup 下层 | 规则追 `soc_target`（`Δ≡0` 基线） | **摊还执行器** `pb = clip(−(g−Σ)/n_rem, 物理域)` |
+| 训练中测试 | 9-case（45 步，`df_test9.csv`） | **20 步协议**（见下，`df_test20_hsrl.csv`），风速用**固定段** `col=120/start=483` |
+| 产物 CSV | `df_aifflor.csv` / `df_episode_aifflor.csv` | `df_hsrl.csv` / `df_episode_hsrl.csv` / `df_test20_hsrl.csv` |
+
+公式出处：`c_L` 就是 `未命名/PER_main0.py:116-118` 的原式
+（`c2 = -np.exp(-abs((signal - sum(pb_l[:-1]))/(5-tt) - pb)) + 1`；那里 `signal` = H 第六维、
+`tt = step%5`、`pb_l` = 本块已执行的实际功率）——`agentutil/test_aifflor_hsrl_contract.py`
+第 C 节把它逐位对照。
+
+### 三个必须写清的推导 / 坑
+
+**① 块级可行域：单位是 MW·min，且 SOC 约束**不乘 δ**
+
+```
+D_max = min(P_rated·δ , (E − E_min)·η_d·60)          [MW·min]  放电上限（g 的正侧）
+C_max = min(P_rated·δ , (E_max − E)·60/η_c)          [MW·min]  充电上限（g 的负侧）
+g ∈ [−C_max, +D_max]
+```
+
+两条约束都**不含波动**（用户口径）：
+
+1. **额定功率**：每步 `|pb| ≤ P_rated`，块内 δ 步 ⇒ 总量 ≤ `P_rated·δ`；
+2. **SOC 能量**：放电量 `q` [MW·min] 让电池能量下降 `q/η_d` [MW·min]
+   （因 `ΔE = P_D·dt/η_d`，且 `1 MWh = 60 MW·min`）⇒ 整块 ≤ `(E−E_min)·60`
+   ⇒ `Σq ≤ (E−E_min)·η_d·60`（充电同理，效率在分母）。
+
+⚠ **陷阱**：写成 `(E−E_min)·η_d/dt` 只是**单步**功率上限（= 58.8·E MW），
+整块要换算成**能量**（×60，**不是** ×δ）。本项目容量 0.5 MWh、额定 0.5 MW，
+两者在中段都由额定功率决定（±2.5 MW·min 相同），**只有在 SOC 贴边时才分叉**
+（如 `E=0.01 MWh`：正确 0.588 vs 错写 2.94，差 5 倍）。契约测试第 B 节用
+"把 D_max 恰好花完 ⇒ SOC 恰好收在下界"这一物理判据把它钉住。
+
+**② `Σ` 与 `a_L` 都用"实际施加值"**：`a_L = −pb_applied`（`pb_applied` 是 env 回传的
+`P_C − P_D`），`Σ` 是同一口径的块内累计（**不含当前步**）。这与原式一致（那份代码是把
+env 回传的 `action[-1]` 事后 append 进 `pb_l` 的）。
+
+**③ "零成本动作 = 摊还计划"**：`g` 与 `Σ` 都在命令之前确定 ⇒ 若 L 命令
+`pb = −(g−Σ)/n_rem`（且不被物理域裁掉），则 `a_L = (g−Σ)/n_rem` ⇒ `c_L ≡ 0`（精确 0）。
+warmup 期的下层规则就是这个"摊还执行器"，启动时用 400 组随机 `(E,g,Σ,n_rem)` 断言
+（`hsrl.check_amortized_baseline`，被物理域裁剪时 `c_L>0` 只可能来自"物理上做不到"）。
+
+### 已知局限（**刻意保留**的原方法形态）
+
+1. **L 观测的第 6 维已给出 c_L 的参照点**（`need = (g−Σ已放电)/n_rem`，`--hsrl` 第二轮加入）：
+   策略因此**直接看得到"本步该出多少"**（零成本动作 = 令 `a_L = need`），本步代价
+   `c_L = 1−exp(−|need−a_L|)` 只依赖本步的 `need`/`a_L` ⇒ 就"本步怎么动"而言信息已给全。
+   **残余局限**：`need = (g−Σ)/n_rem` 是**一个方程两个未知量**（Σ 与 n_rem 都不可观测）
+   ⇒ **下一状态的参照点** `need' = (g−Σ−a_L)/(n_rem−1)` 仍不能精确预测（同一个观测可对应
+   不同的 `need'`，契约测试第 G 节把它写成可执行记录）。要补齐就再加一维 `n_rem/5`
+   （`agent_L` 的 `nb_states` 6→7）——但注意 `done_L` 在块末为真，该处 next-state 不参与
+   自助传播，所以影响面主要是**块内前 4 步**的 bootstrapping。
+2. **H 对"块内波动"没有直接控制**：`g` 只约束块**总量**，块内怎么分配由 L 决定，而 L 的
+   r2/c_L 都只看沉淀量与计划偏差 ⇒ 平抑压力全部落在 H 的 c1（事后计费）上。
+   在容量 0.5 MWh / 额定 0.5 MW 的口径下，BESS 对 3 MW 限幅的平抑能力本就有限
+   （见 §2 的波动表），但这仍是语义上一个应当自知的口径。
+3. **`d_block_L = 0.5` 会让 λ2 容易贴顶**：实测 1000 步烟测里 `EMA_c_L ≈ 1.6 > 0.5`
+   ⇒ λ2 很快升到上限 50（此时跟踪项对 L 的权重 = 50 倍）。若希望 λ2 在中段工作，
+   把预算放宽（`--hsrl_d_block_l 2.0` 之类）或等 L 学会兑现计划后由 curriculum 自动
+   减半（减半条件是"连续 50 块 EMA ≤ 预算"，贴顶时不会触发）。这是**调参旋钮**，不是 bug。
+
+### curriculum 的收敛下限（地板）= 0（用户第六轮）
+
+两层预算减半规则是 `d ← max(d/2, 地板)`，减少触发条件是"连续 50 块 `ema_cost ≤ d`"。
+
+| | 之前 | 现在 |
+|---|---|---|
+| **H 层地板** | `hc.h_settings()['d_block_min'] = D_BLOCK = 15` = **初值** ⇒ 减半是 `max(7.5, 15) = 15` 的**空操作**，curriculum 被**设计性禁用**（`hsrl_cost.py:17`：*地板 = 初值 ⇒ 取消 curriculum（对事件型约束收紧预算只会与硬约束冲突）*） | **0**（`--hsrl_d_block_h_min`，默认 `hsrl.HSRL_D_BLOCK_H_MIN = 0`） ⇒ **减半真正生效** |
+| **L 层地板** | 0.05（实测在 step≈64,080 处已触发过一次 0.1 → 0.05，此后被地板卡死） | **0**（`--hsrl_d_block_l_min`） |
+
+* **用户理由**："我们对 λ 的设计确保其**就算钉在上限也不会在波动约束内影响盈利**" ——
+  物理价上界 50 = `max(资源边际成本 BESS 退化 20, 峰价降载 16.33) 的 2.5×`，界外单价 `20·λ1`
+  ⇒ 即便 λ 钉在 50（界外时每 MW 罚 1000 元）也只是"买平抑"，不会把盈利目标压垮
+  ⇒ 无需用"地板 = 初值"来禁用 curriculum。
+* **地板实际由可达性决定（自适应标定）**：预算会一直减半，直到"连续 50 块不满足 `ema ≤ d`"
+  而**自行停止** ⇒ 停在哪一级 = 策略当前能达到的水平，而不是常数拍定。
+* **已知后果（用户已接受）**：预算一旦降到低于可达水平，`ratio = rate/d` 持续 > 1 ⇒
+  λ 钉在上限并保持（设计允许的工作点）。`d_block_H`/`d_block_L` 已写入 CSV/TB，
+  可直接观察减半停在哪一级。
+* **实现细节**：地板设 0 后 `d` 可极小 ⇒ 两个对偶的 `exp(η·(rate/d − 1))` 加了**指数饱和**
+  `clip(..., ±60)`；由于随后必然 `clip` 到 `[λ_min, λ_max]` 且 λ > 0（单调），饱和后与用 `inf`
+  的结果**逐位相同**，只避免溢出告警。契约测试覆盖了"正常区间不受影响"与"极端 ratio 饱和到上界且无 inf/nan"。
+* ⚠ **非 `--hsrl` 路径逐位不变**：旧 `train()` 仍用 `_h['d_block_min']`（H=15/L=0.15 口径），
+  两个地板只作用于 `train_hsrl`。
+
+### 对偶的分子：**critic cost 的 Q**（而不是实际块成本的 EMA）
+
+`--hsrl_dual_src q`（默认）把 λ 的分子从"**单块实现值**的 EMA"换成"**critic 期望**的 Q"：
+
+```
+rate_Q^H = (1 − γ_H) · Q_c(s₀,a₀) · s_c          # H: γ 按块、视界 1/(1−γ)=20 块 ≪ 一天 288 块
+rate_Q^L = Q_c(s₀,a₀) · s_c / K,  K = (1−γ_L^δ)/(δ(1−γ_L)) = 0.9608   # L: 5 步有限 episode
+λ ← λ · exp(η·(rate_Q/d_block − 1))，clip 到区间         # 与原来同形，只换分子
+```
+
+* **折算为什么必须做**：Q 是**折扣回报**（H 的 Q ≈ d/(1−γ) ≈ 20d），与"每块预算 d_block"不同量纲。
+  折算后**不动点不变**（rate = d_block ⇔ ratio = 1）：实测 `Q_raw=300, γ=0.95 ⇒ rate=15 ≡ d_block_H`。
+* **取值约定（写死，便于审计）**：状态 = **块首**观测（L 的块末观测已近 episode 终止，`Q_c` 会
+  退化成"最后一步的成本"）；动作 = **块首实际执行的动作** —— ⚠ 这一条是实测逼出来的：critic 的
+  TD 目标是**带探索噪声**的实际 cost，用 `actor(s)` 的无噪动作评估会**系统性低估**
+  （`c_L=1−exp(−|·|)`、`c1=P_F+20(P_F−3)⁺` 都是凸的 ⇒ 噪声下 `E[c] > c(E)`）——实测 L 层
+  `rate` 从 0.317（无噪）升到 0.490（实际动作），H 层同向。twin 取**均值**（回归目标已用 max，
+  对偶再用 max 是**双重高估** ⇒ 会复现仓库里记载过的"高估→λ 顶死"）。
+* **A/B 实测（`--warmup 300 --max_steps 3000 --seed 1`，539 个策略期块）**：
+
+  | 臂 | λ1 区间 | λ1 逐块相对跳变 | λ1 轨迹（每 60 块） |
+  |---|---|---|---|
+  | **Q（默认）** | `0.0967 ~ 0.1111`（不撞界） | **0.068%/块** | `0.0967 ×8, 0.0968` |
+  | EMA（对照） | `0.0967 ~ 0.4833`（**撞上界**） | 0.601%/块 | `0.0967×3, 0.1088, **0.4833**, 0.4484, 0.3167, 0.1578, 0.0967` |
+
+  重尾块（`sum_c1` 最大 305）在 EMA 臂里把价格**一步顶到上界**，之后要 ≈50 块（EMA 时间常数）
+  才衰减回来；Q 臂里同一个尖峰只把 `rate_c_H` 抬到 18 即回落（Q 本身也被那一块的 TD 目标推动，
+  但它是 bootstrap 期望，不带 EMA 的长尾）。⇒ **Q 版的 λ 明显更平稳**，符合预期。
+
+* **代价与已知问题（写清以免误读）**：
+  0. **分子的具体估计量（第三轮追加，`--hsrl_dual_q_src`）**：默认 `recent_batch`（S1）
+     = **近端 N=256 条状态**的批均值 × **当前策略动作** `π(s_i)`：
+
+     ```
+     rate = K_horizon · mean_i Q_c(s_i, π(s_i)) · s_c      # H: K=(1−γ_H)；L: K=1/K_finite
+     ```
+
+     为什么不是"块首单点 `Q_c(s₀,a₀)`"（旧默认，仍可用 `--hsrl_dual_q_src point` 复现）：
+     在 `output/AIFFLOR-run73`（26.9k 块）上实测——**违约与否极大受当日风速影响**，而单点分子
+     与当日风况相关 **+0.74**（与块内 ΣP_F +0.57）⇒ λ1 的慢趋势里 97% 是风况驱动、
+     λ 自身与 u 相关 +0.18。换成批均值后风相关降到 **−0.01**、分子 sd 缩 4.3×；
+     但**若动作仍用缓冲里存的旧行为动作**，它锚在历史行为分布上（均值 16.9 > 预算 15，
+     且被 PER 高误差样本过采抬高）⇒ λ1 **69.5% 时间贴上界**、四分位均值几乎不动
+     （16.7→16.2）＝**不反映策略进步**。取"近端状态 + 当前策略动作"则两者兼得：
+     风被跨天平均掉（256 条 ≈ 1 天）、动作是 π(s) ⇒ 随策略改进而变，且与 actor 的惩罚项
+     **同泛函**（actor loss 用 `Q_c(s, actor(s))`）⇒ 固定点 = "actor 自己的平均成本 = 预算"，
+     不存在"对偶看单点、actor 看批均值"的泛函错配。
+     * 近端读取**直接读环形缓冲**（`recent_states`，`_storage` + `_next_idx`），
+       **不调用 `memory.sample()`** ⇒ 不吃随机流、不改变训练轨迹的可复现性；
+     * 额外成本 = 每块 2 次 critic 前向（H/L 各一次，256 行一批），零额外 FLORIS；
+     * `--hsrl_dual_recent_n` 可调（256 ⇒ ≈1 天；1024 ⇒ ≈4 天，更平滑但更滞后）。
+  1. Q 有 critic 的**偏差/滞后**。实测 H `rate_c` 7.27 vs EMA 9.79（低 26%）、L `rate_c` 0.490 vs
+     EMA 1.654（低 3.4×）。L 差得多的根因很清楚：**warmup 期 L 的 `c_L ≡ 0`**（摊还执行器是
+     零成本动作）⇒ `BiasInitTracker` 把 L 的 cost critic bias 初始化成 ≈0 ⇒ Q 要从零爬。
+     实测它确实在爬（rate 0.129 → 0.655 over 550 块），λ2 先降到 5.1 再回升 ⇒ 是**滞后**不是错.
+  2. 两个口径的**语义差**也要认清：EMA 度量的是"**行为**（含探索噪声）的成本"，Q（按实际动作
+     评估 + bootstrap 期望）更接近"**策略**的成本"。L 层噪声很大（`--l_noise_amp 1.0` 对 ±0.5 MW
+     的物理域 ≈ 2 倍满量程），所以旧 EMA 口径**把探索噪声也计进了约束价格**（λ2 因此长期贴在
+     50）；Q 口径下 λ2 在 5~10 附近工作。⇒ 这不是"变松了"，而是"不再为噪声付费"；但代价是
+     **评测态（无噪声）的计划兑现压力也下降**（实测 test20 的 `c2` 从 EMA 臂的 ~1.0 升到 ~5.7）。
+     按用户决定，已把 `d_block_L` 由 0.5 **收紧到 0.1**（同一 rate 的 ratio ×5 ⇒ λ2 回到 20~50），
+     把"兑现计划"的紧度补回来。
+  3. **回退**：`q_rate` 为 None（critic 尚未建立）时自动退回 EMA ⇒ 对偶不停摆；EMA 仍然每块维护
+     （日志 / curriculum / 回退用）。`--hsrl_dual_src ema` 是完整的历史口径 A/B 臂。
+
+### test20 的固定风速段
+
+`--hsrl_test_wind fixed`（默认）用**固定**段 `col=HSRL_TEST_WIND_COL=120 / start=483`：
+
+* **选段依据**（扫 194 列 × 1421 起点）：在"均值 8~11 m/s"的窗口里，该段逐步爬坡
+  `Σ|Δu| = 29.0` 位于**前 5%**；u 均值 **10.35 m/s**（全池 10.83，代表性好）、min 7.70 / max 12.86。
+  按 dP/du ≈ 1.07 MW/(m/s) 估算单步 |ΔP| ≈ 2 MW **< 3 MW 限幅** ⇒ 有可观的波动成本可优化、
+  但基本不出现越限（越限时 BESS 只有 0.5 MW，本来就大多不可避 ⇒ 测不出策略差异）。
+  20 个风速值（可逐位核对，契约测试已钉）：
+  `10.37 10.35 12.35 10.53 11.23 9.95 11.76 10.31 12.86 10.29 12.03 8.71 9.11 9.68 9.88 10.74 8.74 7.70 10.90 9.43`
+* **为什么固定**：每次触发都是同一场景 ⇒ test20 曲线是**配对**的，可以直接看收敛；随机段会把
+  场景间差异混进曲线（旧默认）。
+* 仍保留 `--hsrl_test_wind random`（配 `--hsrl_test_seed`）作泛化对照；`--hsrl_test_wind_col/start`
+  可覆盖固定段。
+
+### λ1 的物理价标定（**已定稿**：D1 单通道只重标定区间）
+
+λ1 [元/(MW·step)] 是 `c1 = P_F + 20·(P_F−3)⁺` 的影子价。**单位口径（用户第五轮澄清）**：
+**界内波动**的单价 = `λ1`，**界外波动**的单价 = `20·λ1`（机械导数再加界内那 1 项 ⇒ `21·λ1`，差 5%）。
+
+| | 未越限 (`P_F ≤ 3`) | 越限 (`P_F > 3`) |
+|---|---|---|
+| 每多 1 MW·step 的边际罚 | `λ1` | `(1+K_V)·λ1 = 21·λ1` |
+
+* **上界 = 50 元/(MW·step)**（`HSRL_LAM1_PHYS_MAX`，用户第五轮）：依据 = 仓库原则
+  "**λ_max 必须高于任何平抑资源的边际成本**"。本项目只有两种平抑资源：
+
+  | 资源 | 边际成本 |
+  |---|---|
+  | BESS 放电退化 | **20 元/(MW·step)** |
+  | 风机降载（少卖电） | `pr·Δt` = **5.0 ~ 16.33 元/(MW·step)** |
+
+  ⇒ 需求 `λ_max > max(20, 16.33) = 20`，取 **2.5×** ⇒ **50**（= 退化价 2.5×、峰价边际收益 3.06×）。
+  用户要的"980 电价下越限净梯度为负"由此成立：`20·λ_max = 1000 ≫ 16.33`（余量 **61×**）。
+  * ⚠ **两条量纲混淆的旧判据（已废止，记此以免误读）**：① 用户原写法 `50×20 = 1000 略大于 980`
+    —— 980 是 **元/MWh**，须先乘 `Δt = 1/60 h` 才能与 λ1 比；② 仓库更早的
+    `(1+K_V)·λ_max > 980×2 = 1960 ⇒ λ_max > 93.3`（曾给出 100）同样混淆量纲。
+* **下界 = 2 元/(MW·step)**（`HSRL_LAM1_PHYS_MIN`，用户第五轮第二次重标；历史依次 0.967 → 50 → 2）：
+  * `2/16.33 = 12%`（峰价边际收益）、`2/5.0 = 40%`（低电价边际收益）、`2/9.67 = 21%`（名义边际收益）；
+  * **关键性质：2 < BESS 退化边际价 20** ⇒ 界内波动**不值得为它动用 BESS**（不诱导无谓充放循环），
+    同时界内仍**非零价**（"不完全免费"）；
+  * 仍高于量纲正确的要求 `16.33/21 = 0.78` ⇒ 不破坏上一条判据。
+* 两界均可用 `--hsrl_lam1_min/--hsrl_lam1_max`（物理价）临时覆盖；`lam1_phys_bounds()` 在
+  **调用时**乘 `hc.lam_scale()`（生产 = 0.1）⇒ 生产 actor 区间 `[0.2, 5.0]`，初值 = 下界。
+* **上界只在出现越限块时起作用**（实测最大块 `sum_c1 = 305` ≫ 15）。本轮按用户选择
+  **不加**非对称步长（保持对称乘性 0.02）、**不加**含越限的专用测试段。
+* 讨论过的其它三条路（本轮未采用，记此备查）：**D4** 抬 HSRL 专属 `K_V≈100` 把 λ1_max 压到 20
+  （越限 101×20 = 2020 > 1960，未越限价格 ≤ 名义 2×）；**D2** 硬/软双通道（`yawflor_dual.py`
+  已有实现：硬 = `K_V·(P_F−3)⁺` 自适应 λ，软 = 固定 κ 进 r1）⇒ "低值"退化为常数；
+  **非对称自适应**（`η_up=0.10` 快抬 / `η_dn=0.01` 慢放）。
+* 关键自由度（选型依据）：越限价格只取决于乘积 `(1+K_V)·λ1_max`，而未越限价格只取决于 `λ1`
+  本身 ⇒ 同一个 1960 可由不同 `(λ1_max, K_V)` 组合达到，D1 选了"不动结构、只抬 λ1_max"。
+
+### 训练中的测试：20 步协议（替换 9-case）
+
+* 电价**恒 300**（低谷）；风速 = **固定的 20 步段**
+  （见上"test20 的固定风速段"；`--hsrl_test_wind random` 可切回随机取列+起点）；
+  开局 **SOC = 0.25 MWh**（注意 `env.ScenarioReset` 里硬编码的
+  `E = 5.0` 会被显式覆写 —— 旧 9-case 其实一直是在 `E=5 > max_E` 的病态起点上跑的）。
+* **触发频率不变**：`step > warmup` 且 `episode_steps % 480 == 0`（与旧 9-case 同一处）。
+* 采样用**独立** `RandomState`（仅 random 模式用；不吃训练流、不改变训练轨迹）。
+* 指标：逐块 + `OVERALL` 两档写 `df_test20_hsrl.csv`；TB 走 `test20/overall/*` 与
+  `test20/block{i}/*`（旧 9-case 的 `test9/*` 在 `--hsrl` 下不再产生）。
+* 指标口径同 §3.8 的"指标字典"：`r1/c1`（H；含 pen5+pen6）、`r2/deg/viol`（L）、
+  `c2=Σc_L`、`g/g_raw/sum_disch`（计划 vs 兑现）、`need_mean/dev_mean/cL_max`（跟踪质量）、
+  `cvm/pf_viol`、`soc_*`/`dsoc`、`profit`/`profit_econ`（存货结算价 580）。
+
+### 回归证据（本次改动）
+
+| 项 | 结果 |
+|---|---|
+| **旧口径逐位不变** | `--max_steps 300 --seed 1`（无 `--hsrl`）改前/改后 `df_aifflor.csv` **SHA256 完全相同**（`0091C06A…F8A2`）—— 第二轮（加 L 观测第 6 维）后**再次复核，仍逐位相同** |
+| `agentutil/test_aifflor_hsrl_contract.py` | **全部通过**（A–J 共 80+ 条断言：可行域⇔RBB 逐位、c_L⇔原式逐位、符号/裁剪/罚、H 奖励差 = bessdeg、6 维观测与第 6 维参照点、**Q→每块成本速率的折算（含固定点 Q=d/(1−γ)⇒rate=d、透传实际动作）**、λ1/λ2 区间与不动点、摊还自检、20 步协议手算逐位 + **固定风速段逐位**） |
+| **对偶 A/B**（`--warmup 300 --max_steps 3000 --seed 1`，539 个策略期块） | Q 臂 λ1 ∈ `[0.0967, 0.1111]`、逐块跳变 **0.068%**；EMA 臂 λ1 ∈ `[0.0967, 0.4833]`（**撞上界**）、0.601%/块 ⇒ Q 版 λ 明显更稳；`rate_c` 与 EMA 的差（H 7.27 vs 9.79、L 0.49 vs 1.65）已拆解到"critic 滞后 + 探索噪声算不算进约束"两条（见 §3.8） |
+| ⚠ **上一条 A/B 的更正**（2026-10，第三轮） | 上面"Q 版 λ 更稳"是**贴底伪影**：那次 Q 臂 `rate_c_H≈7.3 < 15` ⇒ 每块都被压向下界并被夹住 ⇒ `|Δlnλ|≈0`。用**同一 run 的 `ema_c1_H` 反算** EMA 臂轨迹（同 η、同区间）得逐块 `|Δlnλ|` = 0.708% ≈ Q 的 0.691%（EMA 还略大）⇒ **换分子不改变 λ 的整体行程**。真正的三个杠杆按效力排序：η（减半 ⇒ −45%）、区间宽度（只改幅度：物理 100→20 使跨度 103×→21×）、分子平滑（β=0.1 只 −13%）。见 §3.8 的"分子"小节与 `agentutil/_scratch/` 的临时分析脚本 |
+| **S1（近端批均值 × π(s)）落地** | `--hsrl --warmup 300 --max_steps 3000` 跑通：`n_recent_H` 0→256（按期增长）、`rate_c_H` 与 `q_batch_H` 等诊断列齐全；`rate_c_H` 与 ΣP_F 相关 −0.23（point 臂 +0.57）、sd 3.0（point 臂 8.5）；该短程里 `rate<d` ⇒ λ1 正确停在 0.0967（无抖动）。**风脱钩与"反映进步"需长跑验证**（对照臂 = `output/AIFFLOR-run73` 133k 步）；对照脚本：`agentutil/_scratch/compare_s1_vs_point.py` |
+| `--hsrl --warmup 300 --max_steps 1500 --seed 1` 端到端 | 跑通；摊还自检 400 例全过；20 步测试在 step 480/960/1440 各触发一次；episode 边界产出 `df_episode_hsrl.csv`；FLORIS 坏点 **0**；无 NaN（除 `ema_c1_H`/`ema_cL_L` 在 EMA 建立前的预期 NaN） |
+| 烟测自洽量 | `pbrule ≡ pb_applied`、`clip_amount ≡ viol_L`、`obs_need × 2.5 ≡ need`（逐位）；`g` 在 warmup 期按价格游走饱和到 ∓2.5、策略期由策略自行决定；策略期 `corr(g_raw, 块Σr1) = +0.163`（**奖励梯度方向正确**：放电为正 ⇒ 收益为正）；`need` 实测范围 ≈ ±2.2（可超过单步物理域 ±0.5 ⇒ 第 6 维确实携带"够不够得着"的信息） |
+| `agentutil/test_aifflor_contract.py` | **1 项既有失败**（与本改动无关）：`build_L_obs_distilled 逐位相同` —— `td3per_myfunc` 的版本在 `nolow` 提交里多了 `soc_signal=None` 形参，`aifflor_myfunc` 的副本没跟上（`git log` 可查：该漂移早于本次改动）；aifflor 的调用方式不受影响 |
+
+---
+
 ## 4. 运行与注意
+
 ```powershell
 cd "C:\Users\SCP Site19\Desktop\llm enhanced wsis\leprrlwsis"
-F:\anaconda\envs\wsis\python.exe aifflor\aifflor_main.py
+F:\anaconda\envs\wsis\python.exe aifflor\aifflor_main.py            # 旧口径
+F:\anaconda\envs\wsis\python.exe aifflor\aifflor_main.py --hsrl      # HSRL 分支（见 §3.8）
 ```
 
 * **解释器必须是装了 FLORIS 的那个环境**（原先唯一可用的路径是
@@ -502,8 +929,252 @@ aifflor 用回 `--env TD3PER`。
 
 | 项 | 结果 |
 |---|---|
-| 契约测试 `test_aifflor_contract.py` | **全部通过**（myfunc 逐位相同 / 动作语义 / 标定生效 / 不引入 matlab / 观测与守卫 / 预取确定性） |
+| 契约测试 `test_aifflor_contract.py` | **全部通过**（myfunc 逐位相同 / 动作语义 / 标定生效 / 不引入 matlab / 观测与守卫 / 预取确定性）—— ⚠ 2026-10 起 `build_L_obs_distilled 逐位相同` 一条为**既有失败**（`nolow` 提交给 td3per 版加过 `soc_signal` 形参，见 §3.8 末表），与本分支无关 |
+| 契约测试 `test_aifflor_hsrl_contract.py`（`--hsrl`） | **全部通过**（可行域⇔RBB 逐位 / c_L⇔原式逐位 / 符号与罚 / H 奖励差 / 6 维观测与参照点 / λ2 / 摊还自检 / 20 步协议手算） |
+| `--hsrl` 端到端 1500 步 | 跑通（FLORIS 坏点 0；20 步测试在 step 480/960/1440 触发；产物 `df_hsrl.csv` + `df_test20_hsrl.csv` + `df_episode_hsrl.csv` + `update_stats_H.csv`） |
+| 旧口径改前/改后同 seed 300 步 | `df_aifflor.csv` **SHA256 完全相同**（`0091C06A…F8A2`）⇒ `--hsrl` 分支对旧路径零影响 |
 | 端到端训练 60 步 | 跑通，**10.4 s**；预取 25 次（批量 25 / 单条 25 / **命中 48**），NaN 守卫 **0** 次 |
-| 输出目录 | **`output/AIFFLOR-runNN`** ✅（产物 `df_aifflor.csv` + tfevents） |
+| 输出目录 | **`output/AIFFLOR-runNN`** ✅（产物 `df_aifflor.csv` + tfevents；`--hsrl` 时为 `df_hsrl.csv` 等，见 §3.8） |
 | 外部验证（6 随机日 × 100 分钟，每步随机动作） | 非有限值 **0** 条 |
 | `u=10, a=1/3` 单点 | **3.294116 MW**（标定后现值，作为回归锚） |
+
+---
+
+## 3.9 `--branch_*`：同块首宽动作覆盖（2026-10 新增）
+
+> 计划书 = `documentation/aifflor_branch_wide_coverage_plan.md`（§13 是实施记录）。
+> 口径单一真源 = **`aifflor/aifflor_branch.py`**。
+
+### 要解决什么
+
+`AIFFLOR-run14`（v6 + `--critic_wind5 1`）的离线读数：`∂Q_c/∂a` 与物理 `∂c1/∂a`
+的 sign 一致率 **~52%**、Pearson **≈0**、**折点放大比 0.78（真值 21.7）**
+⇒ critic 基本没学到"动作 → 波动成本"。
+
+根因**不是**网络容量（离线 C1 回归 R²≈0.99），而是在线**行为策略的动作分布太窄**：
+同一个块首 state 上 actor 只留下 1 个动作，动作边际只解释 value 方差的 ~1%
+（风速/电价解释了 ~96%）。
+
+### 做法（一句话）
+
+**每个分支块从同一个「完整块首 state」再跑若干个测试动作**，把它们各自的
+块级 `(s, a, Σr1, Σc1, s′, done)` 当**正常 TD 数据**写进同一个 replay；
+但 `actor loss / 下层 BESS / λ / EMA / curriculum / CSV / TB / test`
+**只用 actor 来源的数据**。
+
+```
+块 b 的块首 ──► actor: 5 步（真正推进主 episode）  ─► replay(src=actor, n_boot=γ^5)
+              └► branch ×4: 各自 5 步（跑完 restore）─► replay(src=branch, n_boot=γ)
+```
+
+### ⚠ 与计划书的一处**口径换算**（HSRL 语义）
+
+计划书里第 6 维是"SOC 目标信号 `±1`"；`--hsrl` 之后第 6 维是**块总放电量 `g` [MW·min]**。
+于本实现：
+
+| 开关 | 含义 |
+|---|---|
+| `--branch_freeze_lower 1`（**默认**） | branch 内下层 BESS 冻结在 `pb ≡ 0` ⇒ `P_G = P_tur`、`E` 不变 ⇒ 块内 `c1` **只由风机动作决定** |
+| 冻结时的 `g` | **恒 0**（`pb≡0` 时 `g` 无物理作用，留着只污染动作维） |
+| `--branch_goal_pm1 1` | 仅在 `--branch_freeze_lower 0` 时有物理作用：`g` 取 `+D_max`（满放电）/ `−C_max`（满充电） |
+
+⇒ **默认 = 上下层解耦，branch 只改 5 维风机动作。**
+
+### 动作集（`--branch_actions`，默认 `prior,low,high,uniform`）
+
+| mode | 生成式 | 覆盖 |
+|---|---|---|
+| `prior` | `[0.2,0.2,0.2,0.2,1/3] + 逐维 U(−0.05,0.05)` | 中性工作点 |
+| `low` | 逐维 `U(0.00, 0.10)` | 强降载边界（`a<0.05` 占一半） |
+| `high` | 逐维 `U(0.40, 0.50)` | 满发边界（`a>0.45` 占一半） |
+| `uniform` | 逐维 `U(0, 0.5)` | 全域无偏 |
+| `ramp` / `alt` / `single` | 斜坡 / 奇偶交替 / 单台扰动 | 形状与异向（可选） |
+
+* 全部**按构造**落在 `[0,0.5]` ⇒ 不需要"触边只截噪声"那一步（actor 分支才需要）。
+* `low/high` 的带**刻意**取 `[0,0.10]`/`[0.40,0.50]`（计划书字面的 `[0.05]+U[0,0.05]`
+  对 `a<0.05` 的覆盖率是 **0%**，达不到"边界覆盖 ≥5%"）；可用
+  `--branch_low_lo/hi`、`--branch_high_lo/hi` 覆盖。
+
+### Replay 与采样
+
+| 项 | 实现 |
+|---|---|
+| 标签 | `src`（0=actor/1=branch）、`mode`、`block_id`、`lower_ver` —— **只用于采样/诊断，绝不进 critic state** |
+| 存储 | **同一个 replay**（`PER_buffer.PrioritizedReplayBuffer` 的元数据是**惰性**的：不用 branch 时零开销、逐位不变） |
+| 采样 | critic 批按 `--branch_critic_frac`（默认 **0.45**）分层：`n_branch=round(0.45·bsize)`，两池**池内**各按 priority^α 抽；branch 池内部按 mode 均衡 |
+| actor loss | **只用 actor 行**（`actor_mask` 掩码切片）；无 branch 时 `slice(None)` ⇒ 逐位不变 |
+| λ 的分子 | `recent_states` 只在 `src==actor` 里取近端 N 条；`q_c_mean` 只算 actor 行 |
+| 下层 BESS | `agent_L` 有**独立** memory ⇒ branch 从不进 L 的 replay |
+| n 步 | branch 只有 1 个块 ⇒ `n_boot = γ`，**不进 `_pending` 链**；actor 仍 `γ^n` |
+
+### 开关一览（`python aifflor/aifflor_main.py --help` 的 `branch` 组）
+
+| 参数 | 默认 | 说明 |
+|---|---:|---|
+| `--branch_every` | **0（关）** | 每 K 块 branch 一次；`10` ⇒ **1.4×** 仿真，`4` ⇒ 2.0× |
+| `--branch_pilot_blocks` | 0 | 前 N 块**每块**都 branch（阶段 A pilot/预训练） |
+| `--branch_actions` | `prior,low,high,uniform` | 逗号分隔；可用 7 种生成器 |
+| `--branch_critic_frac` | 0.45 | critic 批里 branch 的占比（夹到 ≤0.5，避免 actor 被淹没） |
+| `--branch_freeze_lower` | 1 | 1 = `pb≡0`（默认）；0 = 用摊还执行器兑现该 branch 的 `g` |
+| `--branch_goal_pm1` | 0 | 仅 `freeze_lower=0` 时有物理作用 |
+| `--branch_sup_beta` | 0（关） | 可选的 branch 1-step 辅助监督（在同一尺度上做 Huber，不带 bootstrap）；按 `--branch_sup_blocks` 从 β0 线性降到 0.2·β0 |
+| `--branch_csv` | 1 | 写 `df_branch_hsrl.csv` |
+| `--branch_seed` | −1 | branch 的**独立** RandomState（⇒ 开关 branch **不改变 actor 轨迹的随机数**） |
+| `--branch_low_lo/hi`、`--branch_high_lo/hi`、`--branch_prior_jitter` | 见上表 | 动作带的细调 |
+
+### 产物
+
+* `df_branch_hsrl.csv`：逐 branch transition（`step/block_id/mode/a1..a5/g/r1/c1/P_F_mean/P_F_max/n_fold/soc_*/sum_disch/lam1/lower_ver`）。
+* TensorBoard `branch/*`：`c1_mean`、`r1_mean`、`n_trans`、`cover_lo`/`cover_hi`/`cover_fold`
+  （计划 §7 的三个覆盖率）、`buffer_n_branch`/`buffer_frac`/`batch_frac`。
+* 训练结束打印 `[branch]` 汇总：每 mode 的 `n/mean_c1/mean_r1/mean_P_F` + 覆盖率 + replay 比例。
+* **行为层一条都不写**（`df_hsrl.csv` / `df_test20_hsrl.csv` / `λ` / `EMA` / curriculum 全是 actor 的）。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| `python agentutil/test_aifflor_branch_contract.py` | **28149 条断言全绿**（纯静态，不跑仿真）：`Σr1/Σc1` 与**独立数组重算**逐位一致、`freeze_lower` 时 SOC/pbrule 恒 0、主轨迹逐位还原、PER 环形覆盖后计数正确、`update_policy` 里 actor 每批只吃 actor 行、`n_boot` branch=γ/actor=γⁿ、`recent_states` 只取 actor |
+| `agentutil/probe_cost_grad_hsrl_wind5.py`（在 `run14` 上的基线读数） | sign **51.5%**、Pearson **+0.13**、折点放大比 **0.78**（真值 **21.7 ≈ 解析 21**）、动作增量 R² **+0.0022** ⇒ 三条验收全 FAIL，与计划书对 run14 的判断吻合 |
+| `--branch_every 0`（默认） | 全部新代码走"关闭"分支：`branch_mix=0` ⇒ `update_policy` 用历史整池采样、不给 actor 打掩码；`recent_states` 无元数据 ⇒ 历史口径 |
+
+> ⚠ 成本：`--branch_every 10` 实测口径是 **1.40×**（每 10 块 50 步 + 20 步），
+> 不是计划书写的 1.3×（那按"每块 5 动作"的近似估的）。
+
+---
+
+## 3.10 `--lin_wt`：线性行为分支（结构版，2026-10 新增）
+
+> 设计/取舍/局限的完整版 = `documentation/aifflor_linear_behavior_branch.md`。
+> 契约测试 = `python agentutil/test_aifflor_lin_wt.py`。
+
+### 一句话
+
+**actor 输出层只有 3 个神经元 `a0` / `a4` / `g`**；中间三台由 `a0` 到 `a4`
+线性插值展开并保留两位小数。critic 仍吃 6 维动作；其余（HSRL 语义、奖励/成本、
+探索、warmup、日志）一律不动。默认 `--lin_wt 0` ⇒ 旧路径逐位不变。
+
+```powershell
+python aifflor/aifflor_main.py --hsrl --lin_wt 1 --seed 0
+```
+
+### 动作定义
+
+```
+actor 输出（3 维） = [a0, a4, g]
+
+展开：
+    Δ = a4 − a0
+    a1 = round(a0 + 0.25Δ, 2)
+    a2 = round(a0 + 0.50Δ, 2)
+    a3 = round(a0 + 0.75Δ, 2)
+    action = [a0, a1, a2, a3, a4, g]
+```
+
+例：`a0=0.12, a4=0.25, g=-0.7` ⇒ `[0.12, 0.15, 0.19, 0.22, 0.25, -0.7]`。
+
+* **actor 没有中间三个输出单元**：中间维是 `a0/a4` 的确定性函数
+  （`model.expand_lin_wt`），不存在"中间三台各自的 actor 行为/梯度"。
+* 首尾维**不取整、不 clip**：越界仍由 `check_action_H_hsrl` / `CheckAction`
+  裁 + `pen5` 罚；首尾越界会连带推出中间维越界，`pen5` 按实际越界维数累计。
+* 第 6 维 `g` 是 actor 的第 3 个输出，完全独立。
+
+### 结构版 vs 6 输出 + 投影覆盖
+
+| | **结构版（当前）** | 投影覆盖版（旧提案） |
+|---|---|---|
+| actor 输出层 | **3 个神经元** `a0/a4/g` | 6 个神经元，第 1..3 维被覆盖 |
+| 中间维来源 | `expand_lin_wt(a0,a4)` | `proj_lin_wt` 覆盖 |
+| 中间输出单元 | **不存在** | 存在但永远不用 |
+| actor checkpoint | **`actor_3.pkl`** | `actor_6.pkl`（形状其实 3） |
+| 中间维梯度 | 通过 `∂a_i/∂a0`、`∂a_i/∂a4` 回到 **a0/a4** | 同左，另有 3 个死输出单元 |
+
+### 为什么是"首尾 + 线性"
+
+`agentutil/probe_turbine_wake_attribution.py` 的实测：单排 5 台里两端 T1/T5 是
+**符号稳定、量级大**的动作通道（T1 占出力 44.4%；T5 下游耦合恒 0；
+真实 `∂c1/∂a` 符号稳定率 84% / 90%），而中间 T2–T4 的净灵敏度被"自身项 vs
+下游耦合"近抵消（符号一致率 43%~48%，接近抛硬币）。⇒ 把 5 维压成
+"两端 2 维 + 整排线性型线"，去掉近零方向，同时保留连贯形状
+（区别于 `--scalar_wt` 的"五台全相等"）。
+
+### 与其它动作流形开关的区别（三者互斥）
+
+| 开关 | 流形 | actor 输出维 | 中间维 |
+|---|---|---:|---|
+| 默认 | 5 维独立 | 6 | 自由 |
+| `--farm_level 1` | `a_i = s·c_i` | 6 | 射线决定，保留形状 |
+| `--scalar_wt 1` | `a_i = a_0` | 6 | 全等于首端 |
+| **`--lin_wt 1`** | **首尾 + 线性插值** | **3（a0/a4/g）** | **线性型线，两位小数** |
+
+### 实现落点（缺一处就会被绕过）
+
+| 位置 | 作用 |
+|---|---|
+| `model.expand_lin_wt` / `expand_lin_wt_np` | **3 维 actor 输出 → 6 维动作**（中间线性插值 + 两位小数） |
+| `model.proj_lin_wt` / `proj_lin_wt_np` | 把**完整动作**（warmup 的 5/6 维）投影回首尾 + 线性型线 |
+| `model._round_half_away_ste` / `_round_half_away_np` | 四舍五入 + straight-through |
+| `SP_TD3.actor_nb_actions` | `2 + (nb_actions − na_box)`（上层 = 3）；下层 L 自动回退 1 |
+| `SP_TD3._expand` | 所有 actor 前向的统一出口：lin 展开 / 其余走原投影 |
+| `SP_TD3.select_action` | 只在 `[a0,a4,g]` 上加探索噪声，再展开 |
+| `SP_TD3._target_smoothed_action` | 只在 `[a0,a4,g]` 上加 TD3 target smoothing 噪声，再展开 |
+| `SP_TD3.random_action` | warmup 直接采 `[a0,a4]∈[0,0.5]²`、`g∈[-0.5,0.5]`，再展开 |
+| `SP_TD3.save/load/save_checkpoint` | actor 文件名用 `actor_tag`（lin = **3**） |
+| `aifflor_main._apply_lin_wt` | warmup / `diag_fix` / `explore_mix` 之后把完整动作投影回线性型线 |
+| `aifflor_main.init_wt_action_bias` | **3 输出映射**：`a0/a4` ← `U(lo,hi)`，`g` ← `sig_value` |
+| `train()` 与 `train_hsrl()` | 两条主循环的 warmup 与 actor 路径都调用 |
+
+* **下层 BESS 不受影响**：L 层只有 1 维动作，`SP_TD3` 构造时按
+  `nb_actions >= na_box` 自动把 `lin_wt` 置 `False`；否则会把 1 维动作误扩成 5 维。
+* **critic 不变**：仍按 6 维动作构造；`actor_3.pkl` 只影响 actor checkpoint，
+  `critic_*_6.pkl` 文件名与形状都不变。
+* **`--branch_*` 的动作集不经过线性投影**（"其他不变"）。同时开
+  `--branch_every` 时 critic 会同时看到流形外的 branch 动作；只想验证线性分支
+  建议 `--branch_every 0`。
+
+### 两位小数：前向量化 + 反传 STE
+
+直接 `round` 会把中间维对 `a0/a4` 的梯度贡献清零（`round/floor` 导数几乎处处 0）。
+因此展开用 **straight-through**：前向是真两位小数，反向按连续插值传梯度
+（`∂y/∂x ≡ 1`）。另外：
+
+* `1e-6`（缩放后 = 动作量 `1e-8`）只吸收 float32 在 `.xx5` 边界上的表示抖动
+  （`0.12` 实际是 `0.1199999973…`），不改变正常四舍五入；
+* 插值与取整中间量用 **float64** 再写回原 dtype ⇒ torch 与 numpy 对同一输入
+  给出同一位小数；
+* 量化使"动作 → 奖励"在 0.01 网格上分段常值；STE 不改变执行的动作，只改变
+  反向传播的近似。`--lin_wt_decimals` 可改小数位（`<0` 关闭取整）。
+
+### 训练期行为
+
+* **探索**：actor 输出 3 维 → 只在这 3 维上加噪声 → 展开；中间维没有独立噪声。
+  wide 模式的两个端点仍用 `U[wt_noise_min, wt_noise_max]` 幅度、按 `[0,0.5]`
+  截断噪声；`g` 仍用 `sig_noise_max → sig_noise_min`。
+* **target smoothing**：同样只对 3 个自由维加 clipped Gaussian 噪声，再展开
+  ⇒ 目标动作始终在线性流形上。
+* **warmup**：`random_action` 直接采 3 维；`WarmupSchedule` 产生的完整 6 维动作
+  在 `_apply_lin_wt` 处投影回首尾 + 线性型线（`unified` / `lhs` 的端点分布不变）。
+* **初始化**：`init_wt_action_bias` 把 3 个输出 bias 映射为
+  `a0,a4 ~ U(0.05,0.45)`、`g = 0.0`。
+* **checkpoint**：`actor_3.pkl`；critic 仍 `critic_*_6.pkl`。旧分析工具若写死
+  `actor_6.pkl`，需要改成 `actor_3.pkl` 并注意 actor 只有 3 个输出。
+
+### 已知局限（刻意保留）
+
+1. **型线被强制为线性**：真实最优型线未必线性（`FARM_CENTRE` 就不线性）；
+   这条臂测的是"两端 + 线性"这个结构假设，不是"最优型线"。
+2. **只有 2 个自由度**：中间三台无法独立微调；需要非单调型线时这条臂会系统性吃亏。
+3. **量化**：两位小数 ⇒ 中间维在带内是 51 级格点；首尾维仍连续。
+   改 `--lin_wt_decimals` 会改变动作集，跨 run 不可直接比。
+4. **首尾越界的连带罚**：一次可能计 3~5 维 `pen5`，是"2 维驱动 5 台"的必然结果。
+5. **checkpoint 不兼容**：`actor_3.pkl` 不能与 6 输出 actor 互相 warm-start
+   （`fc4` 形状不同）。
+
+### 验证
+
+`python agentutil/test_aifflor_lin_wt.py`（只读；单点 FLORIS 求值，不跑 episode）：
+展开/投影语义、actor 结构（3 输出 / 3447 参数 / 自由维索引 / 默认臂 6 输出 /
+下层 1 维自动跳过）、梯度（a0/a4/g 三路 + STE 对照）、探索/random_action/
+target smoothing 的流形、`actor_3.pkl` 保存加载、物理不变性、初始化映射、
+两条主循环接线，全绿。回归：`test_aifflor_scalar_wt.py`、
+`test_aifflor_hsrl_contract.py`、`test_aifflor_branch_contract.py` 仍全过。

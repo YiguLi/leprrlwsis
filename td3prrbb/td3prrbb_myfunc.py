@@ -443,14 +443,14 @@ def Cal_Rew_PRRBB(observation, observation2, action_rbb, rbb_info,
 # 7. Action Checking (PER convention, unchanged)
 # =============================================================================
 
-PENALTY_NN_H_COEF = 400.0  # [元/单位] H 层动作越界罚 (机组限功率 [0,0.5]×5 + 信号 [±0.5])
+PENALTY_NN_H_COEF = 10.0   # [元/单位] H 层动作越界罚 (机组限功率 [0,0.5]×5 + 信号 [±0.5])；2026-10 用户口径: 400→10
                          #   原 200 -> 400: 越界仍未压住, 先整体加倍。
                          #   ⚠ s_p=1000 ⇒ critic 空间 0.4/单位, 而框内经济斜率实测 0.27~4.5
                          #   ⇒ 仍然同量级, 不改变"边界位置落在 critic 噪声里"的结论。
 PENALTY_NN_L_COEF = 200.0  # [元/单位] 下层 1 维动作罚 —— **保持 200 不变** (仅诊断, 不进 r2 公式)
 
 
-def CheckAction(action, charge=10.):
+def CheckAction(action, charge=0.5):
     """Clip actions to feasible ranges. WT: [0,0.5], Signal: [-0.5,0.5], Bat: [-charge,charge]."""
     penalty = 0
     SIGNAL_MIN, SIGNAL_MAX = -0.5, 0.5
@@ -500,12 +500,12 @@ def CheckAction(action, charge=10.):
 # 8. Normalization (unchanged)
 # =============================================================================
 
-def Normalize(obs, max_E=6.):
-    return np.array([obs[0] / 1000, obs[1] / 10, obs[2] / 10, obs[3] / 10])
+def Normalize(obs, max_E=0.5):
+    return np.array([obs[0] / 1000, obs[1] / 10, obs[2] / 0.5, obs[3] / 5.0])
 
 
-def Original(obs, max_E=6.):
-    return np.array([obs[0] * 1000, obs[1] * 10, obs[2] * 10, obs[3] * 10])
+def Original(obs, max_E=0.5):
+    return np.array([obs[0] * 1000, obs[1] * 10, obs[2] * 0.5, obs[3] * 5.0])
 
 
 def build_L_obs_distilled(observation, pw_tru, applied_action_H, rbb_info, n_rem=None):

@@ -65,7 +65,7 @@ H_CURRICULUM_BLOCKS_5X = 20     # 历史每块 5 次更新（td3prle / prle / pr
 L_CURRICULUM_BLOCKS_SHADOW = 20
 
 W_GAP = 10.0              # 追踪偏好固定价 (元/MWh)，进 r1
-SOC_TOL = 0.1             # 块末残差豁免 (MWh)
+SOC_TOL = 0.01             # 块末残差豁免 (MWh)
 
 # ---------------------------------------------------------------- 值函数回归空间
 VALUE_SCALE = 1000.0      # s_p: r1 → 值函数回归空间的缩放（profit 通道; 1.0 = 不归一化）
@@ -159,9 +159,44 @@ def v_unscale(x):
 
 
 # ---------------------------------------------------------------- 成本 / 偏好
+#: 平滑开关（--c1_smooth）：把 |ΔP| 与 (P_F−3)⁺ 两个折点改成连续可导。
+#: 数值等价性：|c1_平滑 − c1_硬| ≤ SMOOTH_EPS + K_V·ln2/SMOOTH_BETA（β=100, ε=0.05 ⇒ 0.189）。
+SMOOTH = False
+SMOOTH_BETA = 100.0
+SMOOTH_EPS = 0.05
+
+
+def set_smooth(enable=False, beta=100.0, eps=0.05):
+    """由 main 调用（--c1_smooth / --c1_smooth_beta / --c1_smooth_eps）。"""
+    global SMOOTH, SMOOTH_BETA, SMOOTH_EPS
+    SMOOTH = bool(int(enable))
+    SMOOTH_BETA = float(beta)
+    SMOOTH_EPS = float(eps)
+
+
+def smooth_pf(dp):
+    """平滑 |ΔP|：sqrt(ΔP²+ε²) − ε（与 |ΔP| 差 ≤ ε，且在 0 处连续可导）。"""
+    d = float(dp)
+    return (d * d + SMOOTH_EPS ** 2) ** 0.5 - SMOOTH_EPS
+
+
+def _softplus_shift(x, beta):
+    """数值稳定的 shifted softplus：softplus_β(x) − ln2/β（x=0 处取 0）。"""
+    b = float(beta)
+    x = float(x)
+    return max(x, 0.0) + np.log1p(np.exp(-abs(b * x))) / b - np.log(2.0) / b
+
+
 def fluct_cost(P_F):
-    """波动当量 [MW·step]：c1 = P_F + K_V·(P_F−3)⁺。"""
+    """波动当量 [MW·step]：c1 = P_F + K_V·(P_F−3)⁺。
+
+    `set_smooth(True)` 时改为
+        c1 = P̃_F + K_V·[softplus_β(P̃_F − 3) − ln2/β],  P̃_F = sqrt(ΔP²+ε²) − ε
+    只改"折点附近的形状"，取值偏差 ≤ ε + K_V·ln2/β。
+    """
     p = float(P_F)
+    if SMOOTH:
+        return p + K_V * _softplus_shift(p - P_F_LIMIT, SMOOTH_BETA)
     return p + K_V * max(0.0, p - P_F_LIMIT)
 
 
@@ -241,8 +276,13 @@ def summary(pr=None):
             '越限 {:.1f}元/MW·step={:.1f}× 边际收益); '
             'actor 用 λ=λ_raw×(s_c/s_p)∈[{:.4f},{:.4f}] 初值 {:.4f}; '
             '归一化 s_p={:g} (r1) / s_c={:g} (c1) — 入 critic 前各除一次, 对偶/日志/CSV 仍为原始口径'
-            .format(MODE, K_V, D_BLOCK, LAM_MIN, LAM_MAX, smooth_mul, viol_mul,
-                    LAM_MIN, (1.0 + K_V) * LAM_MIN, viol_mul,
+            # 占位符顺序（14 个）：MODE, K_V, D_BLOCK, λ_raw_lo, λ_raw_hi,
+            #   平滑价(=λ_raw_lo), 平滑%(=smooth_mul), 越限价(=(1+K_V)·λ_raw_lo),
+            #   越限×(=viol_mul), actor_lo, actor_hi, actor_init, s_p, s_c
+            # ⚠ 此前多传了一个 `viol_mul`（15 个实参配 14 个占位符）⇒ 从"平滑%"起整行
+            #   右移一位，打印出 平滑 210%、λ 区间 [2.1, 0.0967]、s_p=0.0967 这种假配置。
+            .format(MODE, K_V, D_BLOCK, LAM_MIN, LAM_MAX,
+                    LAM_MIN, smooth_mul, (1.0 + K_V) * LAM_MIN, viol_mul,
                     LAM_MIN * _kl, LAM_MAX * _kl, LAM_INIT * _kl,
                     VALUE_SCALE, COST_SCALE))
 

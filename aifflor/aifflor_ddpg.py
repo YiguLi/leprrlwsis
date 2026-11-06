@@ -5,7 +5,11 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 
-from model import (Actor, Critic)
+from model import (Actor, Critic, AuxModel, proj_farm_level,
+                   V7_ACTOR_DIMS, normalize_arch, actor_spec,
+                   proj_lin_wt, proj_lin_wt_np,
+                   expand_lin_wt, expand_lin_wt_np,
+                   proj_scalar_wt, proj_scalar_wt_np)
 from PER_buffer import PrioritizedReplayBuffer
 from random_process import OrnsteinUhlenbeckProcess
 from util import *
@@ -13,6 +17,13 @@ from util import *
 # from ipdb import set_trace as debug
 
 criterion = nn.MSELoss()
+
+#: replay 的**来源标签**（branch 分层采样用）。取值必须与 `aifflor_branch.SRC_*` /
+#: `aifflor_branch.MODE_ACTOR` **逐位一致**（`agentutil/test_aifflor_branch_contract.py`
+#: 会断言这件事）。这里刻意**不 import** `aifflor_branch`：ddpg 是纯算法层，
+#: 不该依赖"动作集/环境口径"那一层（也避免任何潜在的 import 环）。
+SRC_ACTOR, SRC_BRANCH = 0, 1
+MODE_ACTOR = 0
 
 
 class SP_TD3(object):
@@ -43,7 +54,9 @@ class SP_TD3(object):
                  cost_critic_mode='max',
                  wt_noise=0.05, sig_noise_max=0.2, sig_noise_min=0.01,
                  wt_noise_floor=0.01,
-                 nstep=1, target_agg='min'):
+                 nstep=1, target_agg='min', critic_nb_states=None,
+                 wt_noise_mode='wide', wt_noise_min=0.0, wt_noise_max=0.05,
+                 branch_mix=0.0, branch_sup_beta=0.0, actor_arch=None):
 
         # Determine device first
         self.device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
@@ -53,7 +66,28 @@ class SP_TD3(object):
             self.seed(args.seed)
 
         self.nb_states = nb_states
+        # 上层 critic 可以比 actor 多看特权风速（asymmetric critic）。
+        # None / 等于 nb_states ⇒ 与 actor 同维，历史路径逐位不变。
+        self.critic_nb_states = int(critic_nb_states or nb_states)
+        if self.critic_nb_states < self.nb_states:
+            raise ValueError('critic_nb_states(%d) < nb_states(%d)'
+                             % (self.critic_nb_states, self.nb_states))
         self.nb_actions = nb_actions
+        # ---- 线性行为分支（--lin_wt 1）的**结构版**动作头 ----
+        #   风机动作只保留首尾两维 a0 / a_{nt−1}，中间维由线性插值展开；
+        #   非风机维（H 的第 6 维 g）仍是独立输出。
+        #   ⇒ actor 输出维数 = 2 + (nb_actions − na_box)；上层 6 维动作 ⇒ **3 个神经元**。
+        #   ⚠ 只作用于上层（nb_actions ≥ na_box）：下层 L 是 1 维动作，
+        #      同一个 --lin_wt 不能把它的动作扩成 5 维（L 保持 1 输出）。
+        #   ⚠ 与 --scalar_wt / --farm_level 互斥（main 里 assert）。
+        self.na_box = int(getattr(args, 'na_box', 5))
+        self.lin_wt = (bool(int(getattr(args, 'lin_wt', 0) or 0))
+                       and self.na_box >= 2 and self.nb_actions >= self.na_box)
+        self.lin_decimals = int(getattr(args, 'lin_wt_decimals', 2))
+        self.actor_nb_actions = (2 + max(0, self.nb_actions - self.na_box)
+                                 if self.lin_wt else self.nb_actions)
+        #: actor checkpoint 的文件后缀：lin 分支为 3（a0/a4/g），其余仍为 nb_actions
+        self.actor_tag = self.actor_nb_actions if self.lin_wt else self.nb_actions
         # L 层观测标记: myfunc 测试函数用它区分 5 维规则原配料观测
         # 与 PER 基线 5 维观测 (两者 nb_states 同为 5, 无法按维度区分).
         self.distilled_obs = True
@@ -64,27 +98,55 @@ class SP_TD3(object):
             'hidden2': args.hidden2,
             'init_w': args.init_w
         }
-        self.actor = Actor(self.nb_states, self.nb_actions, **net_cfg)
-        self.actor_target = Actor(self.nb_states, self.nb_actions, **net_cfg)
+        # critic 专用：--critic_action_first ⇒ 动作从第一层进网（fc1 = ns+na → 4·hidden1）
+        critic_cfg = dict(net_cfg)
+        # 默认结构 = **v6**（2026-10-29 起与 `--critic_arch` 的 CLI 默认值一致；
+        # 2026-10 之前是 v2，更早是 v1）。这里只是"调用方没给 args.critic_arch 时"的回落，
+        # `aifflor_main.py` 总会传值 ⇒ 生产路径由 CLI 决定。
+        critic_cfg['arch'] = ('v1af' if int(getattr(args, 'critic_action_first', 0) or 0)
+                              else str(getattr(args, 'critic_arch', 'v6') or 'v6'))
+        critic_cfg['act'] = str(getattr(args, 'critic_act', 'relu') or 'relu')
+        critic_cfg['out_init'] = str(getattr(args, 'critic_out_init', '3e3') or '3e3')
+        critic_cfg['feat_power'] = bool(int(getattr(args, 'critic_feat_power', 0) or 0))
+        critic_cfg['feat_power_k'] = float(getattr(args, 'critic_feat_power_k', 1.357e-3))
+        # ---- actor 宽度（2026-11-03 v7；2026-11-06 v7.1/v7.2/v7.3）----
+        #   `model.Actor` 的形状恒为 ns→hidden1→hidden2→hidden1→na（v7.2 多一层
+        #   可选 fc0 编码器 ⇒ ns→128→hidden1→hidden2→hidden1→na）。
+        #   只对**显式传 `actor_arch`** 的 agent 生效：aifflor 主循环只给 **H 层** 传
+        #   （L 层是 1 维 BESS 动作，仍用 --hidden1/--hidden2，不把 1 维网放大 100 倍）。
+        #   评测侧 `test_five_days` 会自动探测 `fc0` 并塞进 `args.actor_pre`。
+        self.actor_arch = normalize_arch(actor_arch or 'inherit')
+        actor_cfg = dict(net_cfg)
+        _aspec = actor_spec(self.actor_arch)
+        if _aspec is not None:
+            actor_cfg['hidden1'], actor_cfg['hidden2'] = _aspec[0], _aspec[1]
+            if _aspec[2]:
+                actor_cfg['pre_hidden'] = _aspec[2]
+        elif getattr(args, 'actor_pre', None) and self.nb_actions > 1:
+            # 评测侧：从 actor_6.pkl 的 fc0 反推 128 编码器。只给 H（多动作）用，
+            # 避免 L 的 1 维 BESS actor 被同一个 args.actor_pre 误加编码层。
+            actor_cfg['pre_hidden'] = int(args.actor_pre)
+        self.actor = Actor(self.nb_states, self.actor_nb_actions, **actor_cfg)
+        self.actor_target = Actor(self.nb_states, self.actor_nb_actions, **actor_cfg)
         self.actor_optim = Adam(self.actor.parameters(), lr=args.prate)
 
         # ---- TD3: twin critics per channel ----
         # profit channel: critic_p / critic_p2
-        self.critic_p = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_p = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_p = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_p = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_p = Adam(self.critic_p.parameters(), lr=args.rate)
 
-        self.critic_p2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_p2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_p2 = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_p2 = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_p2 = Adam(self.critic_p2.parameters(), lr=args.rate)
 
         # cost channel: critic_c / critic_c2
-        self.critic_c = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_c = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_c = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_c = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_c = Adam(self.critic_c.parameters(), lr=args.rate)
 
-        self.critic_c2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
-        self.critic_target_c2 = Critic(self.nb_states, self.nb_actions, **net_cfg)
+        self.critic_c2 = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
+        self.critic_target_c2 = Critic(self.critic_nb_states, self.nb_actions, **critic_cfg)
         self.critic_optim_c2 = Adam(self.critic_c2.parameters(), lr=args.rate)
 
         hard_update(self.actor_target, self.actor)  # Make sure target is with the same weight
@@ -96,6 +158,23 @@ class SP_TD3(object):
         # Create replay buffer (PER reused unchanged)
         self.memory = PrioritizedReplayBuffer(size=args.rmsize,
                                               alpha=args.PER_alpha)
+
+        # ---- branch（同块首宽动作覆盖）: 来源分层采样 ----
+        #   `branch_mix` = critic 批里 **branch** 的占比（0 = 关闭 ⇒ 历史行为逐位不变）。
+        #   计划书：documentation/aifflor_branch_wide_coverage_plan.md §4.2/§4.3。
+        #   ⚠ 约束（§4.4）：branch 数据**只**允许进 critic TD（与可选的辅助监督）；
+        #     actor loss / λ / EMA / curriculum / 日志 / 测试 一律只用 actor。
+        self.branch_mix = float(min(0.5, max(0.0, float(branch_mix or 0.0))))
+        #: 可选的 branch 1-step 辅助监督权重 β（计划 §6.2；由主循环按块推进/衰减）
+        self.branch_sup_beta = float(branch_sup_beta or 0.0)
+        #: `True` ⇒ 每条转移都显式打 `src` 标签（环形缓冲会复用旧槽，必须覆盖写）
+        self._tag_replay = bool(self.branch_mix > 0.0)
+        #: 下层 BESS 的版本号（由主循环推进；只做 branch 标签过期的诊断口径）
+        self.lower_ver = 0
+        #: 诊断：上一批的 branch 占比 / 累计
+        self.last_batch_branch_frac = 0.0
+        self.n_updates_with_branch = 0
+        self.n_branch_transitions = 0
         self.random_process = OrnsteinUhlenbeckProcess(size=nb_actions,
                                                        theta=args.ou_theta,
                                                        mu=args.ou_mu,
@@ -116,6 +195,30 @@ class SP_TD3(object):
         #   'min' = TD3 原口径 (默认, 不动历史 run)。
         self.nstep = max(1, int(nstep))
         self.target_agg = str(target_agg)
+        # cost 塔只看 clip 后的动作（c1 只是 clip(a) 的函数；原始动作的越界梯度由 profit 塔的 pen5 提供）
+        self.cost_clip = bool(int(getattr(args, 'cost_clip', 1) or 0))
+        # 场级降载投影（--farm_level 1）：actor 输出先投影到 a_i = s·c_i 的射线
+        self.farm_level = bool(int(getattr(args, 'farm_level', 0) or 0))
+        # 单自由度风机动作（--scalar_wt 1，**刻意设计的 baseline**）：
+        #   前 5 维压成同一个值 a_0 ⇒ 五台风机共用一个轴向因子，只剩 1 个自由度，
+        #   第 1..4 维"存在但无用"（投影线性 ⇒ 对它们的梯度恒为 0）。
+        #   ⚠ 与 --farm_level 互斥（main 里 assert）；两者都开时 scalar 后生效。
+        self.scalar_wt = bool(int(getattr(args, 'scalar_wt', 0) or 0))
+        # ---- k=1 的 1-step 监督模型（model-based 策略改进）----
+        self.aux_model = bool(int(getattr(args, 'aux_model', 0) or 0))
+        self.aux_mix = float(getattr(args, 'aux_mix', 1.0))
+        self.aux_warmup = int(getattr(args, 'aux_warmup', 5000) or 0)
+        self.aux_count = 0
+        if self.aux_model:
+            _afp = bool(int(getattr(args, 'critic_feat_power', 0) or 0))
+            _afk = float(getattr(args, 'critic_feat_power_k', 1.357e-3))
+            self.aux_r = AuxModel(self.nb_states, self.nb_actions,
+                                  feat_power=_afp, feat_power_k=_afk)
+            self.aux_c = AuxModel(self.nb_states, self.nb_actions,
+                                  feat_power=_afp, feat_power_k=_afk)
+            _lr = float(getattr(args, 'aux_rate', 1e-3))
+            self.aux_optim_r = Adam(self.aux_r.parameters(), lr=_lr)
+            self.aux_optim_c = Adam(self.aux_c.parameters(), lr=_lr)
         assert self.target_agg in ('min', 'mean'), self.target_agg
         self._pending = []        # nstep>1 时的滑窗队列: 最近 n-1 个块 (等待后继块结算)
         # 每条转移自带的 bootstrap 系数 (γ^n; episode 截断处为 0), 按 memory 下标存。
@@ -192,7 +295,7 @@ class SP_TD3(object):
         # Per-dimension action amplitude (for target smoothing noise scaling).
         # Matches CheckAction() legal ranges: H = 5 turbines [0,0.5] + 1 signal
         # [-0.5,0.5] (amp 0.5 each); L = 1 BESS action [-charge, charge].
-        charge = 10.0
+        charge=0.50
         if self.nb_actions == self.nb_turbine:
             amp = np.full(self.nb_actions, 0.5)
         elif self.nb_actions == 1:
@@ -218,6 +321,22 @@ class SP_TD3(object):
         self.sig_noise_max = float(sig_noise_max)
         self.sig_noise_min = float(sig_noise_min)
         self.wt_noise_floor = float(wt_noise_floor)
+        # ---- 宽动作覆盖（aifflor 默认）----
+        # 每个风机维每次决策独立抽幅度 A_i ~ U[wt_noise_min, wt_noise_max]，
+        # 噪声 ~ U[-A_i,A_i]，再按 [0,0.5] 边界**截断噪声**（不是截断动作），
+        # 且不乘 ε ⇒ 训练全程保持同样幅度，不衰减。
+        # ⚠ 2026-10-29 起 aifflor 的 CLI 默认把带宽收窄到 **U[0.00, 0.05]**
+        #   （旧默认 U[0.05, 0.25] 的幅度与 branch 设计间距 0.20~0.25 同量级，
+        #    会把同块 5 动作的配对结构抹平、并在边界删失堆料）。本类的 kwarg 默认
+        #   与之一致；具体值仍由调用方（aifflor_main 的 CLI）决定。
+        mode = str(wt_noise_mode or 'wide').strip().lower()
+        self.wt_noise_mode = 'wide' if mode == 'wide' else 'legacy'
+        self.wt_noise_min = float(wt_noise if wt_noise_min is None
+                                  else wt_noise_min)
+        self.wt_noise_max = float(wt_noise_max)
+        if self.wt_noise_min > self.wt_noise_max:
+            self.wt_noise_min, self.wt_noise_max = (self.wt_noise_max,
+                                                    self.wt_noise_min)
         # ---- 风机探索噪声: **恒定 `wt_noise`（默认 0.05），不随 ε 衰减** ----
         #   用户口径（2026-10）: 全部风机、全部 TD3 族方法, 风机行为噪声恒为 0.05。
         #   实现 = 让 WT 维的 amp 与 floor 相等 ⇒ 凸组合
@@ -228,7 +347,9 @@ class SP_TD3(object):
         if self.nb_actions == self.nb_turbine + 1:
             amp_e = np.array([self.wt_noise] * self.nb_turbine + [self.sig_noise_max],
                              dtype=np.float32)
-            floor_e = np.array([self.wt_noise] * self.nb_turbine + [self.sig_noise_min],
+            # 2026-10-23: 地板改为 `wt_noise_floor`（默认 0 ⇒ 噪声随 ε 衰减到 **0**）；
+            # 传入 floor = wt_noise 可恢复"恒定噪声"的旧口径。
+            floor_e = np.array([self.wt_noise_floor] * self.nb_turbine + [self.sig_noise_min],
                                dtype=np.float32)
         elif self.nb_actions == self.nb_turbine:
             # 纯风机维（aifflor / yawflor / nolow 的 td3per·td3perseg）: 全维恒定
@@ -241,6 +362,18 @@ class SP_TD3(object):
         self.explore_amp = amp_e
         self.explore_floor = floor_e
 
+        # ---- 自由动作维索引（--lin_wt 的 3 输出头）----
+        #   actor 只输出 [a0, a_{na_box−1}, g...]；噪声/target smoothing 只能加在
+        #   这些"自由维"上，中间维永远由 expand_lin_wt 从首尾展开。
+        #   非 lin 分支 = 全体动作维（数组保持原样，便于统一写 target smoothing）。
+        if self.lin_wt:
+            self.action_free_idx = np.array(
+                [0, self.na_box - 1] + list(range(self.na_box, self.nb_actions)),
+                dtype=int)
+        else:
+            self.action_free_idx = np.arange(self.nb_actions, dtype=int)
+        self.action_amp_free = self.action_amp[self.action_free_idx]
+
     # ---- TD3 helper: aggregate a critic pair (min or max) ----
     def _pair_min(self, q1, q2):
         return torch.min(q1, q2)
@@ -251,15 +384,72 @@ class SP_TD3(object):
             return torch.max(q1, q2)
         return torch.min(q1, q2)
 
+    def _clip_box(self, a):
+        """把风机动作维（前 na_box 维）夹到 [0,0.5]；只对 H 层（动作维 = na_box+1）生效。"""
+        if (not self.cost_clip) or a is None or a.shape[-1] != self.na_box + 1:
+            return a
+        out = a.clone()
+        out[..., :self.na_box] = torch.clamp(a[..., :self.na_box], 0.0, 0.5)
+        return out
+
+    # ---- 采样：branch 未启用时与历史 `memory.sample(...)` 逐位相同 ------------
+    def _sample_batch(self):
+        """采一批，并返回 `(…, idxes, src)` —— `src` 是本批每条转移的来源标签。
+
+        * branch 关闭（`branch_mix == 0` 或缓冲里还没 branch）⇒ 走历史
+          `memory.sample(...)`（整池一次抽，数学与原实现逐位相同）；
+        * branch 开启 ⇒ `n_branch = round(branch_mix·bsize)`，剩下的给 actor，
+          两池各自**在池内**做优先度比例采样；branch 池内部按 mode 均衡
+          （`by_mode=True`，避免某个 mode 独占）。
+        * 池不够时**自动回退**到"能抽多少抽多少"，绝不让 batch 变形（BSIZE 恒定）。
+        """
+        mem = self.memory
+        n_branch = 0
+        n_actor = self.batch_size
+        if self.branch_mix > 0.0 and mem.n_branch > 0 and mem.n_actor > 0:
+            n_branch = int(round(self.branch_mix * self.batch_size))
+            n_branch = min(n_branch, int(mem.n_branch), self.batch_size - 1)
+            n_actor = self.batch_size - n_branch
+            if n_actor > int(mem.n_actor):
+                n_actor = int(mem.n_actor)
+                n_branch = self.batch_size - n_actor
+            if n_actor <= 0 or n_branch <= 0:
+                n_branch, n_actor = 0, self.batch_size
+
+        if n_branch <= 0:
+            out = mem.sample(self.batch_size, self.PER_beta,
+                             self.beta_increment_per_sampling)
+            src = self._src_of(out[-1])
+            self.last_batch_branch_frac = float(np.mean(src == SRC_BRANCH)) if src.size else 0.0
+            return tuple(list(out) + [src])
+
+        idxes = (mem.sample_pool(SRC_ACTOR, n_actor)
+                 + mem.sample_pool(SRC_BRANCH, n_branch, by_mode=True))
+        out = mem.sample_by_idxes(idxes, self.PER_beta)
+        src = self._src_of(out[-1])
+        self.last_batch_branch_frac = float(np.mean(src == SRC_BRANCH)) if src.size else 0.0
+        self.n_updates_with_branch += 1
+        return tuple(list(out) + [src])
+
+    def _src_of(self, idxes):
+        """下标 → 来源标签数组（无元数据 ⇒ 全 actor）。"""
+        idx = np.asarray(idxes, dtype=np.int64).reshape(-1)
+        if not self.memory.has_meta:
+            return np.zeros(idx.size, dtype=np.int8)
+        return np.asarray(self.memory._src[idx], dtype=np.int8)
+
     def update_policy(self):
         # A2: β 退火 —— 每次更新推进 self.PER_beta (0.4→1)，写回实例属性
         # (原 PER_buffer.sample 内递增是局部变量，退火永不生效；此处推进后传入)
         self.PER_beta = min(1.0, self.PER_beta + self.beta_increment_per_sampling)
 
         # Sample batch
-        state_batch, action_batch, profit_batch, cost_batch,\
-        next_state_batch, terminal_batch, weights, batch_idxes \
-        = self.memory.sample(self.batch_size, self.PER_beta, self.beta_increment_per_sampling)
+        #   branch 未启用 ⇒ `_sample_batch()` 走历史 `memory.sample(...)`，逐位不变；
+        #   branch 启用 ⇒ 按 **来源分池** 采样（计划 §4.2：actor 50–60% / branch 40–50%，
+        #   branch 内部按 mode 均衡），并额外返回本批的 `src` 标签。
+        (state_batch, action_batch, profit_batch, cost_batch,
+         next_state_batch, terminal_batch, weights, batch_idxes,
+         batch_src) = self._sample_batch()
         # reshape data
         profit_batch = profit_batch.reshape(-1, 1)
         cost_batch = cost_batch.reshape(-1, 1)
@@ -274,6 +464,21 @@ class SP_TD3(object):
             cost_batch = cost_batch / _SC
         terminal_batch = terminal_batch.reshape(-1, 1)
 
+        # ---- branch: 本批的来源掩码（计划 §4.3）----
+        #   * critic TD 用**全部**（actor + branch）；
+        #   * **actor loss 只用 actor**（branch 的动作是随机测试动作，不是策略采样，
+        #     拿它做策略梯度会把 actor 拉向"随机动作上的 Q 最大点"，且 λ 会被
+        #     branch 的高成本动作顶格 —— 正是计划 §9.1 要避免的失败模式）；
+        #   * 无 branch 时 `actor_mask is None` ⇒ 所有张量切片退化为 `[:]`，逐位不变。
+        _src_np = np.asarray(batch_src).reshape(-1)
+        if _src_np.size == self.batch_size and (_src_np == SRC_BRANCH).any():
+            actor_mask = torch.tensor(_src_np == SRC_ACTOR, dtype=torch.bool,
+                                      device=self.device)
+            branch_mask = ~actor_mask
+        else:
+            actor_mask = None
+            branch_mask = None
+
         # Ensure all tensors are on the correct device
         state_batch = to_tensor(state_batch).to(self.device)
         action_batch = to_tensor(action_batch).to(self.device)
@@ -283,19 +488,22 @@ class SP_TD3(object):
         terminal_batch = to_tensor(terminal_batch).to(self.device)
         weights = torch.Tensor(weights).to(self.device)
 
+        # asymmetric critic: memory 里存完整 critic state；actor 只看前 nb_states 维
+        actor_state_batch = state_batch[:, :self.nb_states]
+        actor_next_state_batch = next_state_batch[:, :self.nb_states]
+
         # ---- TD3: target policy smoothing (clipped Gaussian noise,
         #      scaled per dimension by action amplitude) ----
-        amp_t = torch.tensor(self.action_amp, dtype=torch.float32, device=self.device)
-        a_next = self.actor_target(next_state_batch)
-        noise = torch.randn_like(a_next) * (self.policy_noise * amp_t)
-        noise = noise.clamp(-self.noise_clip * amp_t, self.noise_clip * amp_t)
-        a_smoothed = a_next + noise
+        #   --lin_wt: 噪声只加在 3 个自由维上，再展开 ⇒ 目标动作在流形内；
+        #   默认臂：6 维逐维加噪（历史口径，逐位不变）。
+        a_smoothed = self._target_smoothed_action(actor_next_state_batch)
 
         # ---- TD3: twin targets, take min of the pair (clipped double Q) ----
         q_p1_next = self.critic_target_p([next_state_batch, a_smoothed])
         q_p2_next = self.critic_target_p2([next_state_batch, a_smoothed])
-        q_c1_next = self.critic_target_c([next_state_batch, a_smoothed])
-        q_c2_next = self.critic_target_c2([next_state_batch, a_smoothed])
+        a_smoothed_c = self._clip_box(a_smoothed)      # cost 塔: clip 后动作
+        q_c1_next = self.critic_target_c([next_state_batch, a_smoothed_c])
+        q_c2_next = self.critic_target_c2([next_state_batch, a_smoothed_c])
 
         if self.target_agg == 'mean':
             # 去掉 twin-min 的悲观偏差: 冻结批实测 Qbar 6.997 -> 8.235 (真值 9.159)
@@ -330,8 +538,9 @@ class SP_TD3(object):
 
         q_batch_p = self.critic_p([state_batch, action_batch])
         q_batch_p2 = self.critic_p2([state_batch, action_batch])
-        q_batch_c = self.critic_c([state_batch, action_batch])
-        q_batch_c2 = self.critic_c2([state_batch, action_batch])
+        action_batch_c = self._clip_box(action_batch)  # cost 塔: clip 后动作（profit 塔仍用原始动作）
+        q_batch_c = self.critic_c([state_batch, action_batch_c])
+        q_batch_c2 = self.critic_c2([state_batch, action_batch_c])
 
         # Compute the value losses (twin profit + twin cost).
         # Twin critics share the same min-target graph, so a single combined
@@ -342,6 +551,20 @@ class SP_TD3(object):
         value_loss_c2 = torch.mean(torch.mean(weights * (q_batch_c2 - target_q_batch_c) ** 2, dim=1))
 
         critic_loss = value_loss_p + value_loss_p2 + value_loss_c + value_loss_c2
+
+        # ---- 可选：branch 的 1-step 辅助监督（计划 §6.2 的 β·L_sup，默认 β=0 关闭）----
+        #   口径：在**同一尺度**（c1/s_c）上做 Huber 回归，目标**不带 bootstrap**
+        #   ⇒ 等价于"γ=0 的 cost TD"，只作用于 branch 行 ⇒ 强化"动作 → 块成本"的
+        #   直接可辨识性，而不动 actor/λ/日志。
+        #   ⚠ 若 c1 的重尾让 β 过大，会压过 TD 项（计划 §9.8）⇒ 由主循环线性衰减到 0.2·β0。
+        if self.branch_sup_beta > 0.0 and branch_mask is not None:
+            _nb = int(branch_mask.sum().item())
+            if _nb > 0:
+                _tgt_c = cost_batch[branch_mask].detach()
+                _sup = (nn.functional.smooth_l1_loss(q_batch_c[branch_mask], _tgt_c)
+                        + nn.functional.smooth_l1_loss(q_batch_c2[branch_mask], _tgt_c))
+                critic_loss = critic_loss + self.branch_sup_beta * _sup
+
         critic_loss.backward()
 
         nn.utils.clip_grad_norm_(self.critic_p.parameters(), max_norm=2.0, norm_type=2)
@@ -356,22 +579,59 @@ class SP_TD3(object):
         nn.utils.clip_grad_norm_(self.critic_c2.parameters(), max_norm=2.0, norm_type=2)
         self.critic_optim_c2.step()
 
+        # ---- k=1 的 1-step 监督模型: f(s,a) ≈ r1/s_p, c1/s_c（目标无 bootstrap）----
+        if self.aux_model:
+            self.aux_r.zero_grad(); self.aux_c.zero_grad()
+            _pr = self.aux_r([actor_state_batch, action_batch])
+            _cc = self.aux_c([actor_state_batch, action_batch])
+            _lr = torch.mean(torch.mean((_pr - profit_batch) ** 2, dim=1))
+            _lc = torch.mean(torch.mean((_cc - cost_batch) ** 2, dim=1))
+            (_lr + _lc).backward()
+            self.aux_optim_r.step(); self.aux_optim_c.step()
+            self.aux_count += 1
+            if self.aux_count <= 3 or self.aux_count % 500 == 0:
+                print('[aux] n=%d | L_r=%.3e L_c=%.3e | f_c 均 %+.4f | 目标 c 均 %+.4f | a/b=%.4f/%.4f'
+                      % (self.aux_count, float(_lr), float(_lc), float(_cc.mean()),
+                         float(cost_batch.mean()), float(self.aux_c.out.bias), float(self.aux_r.out.bias)),
+                      flush=True)
+
         # ---- TD3: delayed policy update ----
         self.update_count += 1
-        if self.update_count % self.policy_delay == 0:
+        if self.update_count % self.policy_delay == 0 and \
+                (actor_mask is None or int(actor_mask.sum().item()) >= 2):
             self.actor.zero_grad()
-            # Fresh forward through the (just updated) critics: min of twins.
+            # 演员评估点 = **投影后**的确定性动作（与 select_action 一致）。
+            # ⚠ 旧写法利润塔用 `self.actor(state_batch)`（未投影），成本塔用 `_act`（投影）
+            #   ⇒ 开 --farm_level/--scalar_wt 时两条通道评估的是**不同动作**，
+            #   利润梯度跑到动作流形之外。此处统一走 `_act`（未开投影时逐位等价）。
+            # branch（计划 §4.3）：actor loss **只用 actor 行** —— 无 branch 时
+            #   `_sel = slice(None)` ⇒ 与历史完全一致。
+            _sel = slice(None) if actor_mask is None else actor_mask
+            _pol_s_act = actor_state_batch[_sel]      # actor 输入（前 nb_states 维）
+            _pol_s_cri = state_batch[_sel]            # critic 输入（可能含 wind5 特权维）
+            _a_cur = self._act(self.actor, _pol_s_act)
             min_p_cur = self._pair_min(
-                self.critic_p([state_batch, self.actor(state_batch)]),
-                self.critic_p2([state_batch, self.actor(state_batch)]))
+                self.critic_p([_pol_s_cri, _a_cur]),
+                self.critic_p2([_pol_s_cri, _a_cur]))
             # clamp(min=0) on cost: prevents the actor from exploiting a
             # (pathological) negative cost Q inside the Lagrangian objective.
+            _a_cur_c = self._clip_box(_a_cur)          # cost 塔: clip 后动作
             min_c_cur = self._aggregate_pair(
-                self.critic_c([state_batch, self.actor(state_batch)]),
-                self.critic_c2([state_batch, self.actor(state_batch)])).clamp(min=0.0)
+                self.critic_c([_pol_s_cri, _a_cur_c]),
+                self.critic_c2([_pol_s_cri, _a_cur_c])).clamp(min=0.0)
 
             # cost 为 +
-            policy_loss = -(min_p_cur - self.lam * min_c_cur)  # TODO
+            _crit = min_p_cur - self.lam * min_c_cur
+            if self.aux_model:
+                # k=1 model-based 策略改进: 用 1-step 模型的梯度（无 bootstrap 噪声）
+                _aux = (self.aux_r([_pol_s_act, _a_cur])
+                        - self.lam * self.aux_c([_pol_s_act, _a_cur]))
+                # 预热: aux 前 aux_warmup 次更新不参与（避免用没学好的模型）
+                _beta = self.aux_mix * min(1.0, self.aux_count / max(1, self.aux_warmup))
+                _obj = _beta * _aux + (1.0 - _beta) * _crit
+            else:
+                _obj = _crit
+            policy_loss = -(_obj)  # TODO
             policy_loss = policy_loss.mean()
             policy_loss.backward()
             # Gradient Clipping
@@ -419,13 +679,20 @@ class SP_TD3(object):
 
         # ---- H 层更新数据收集：本批（batch）统计，供主循环块末汇总 ----
         if self.record_update_stats:
+            # branch：`q_c_mean`/`q_c2_mean` 是 **λ1 的分子**（`--hsrl_dual_q_src update_batch`）
+            # ⇒ 必须只用 actor 行（计划 §4.4：branch 的 c1 不进对偶）。无 branch 时
+            #   这两个表达式与 `q_batch_c.mean()` 逐位相同。
+            _qcm = (float(q_batch_c.mean().item()) if actor_mask is None
+                    else float(q_batch_c[actor_mask].mean().item()))
+            _qcm2 = (float(q_batch_c2.mean().item()) if actor_mask is None
+                     else float(q_batch_c2[actor_mask].mean().item()))
             self.update_stats.append({
                 'td_p_mean': float(np.mean(td_errors_p_np)),
                 'td_c_mean': float(np.mean(td_errors_c_np)),
                 'q_p_mean': float(q_batch_p.mean().item()),
                 'q_p2_mean': float(q_batch_p2.mean().item()),
-                'q_c_mean': float(q_batch_c.mean().item()),
-                'q_c2_mean': float(q_batch_c2.mean().item()),
+                'q_c_mean': _qcm,
+                'q_c2_mean': _qcm2,
                 'min_p_next_mean': float(min_p_next.mean().item()),
                 'min_c_next_mean': float(min_c_next.mean().item()),
                 'target_p_mean': float(target_q_batch_p.mean().item()),
@@ -483,8 +750,49 @@ class SP_TD3(object):
 
     def observe(self, r_t, c_t, s_t1, done):
         if self.is_training:
+            idx = self.memory._next_idx
             self.memory.append(self.s_t, self.a_t, r_t, c_t, s_t1, done)
+            self._tag_actor(idx)
             self.s_t = s_t1
+
+    # ---- 来源标签（branch 分层采样的唯一依据；不进 critic state）--------------
+    def _tag_actor(self, idx):
+        """把刚写入的槽显式标成 **actor**。
+
+        ⚠ 必须显式覆盖写：replay 是环形缓冲，复用到的槽上一次可能是 branch
+        （`src=1`）⇒ 不覆盖就会把 actor 数据误判成 branch（actor loss 会漏掉它，
+        而 branch 池会混进 actor 样本）。
+        """
+        if not self._tag_replay:
+            return
+        self.memory.set_meta(idx, src=SRC_ACTOR, mode=MODE_ACTOR,
+                             block_id=-1, lower_ver=int(self.lower_ver))
+
+    def push_branch_transition(self, s_t, a_t, r_t, c_t, s_t1, done,
+                              mode=0, block_id=-1, lower_ver=None, boot=None):
+        """写一条 **branch** 转移（同块首的测试动作，`source=branch`）。
+
+        ⚠ 与 actor 的关键差异（计划 §4.5）：
+        * **不进 n-step 链**：不碰 `_pending`，直接写 memory；
+        * `n_boot = γ`（只有 1 个块），而不是 actor 的 `γ^n`；
+        * `done` 只影响**它自己**的 bootstrap（`boot=0` 当且仅当该 branch 块是 episode 末）。
+
+        Returns
+        -------
+        idx : int  该转移在 replay 里的下标（供诊断/断言），未写则 -1
+        """
+        if not self.is_training:
+            return -1
+        gam = float(self.discount if boot is None else boot)
+        lv = int(self.lower_ver if lower_ver is None else lower_ver)
+        idx = int(self.memory._next_idx)
+        self.memory.append(s_t, a_t, r_t, c_t, s_t1, done)
+        if self._boot is not None and 0 <= idx < len(self._boot):
+            self._boot[idx] = 0.0 if done else gam
+        self.memory.set_meta(idx, src=SRC_BRANCH, mode=int(mode),
+                             block_id=int(block_id), lower_ver=lv)
+        self.n_branch_transitions += 1
+        return idx
 
     # ---- n 步回报: 写入侧 --------------------------------------------------
     def _push_transition(self, s_t, a_t, r_t, c_t, s_t1, done, boot):
@@ -498,6 +806,7 @@ class SP_TD3(object):
         self.memory.append(s_t, a_t, r_t, c_t, s_t1, done)
         if self._boot is not None and 0 <= idx < len(self._boot):
             self._boot[idx] = boot
+        self._tag_actor(idx)
 
     def _emit_nstep(self, start, n_used):
         """把 _pending[start : start+n_used] 折叠成一条 n 步转移写入 memory。
@@ -527,7 +836,9 @@ class SP_TD3(object):
         if not self.is_training:
             return
         if self.nstep <= 1:
+            idx = self.memory._next_idx
             self.memory.append(s_t, a_t, r_t, c_t, s_t1, done)
+            self._tag_actor(idx)
             return
         self._pending.append((s_t, a_t, r_t, c_t, s_t1, done))
         # ---- 滑窗 (stride-1): 每来一个新块就结算**队首**那一条, 队列长度稳定在 n-1 ----
@@ -549,7 +860,17 @@ class SP_TD3(object):
             self._pending = []
 
     def random_action(self):
-        charge = 10.
+        charge=0.5
+        if getattr(self, 'lin_wt', False):
+            # 结构版线性分支：只采 [a0, a4, g...]，中间由插值展开
+            extra = int(self.nb_actions - self.na_box)
+            raw = np.concatenate([
+                np.random.uniform(0., 0.5, 2),
+                np.random.uniform(-0.5, 0.5, extra)])
+            action = expand_lin_wt_np(raw, nt=self.na_box,
+                                      decimals=self.lin_decimals)
+            self.a_t = action
+            return action
         if self.nb_actions == self.nb_turbine:
             action = np.random.uniform(0., 0.5, self.nb_actions)
         if self.nb_actions == 1:
@@ -565,19 +886,170 @@ class SP_TD3(object):
         self.a_t = action
         return action
 
-    def select_action(self, s_t, decay_epsilon=True):
-        action = to_numpy(self.actor(to_tensor(np.array([s_t])))).squeeze(0)
+    def _expand(self, raw):
+        """actor 原始输出 → **完整动作向量**（critic/env 口径）。
 
-        # 逐维探索噪声: 均匀 U(-amp, +amp), amp = max(amp_dim*eps, floor_dim)
-        # (信号维幅值 0.2*eps 且地板 0.05; WT 维 0.05*eps; 见 __init__)
+        * `--lin_wt`：actor 输出 = `[a0, a_end, g...]`，中间维由
+          `model.expand_lin_wt` 线性插值展开；
+        * 其余：`raw` 本身就是完整动作，走原来的 `_project`
+          （`--farm_level` 射线 / `--scalar_wt` 等）。
+        """
+        if getattr(self, 'lin_wt', False):
+            return expand_lin_wt(raw, nt=int(getattr(self, 'na_box', 5)),
+                                 decimals=int(getattr(self, 'lin_decimals', 2)))
+        return self._project(raw)
+
+    def _project(self, a):
+        """动作投影（**完整动作**的投影入口）。
+
+        `--lin_wt` 的 3 维 raw 会先被展开；6 维完整动作则只保留首尾并重算中间。
+        顺序：先 lin_wt（首尾 + 线性插值），再 farm_level（射线 a_i=s·c_i），
+        再 scalar_wt（a_i=a_0）。三者在 main 里互斥 ⇒ 实际只会命中一个。
+        对 v1/v2/... 的 6 维动作只改前 na_box 维，第 6 维 g 原样保留。
+        """
+        if getattr(self, 'lin_wt', False):
+            if a.shape[-1] == int(getattr(self, 'actor_nb_actions', self.nb_actions)):
+                return self._expand(a)
+            a = proj_lin_wt(a, nt=int(getattr(self, 'na_box', 5)),
+                            decimals=int(getattr(self, 'lin_decimals', 2)))
+        if getattr(self, 'farm_level', False):
+            a = proj_farm_level(a)
+        if getattr(self, 'scalar_wt', False):
+            a = proj_scalar_wt(a, nt=int(getattr(self, 'na_box', 5)))
+        return a
+
+    def _project_np(self, a):
+        """numpy 版投影（用于**加完探索噪声之后**的实际执行动作）。"""
+        if getattr(self, 'lin_wt', False):
+            if np.asarray(a).size == int(getattr(self, 'actor_nb_actions',
+                                                  self.nb_actions)):
+                a = expand_lin_wt_np(a, nt=int(getattr(self, 'na_box', 5)),
+                                     decimals=int(getattr(self, 'lin_decimals', 2)))
+            else:
+                a = proj_lin_wt_np(a, nt=int(getattr(self, 'na_box', 5)),
+                                   decimals=int(getattr(self, 'lin_decimals', 2)))
+        elif getattr(self, 'scalar_wt', False):
+            a = proj_scalar_wt_np(a, nt=int(getattr(self, 'na_box', 5)))
+        elif getattr(self, 'farm_level', False):
+            a = to_numpy(proj_farm_level(to_tensor(np.asarray(a, dtype=float).reshape(1, -1)))).reshape(-1)
+        return a
+
+    def _act(self, net, s):
+        """actor 前向 + 展开/投影 —— 所有调用点都必须走这里。"""
+        return self._expand(net(s))
+
+    def _target_smoothed_action(self, next_states):
+        """TD3 target policy smoothing（clipped Gaussian noise）。
+
+        * 默认：6 维动作逐维加噪（历史口径，逐位不变）；
+        * `--lin_wt`：只在 **3 个自由维**（a0/a4/g）上加噪，再展开成 6 维
+          ⇒ 目标动作始终落在"首尾 + 线性插值"流形上。
+        """
+        if getattr(self, 'lin_wt', False):
+            raw = self.actor_target(next_states)
+            amp_t = torch.tensor(self.action_amp_free, dtype=torch.float32,
+                                 device=self.device)
+            noise = torch.randn_like(raw) * (self.policy_noise * amp_t)
+            noise = noise.clamp(-self.noise_clip * amp_t, self.noise_clip * amp_t)
+            return self._expand(raw + noise)
+        amp_t = torch.tensor(self.action_amp, dtype=torch.float32, device=self.device)
+        a_next = self._act(self.actor_target, next_states)
+        noise = torch.randn_like(a_next) * (self.policy_noise * amp_t)
+        noise = noise.clamp(-self.noise_clip * amp_t, self.noise_clip * amp_t)
+        return a_next + noise
+
+    def _add_noise_free(self, raw):
+        """给 `--lin_wt` 的**自由维** `[a0, a_end, g...]` 加探索噪声。
+
+        * 首尾两个 WT 维沿用 wide 口径：幅度 `U[wt_noise_min, wt_noise_max]`，
+          噪声 `U[−amp, amp]`，并按 `[0,0.5]` 截断**噪声**（与默认臂同式）；
+        * 额外维（g）沿用 `explore_amp/floor` 的 ε 衰减口径；
+        * legacy 模式：所有自由维用 `explore_amp_free·ε + explore_floor_free·(1−ε)`。
+        """
+        eps = max(self.epsilon, 0.0)
+        if (self.wt_noise_mode == 'wide'
+                and self.nb_actions in (self.na_box, self.na_box + 1)):
+            a_wt = np.asarray(raw[:2], dtype=float)
+            amp = np.random.uniform(self.wt_noise_min, self.wt_noise_max, size=2)
+            noise = np.random.uniform(-amp, amp)
+            inside = (a_wt >= 0.0) & (a_wt <= 0.5)
+            noise = np.where(inside, np.clip(noise, 0.0 - a_wt, 0.5 - a_wt), noise)
+            raw[:2] = a_wt + noise
+            if raw.size > 2:
+                # 额外维（H 的 g）按**当前** explore_amp/floor 取：
+                # main 会在构造后覆写 `explore_amp[5]`（HSRL 的 g 噪声量纲），
+                # 因此不能缓存成 __init__ 时的 free 数组。
+                amp_x = (np.asarray(self.explore_amp[self.na_box:]) * eps
+                         + np.asarray(self.explore_floor[self.na_box:]) * (1.0 - eps))
+                raw[2:] += (np.random.random(raw.size - 2) - 0.5) * 2.0 * amp_x
+        else:
+            # 自由维顺序 = [a0, a_end, 额外维...]
+            amp_free = np.concatenate([
+                np.asarray([self.explore_amp[0], self.explore_amp[self.na_box - 1]]),
+                np.asarray(self.explore_amp[self.na_box:])])
+            floor_free = np.concatenate([
+                np.asarray([self.explore_floor[0], self.explore_floor[self.na_box - 1]]),
+                np.asarray(self.explore_floor[self.na_box:])])
+            amp = amp_free * eps + floor_free * (1.0 - eps)
+            raw += (np.random.random(raw.size) - 0.5) * 2.0 * amp
+        return raw
+
+    def select_action(self, s_t, decay_epsilon=True):
+        if getattr(self, 'lin_wt', False):
+            # 结构版：actor 只输出 [a0, a4, g]；噪声只加在自由维，中间维由展开得到
+            raw = to_numpy(self.actor(to_tensor(np.array([s_t])))).squeeze(0)
+            raw = np.asarray(raw, dtype=float).copy()
+            if self.is_training:
+                raw = self._add_noise_free(raw)
+            action = expand_lin_wt_np(raw, nt=self.na_box,
+                                      decimals=self.lin_decimals)
+            if decay_epsilon and self.is_training:
+                self.epsilon -= self.depsilon
+            self.a_t = action
+            return action
+
+        action = to_numpy(self._act(self.actor, to_tensor(np.array([s_t])))).squeeze(0)
+
+        # 逐维探索噪声
+        #   wide（aifflor 默认）: 风机维 A_i ~ U[wt_noise_min, wt_noise_max]，
+        #       noise_i ~ U[-A_i,A_i]，并按 [0,0.5] **截断噪声**；不乘 ε ⇒ 不衰减。
+        #       ⚠ aifflor 的 CLI 默认带 = **U[0.00, 0.05]**（2026-10-29 起；旧 U[0.05,0.25]）。
+        #   legacy: 原口径 U(-amp,amp)，amp=amp_full·ε+floor·(1−ε)。
         if self.is_training:
-            eps = max(self.epsilon, 0.0)
-            # ε 收敛到**地板**而非 0: amp = amp_full·ε + floor·(1−ε)
-            #   ε=1 ⇒ amp = explore_amp（起始幅度不变）
-            #   ε=0 ⇒ amp = explore_floor（**永不完全停止探索**）
-            #   ε 线性降到 0 的用时 = args.epsilon 决策（H=4000⇒20k 环境步）
-            amp = self.explore_amp * eps + self.explore_floor * (1.0 - eps)
-            action = action + (np.random.random(self.nb_actions) - 0.5) * 2.0 * amp
+            _wide_wt = (self.wt_noise_mode == 'wide'
+                        and self.nb_actions in (self.na_box, self.na_box + 1))
+            if _wide_wt:
+                n = min(self.na_box, self.nb_actions)
+                a_raw = np.asarray(action[:n], dtype=float)
+                amp = np.random.uniform(self.wt_noise_min,
+                                        self.wt_noise_max, size=n)
+                noise = np.random.uniform(-amp, amp)
+                # 只截断**噪声**：actor 输出本身在 [0,0.5] 内时，保证 a+noise 不越界；
+                # 若 actor 输出本来就越界，保留原动作（让 CheckAction 照常记越界罚）。
+                inside = (a_raw >= 0.0) & (a_raw <= 0.5)
+                noise = np.where(
+                    inside,
+                    np.clip(noise, 0.0 - a_raw, 0.5 - a_raw),
+                    noise)
+                action[:n] = a_raw + noise
+                if self.nb_actions > n:
+                    # 第 6 维 SOC 信号仍沿用原衰减口径（HSRL 会覆写 amp/floor）
+                    eps = max(self.epsilon, 0.0)
+                    sig_amp = (self.explore_amp[n] * eps
+                               + self.explore_floor[n] * (1.0 - eps))
+                    action[n] += (np.random.random() - 0.5) * 2.0 * sig_amp
+            else:
+                eps = max(self.epsilon, 0.0)
+                amp = self.explore_amp * eps + self.explore_floor * (1.0 - eps)
+                action = action + (np.random.random(self.nb_actions) - 0.5) * 2.0 * amp
+
+        # ⚠ --scalar_wt / --lin_wt 的**定义**是"风机动作必须落在指定流形上" ⇒
+        #   噪声加完之后必须再投影一次，否则实际执行的动作会散开、第 1..4 维
+        #   重新变成有意义的自由度，分支就不是分支了。
+        #   等价于"探索只发生在有效维（scalar: 第 0 维；lin: 第 0/4 维）"。
+        #   farm_level 本条**故意不套用**（保持 FARM1 臂已跑的语义不变，单独议）。
+        if getattr(self, 'lin_wt', False) or getattr(self, 'scalar_wt', False):
+            action = self._project_np(action)
 
         if decay_epsilon and self.is_training:   # 评测(is_training=False) 不消耗 ε 预算
             self.epsilon -= self.depsilon
@@ -589,10 +1061,15 @@ class SP_TD3(object):
         self.s_t = obs
         self.random_process.reset_states()
 
+    def save_aux(self, output):
+        if getattr(self, 'aux_model', False):
+            torch.save(self.aux_r.state_dict(), '{}/aux_r_{}.pkl'.format(output, self.nb_actions))
+            torch.save(self.aux_c.state_dict(), '{}/aux_c_{}.pkl'.format(output, self.nb_actions))
+
     def load_weights(self, output):
         if output is None: return
 
-        self.actor.load_state_dict(torch.load('{}/actor_{}.pkl'.format(output, self.nb_actions)))
+        self.actor.load_state_dict(torch.load('{}/actor_{}.pkl'.format(output, self.actor_tag)))
         self.critic_p.load_state_dict(torch.load('{}/critic_p_{}.pkl'.format(output, self.nb_actions)))
         self.critic_c.load_state_dict(torch.load('{}/critic_c_{}.pkl'.format(output, self.nb_actions)))
 
@@ -613,11 +1090,12 @@ class SP_TD3(object):
         hard_update(self.critic_target_c2, self.critic_c2)
 
     def save_model(self, output):
-        torch.save(self.actor.state_dict(), '{}/actor_{}.pkl'.format(output, self.nb_actions))
+        torch.save(self.actor.state_dict(), '{}/actor_{}.pkl'.format(output, self.actor_tag))
         torch.save(self.critic_p.state_dict(), '{}/critic_p_{}.pkl'.format(output, self.nb_actions))
         torch.save(self.critic_p2.state_dict(), '{}/critic_p2_{}.pkl'.format(output, self.nb_actions))
         torch.save(self.critic_c.state_dict(), '{}/critic_c_{}.pkl'.format(output, self.nb_actions))
         torch.save(self.critic_c2.state_dict(), '{}/critic_c2_{}.pkl'.format(output, self.nb_actions))
+        self.save_aux(output)
 
     def save_checkpoint(self, output, step):
         """Save checkpoint in a dedicated subfolder per checkpoint step."""
@@ -625,7 +1103,7 @@ class SP_TD3(object):
         ckpt_dir = os.path.join(output, 'checkpoint_{}'.format(step))
         os.makedirs(ckpt_dir, exist_ok=True)
         torch.save(self.actor.state_dict(),
-                   '{}/actor_{}.pkl'.format(ckpt_dir, self.nb_actions))
+                   '{}/actor_{}.pkl'.format(ckpt_dir, self.actor_tag))
         torch.save(self.critic_p.state_dict(),
                    '{}/critic_p_{}.pkl'.format(ckpt_dir, self.nb_actions))
         torch.save(self.critic_p2.state_dict(),

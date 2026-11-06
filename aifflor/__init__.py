@@ -5,16 +5,16 @@
 ------
 `aifflor` 基本上就是 `td3per` 把 **WFSim 风场仿真器换成 FLORIS**，其余完全一致。
 
-与 `td3per` 的差异清单（**只有引擎**）
---------------------------------------
+与 `td3per` 的差异清单（**默认路径只有引擎**；可选动作流形分支见 §3.10）
+--------------------------------------------------------------------
 | 项 | td3per | aifflor |
 |---|---|---|
 | 物理引擎 | WFSim（MATLAB，`WFSim_port`） | FLORIS（纯 Python，**不启 MATLAB**） |
 | env 类 | `env.WindBattery`（`physics=None` 走 MATLAB） | `WindBatteryAIF`（`physics=AifflorPhysics`） |
 | 尾流参数 | WFSim `meshescale/forcescale` | FLORIS + **标定到 WFSim 的参数** |
-| **动作语义** | 轴向因子 `a ∈ [0,0.5]`（5 维）+ SOC 信号 | **完全相同** |
+| **动作语义** | 轴向因子 `a ∈ [0,0.5]`（5 维）+ SOC 信号 | **默认完全相同**；`--lin_wt` 时 actor 只输出 `a0/a4/g` |
 | **奖励/成本** | `td3per_myfunc` | **逐字复用**（零改动） |
-| 算法本体 | TD3+PER、EMA 对偶、n 步、相位特征 | **逐字复用**（零改动） |
+| 算法本体 | TD3+PER、EMA 对偶、n 步、相位特征 | **默认逐位等价**；`--lin_wt` 分支改 actor 输出头/噪声/checkpoint |
 
 ⚠ 关键点：因为**动作语义相同**，`td3per_myfunc.py` 可以**逐字复制**——
 这是 `aifflor` 与 `yawflor` 最大的不同（yawflor 把动作带换成了 `[−1,+1]`，
@@ -38,9 +38,23 @@ I/O 映射（**本次任务的核心**）
 ----
 * `aifflor_turbine.py` —— 口径 / **I-O 映射表** / 模型构造 / 向量化求值（单一真源）
 * `aifflor_env.py`     —— `AifflorPhysics`（非有限值守卫 + 预取）+ `WindBatteryAIF`
-* `aifflor_ddpg.py`    —— **逐字复制** `td3per/td3per_ddpg.py`
+* `aifflor_ddpg.py`    —— `td3per` 的 TD3+PER 本体 + aifflor 的动作流形接线
+  （默认 6 输出时逐位不变；`--lin_wt` 时为 **3 输出 actor** + 线性展开）
 * `aifflor_myfunc.py`  —— **逐字复制** `td3per/td3per_myfunc.py`
+* `aifflor_hsrl.py`    —— **新写**：`--hsrl` 方法分支的全部口径（"块总放电量"语义，见其 docstring
+  与 `aifflor/README.md` §3.8；未加 `--hsrl` 时一行都不会被调用）
 * `aifflor_main.py`    —— `td3per/td3per_main.py` + 替换表（`agentutil/port_aifflor.py`）
+  + `--hsrl` 分支的 `train_hsrl()`（与旧 `train()` 并列）
+* `aifflor_branch.py`  —— **新写**：同块首宽动作覆盖（branch）的全部口径
+  （块首快照/恢复、测试动作集、5 步 branch 块、触发/诊断），见 §3.9 与
+  `documentation/aifflor_branch_wide_coverage_plan.md`；默认 `--branch_every 0` 关闭
+* **线性行为分支（`--lin_wt 1`）**：**结构版** —— actor 输出层只有 3 个神经元
+  `a0/a4/g`（`actor_3.pkl`），中间三维由 `model.expand_lin_wt` 线性插值展开
+  （两位小数）；critic 仍吃 6 维动作。接线在 `aifflor_ddpg`（actor 输出维 /
+  `_expand` / `select_action` / `_target_smoothed_action` / checkpoint tag）与
+  `aifflor_main`（`init_wt_action_bias` 的 3 输出映射、warmup 的 `_apply_lin_wt`，
+  旧 `train()` 与 `train_hsrl()` 两条主循环都接）；默认关闭。口径见
+  `aifflor/README.md` §3.10 与 `documentation/aifflor_linear_behavior_branch.md`
 
 克隆的**唯一真源**是 `agentutil/port_aifflor.py`（替换表 + `--check` 可逆性校验）。
 

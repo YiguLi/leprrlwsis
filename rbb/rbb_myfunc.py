@@ -159,7 +159,7 @@ def Eval_Rew_RBB(observation, observation2, action_all, rbb_info, time=1.0 / 60)
 # Action Checking (unchanged from PERv0)
 # =============================================================================
 
-def CheckAction(action, charge=10.):
+def CheckAction(action, charge=0.5):
     """
     Clip actions to feasible ranges and compute penalty for out-of-bound violations.
 
@@ -258,7 +258,7 @@ def CheckAction(action, charge=10.):
 # Normalization (unchanged)
 # =============================================================================
 
-def Normalize(obs, max_E=6.):
+def Normalize(obs, max_E=0.5):
     """Normalize observation to [0, ~1] range."""
     pr = obs[0] / 1000  # price: 300, 580, 980 → ~[0.3, 1.0]
     u = obs[1] / 10     # wind speed
@@ -267,7 +267,7 @@ def Normalize(obs, max_E=6.):
     return np.array([pr, u, e, p])
 
 
-def Original(obs, max_E=6.):
+def Original(obs, max_E=0.5):
     """Denormalize observation back to physical units."""
     pr = obs[0] * 1000
     u = obs[1] * 10

@@ -127,6 +127,17 @@ _PAIRS = (('critic_p', 'critic_target_p', 'p'),
           ('critic_c2', 'critic_target_c2', 'c'))
 
 
+def _out_head(net):
+    """返回 critic 的输出层（v1/v1af: fc3；v2: out）；没有则 None。"""
+    if net is None:
+        return None
+    for name in ('fc3', 'out'):
+        layer = getattr(net, name, None)
+        if layer is not None and hasattr(layer, 'bias'):
+            return layer
+    return None
+
+
 def init_critic_bias(agent, b_p=None, b_c=None, verbose=True):
     """把 critic 输出层 (fc3, 50→1) 的 bias 设为价值基线；weights 与其它层不动。
 
@@ -138,15 +149,19 @@ def init_critic_bias(agent, b_p=None, b_c=None, verbose=True):
         if b is None:
             continue
         net = getattr(agent, online, None)
-        if net is None or not hasattr(net, 'fc3'):
+        # 输出层名字随结构而变：v1/v1af = fc3；v2（双流）= out。
+        # ⚠ 历史 bug：只认 fc3 ⇒ v2 下静默 no-op（2026-10-19 实测 out.bias 仍是 0.013）。
+        head = _out_head(net)
+        if net is None or head is None:
             continue                                   # DDPG 系无 p2/c2
         with torch.no_grad():
-            net.fc3.bias.data.fill_(float(b))
+            head.bias.data.fill_(float(b))
         done.append(online)
         tgt = getattr(agent, target, None)
-        if tgt is not None and hasattr(tgt, 'fc3'):
+        tgt_head = _out_head(tgt)
+        if tgt is not None and tgt_head is not None:
             with torch.no_grad():
-                tgt.fc3.bias.data.fill_(float(b))
+                tgt_head.bias.data.fill_(float(b))
             done.append(target)
     if verbose:
         prCyan('init_critic_bias: 输出层 bias 置为 b_p={} b_c={} → 已设置 {} 个网络 {}'

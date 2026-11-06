@@ -65,6 +65,8 @@ sys.path.insert(0, _HSRL_DIR)
 from env import WindBattery
 from singleaif.singleaif_ddpg import SP_TD3
 from util import *
+
+import run_io   # 输出简化（--log_file/--progress，aifflor 同款）
 from singleaif.singleaif_myfunc import (
     CheckAction, Normalize, Normalize_H,
     Cal_Rew_RB, gap_penalty, soc_target_from_signal, nine_case_test,
@@ -799,6 +801,7 @@ def train(num_iterations_H,
 
         # update
         step += 1
+        run_io.tick(step)
         episode_steps += 1
         episode_reward += r1
         episode_cost += c1_step + gap_pen
@@ -893,6 +896,19 @@ if __name__ == "__main__":
                         default='SINGLEAIF',
                         type=str,
                         help='open-ai gym environment')
+    parser.add_argument('--critic_arch', default='v7',
+                        choices=['v1', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7'],
+                        help='critic/actor 结构（2026-11-04 起默认 **v7**）: '
+                             'v7 = critic cat(s,a)→400→300→400→1 + actor s→400→300→400→a；'
+                             'v1 = 历史 16/100（复现旧 run / 加载旧 checkpoint 用）')
+    parser.add_argument('--log_file', default=0, type=int,
+                        help='1 = 把逐行详细输出写入 <output>/train.log，控制台只留 --progress 进度行'
+                             '（与 aifflor 同款；默认 0 = 输出与改造前逐位相同）')
+    parser.add_argument('--progress', default=1, type=int,
+                        help='1 = 每 --progress_every 步打印一行进度（步/秒 + ETA）；'
+                             '只在 --log_file 1 时生效（默认 1）')
+    parser.add_argument('--progress_every', default=500, type=int,
+                        help='进度行间隔（环境步）')
     parser.add_argument('--hidden1',
                         default=16,
                         type=int,
@@ -1063,7 +1079,7 @@ if __name__ == "__main__":
     # RBB parameters (硬裁剪 + L 层可行域观测输入)
     parser.add_argument('--rbb_fluctuation_limit', default=3.0, type=float,
                         help='Max grid power fluctuation between steps (MW)')
-    parser.add_argument('--rbb_rated_power', default=10.0, type=float,
+    parser.add_argument('--rbb_rated_power', default=0.5, type=float,
                         help='BESS rated charge/discharge power (MW)')
 
     # 上层 gap 罚的豁免裕度 (下层 c2 无死区)
@@ -1124,10 +1140,16 @@ if __name__ == "__main__":
     _HCFG = hc.h_settings()
     prCyan(hc.summary())
     args.output = get_output_folder(args.output, args.env)
+    # ---- 输出简化（aifflor 同款）：--log_file 1 ⇒ 详细输出进 train.log ----
+    run_io.setup(args.output,
+                 log_file=int(getattr(args, 'log_file', 0) or 0),
+                 progress=int(getattr(args, 'progress', 1) or 1),
+                 every=int(getattr(args, 'progress_every', 500) or 500),
+                 total=0)          # 真正的总步数在 train(...) 调用前用 run_io.set_total 设
     if args.resume == 'default':
         args.resume = 'output/{}-run0'.format(args.env)
 
-    max_E = 6.
+    max_E = 0.5
     upload = True
     use_csv = True
     args.max_episode_length = 1440  # 1d = 24h*60m = 1440 steps
@@ -1258,6 +1280,7 @@ if __name__ == "__main__":
     # agent_L.load_weights('output/1_2310S-run18')
 
     if args.mode == 'train':
+        run_io.set_total(int(args.train_iter_H))
         train(args.train_iter_H,
               agent_H,
               agent_L,

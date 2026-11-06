@@ -31,3 +31,7 @@ __pycache__/
 
 # agentutil/ ????: ?? dump ??
 agentutil/_scratch*.txt
+
+# 3b) critictest/ —— 代码入库，数据集 / checkpoint / 图 / 指标 JSON 不入库
+/agentutil/critictest/data/
+/agentutil/critictest/results/

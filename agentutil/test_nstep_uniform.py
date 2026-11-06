@@ -71,6 +71,10 @@ def make_agent(mod_name, cls_name, nstep, is_prle):
     ag.memory = StubMem()
     ag.is_training = True
     ag._prle = is_prle
+    # td3per 的 branch 元数据开关（2026-10 新增）：缺属性时 `_tag_actor` 会退化为
+    # "不打标签"，这里显式给出 False，使桩 agent 的语义与"未启用 branch"一致。
+    ag._tag_replay = False
+    ag.lower_ver = 0
     return ag
 
 

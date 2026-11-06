@@ -43,14 +43,41 @@ L: r2 = −1·min(clip_amount, 20)   [MW] 命令与实际之差 (两段 clip 合
 对偶上升 (两层都是 EMA 实际块成本)
 ----------------------------------
     H: EMA ← 0.98·EMA + 0.02·sum_c1
-       uniform: 乘性 lam1 ← lam1·exp(0.02·(EMA/d_block_H − 1)),
-                lam1 ∈ [0.967, 4.833], 初值 0.967, d_block_H = 15.0 (= 3 MW × 5 步)
+       uniform: 乘性 lam1 ← lam1·exp(0.02·(rate/d_block_H − 1)), rate = critic cost 的 Q
+                lam1 ∈ 物理 [2.0, 50.0] 元/(MW·step)（= actor [0.2, 5.0]），初值 = 下限 2.0
+                依据: 上界 = max(平抑资源边际成本 20, 峰价降载 16.33) 的 2.5×；界外波动单价 20·λ1
+                d_block_H = 15.0 (= 3 MW × 5 步)
+                curriculum 地板 = 0（用户第六轮）：d_block_H 可一直减半，连续 50 块不满足即自行停止
+                ⚠ 历史口径 [0.967, 100] / [50, 100] 已被取代（见 hsrl.HSRL_LAM1_PHYS_MIN 的注释）
        legacy : 加性 lam1（本项目原式）
     L: EMA ← 0.98·EMA + 0.02·sum_c2;  lam2 ← clip(lam2·exp(0.02·(EMA/d_block_L − 1)), 0.5, 2), 初值 1.0 (无量纲兑换率)
        d_block_L = 1.2 (⇔ 允许搁置 0.02 MWh/块), curriculum 减半地板 0.15
+
+--hsrl: 另一条**方法分支**（本文件内并列、互不干扰）
+---------------------------------------------------
+加 `--hsrl` 后走上表的 **"块总放电量"语义**（全部实现见 `aifflor/aifflor_hsrl.py`，
+未加 `--hsrl` 时该模块的函数一行都不会被调用 ⇒ 旧路径逐位不变）：
+
+  * H 第 6 维 = **BESS 在本 5 步块内的总放电量 g [MW·min]**（放电为正），
+    可行域 `[−C_max, +D_max]` 由**块首 SOC + 额定功率**推出（**不含波动约束**）；
+    越界线性罚 10 元/MW·min（不封顶），与 H 前 5 维同处 r1；
+  * H 奖励**去掉 bessdeg**：`r1 = pr·P_G·dt − pen5 − pen6`；**块末 SOC 目标 gap 罚删除**；
+  * L 动作 = **绝对 pb**（不再是"规则基线 + Δ"），只按**每步物理域**（SOC + 额定功率）裁剪；
+  * L reward：`r2 = −200·越界量[MW] − 20·放电量[MW·min]`（退化 = 越界罚的 1/10；
+    **不含** rulebase 波动裁剪罚）；
+  * L cost（图中公式）：`c_L = 1 − exp(−|(g − Σ已放电)/(δ − t_L) − a_L|)`，
+    δ = 5、t_L = 块内已过步数、a_L/Σ 都取**实际施加值**（放电为正）；
+  * L 观测 6 维 = `[u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5, need/2.5]`
+    （第 6 维 = c_L 的参照点 `need=(g−Σ已放电)/n_rem`；残余局限见 README §3.8）
+    （⚠ 不含 Σ/n_rem ⇒ 对 c_L 的参照量非 Markov；这是刻意的原方法形态，见 README）；
+  * λ2 重标 `[2, 50]`（初值 10）、`d_block_L = 0.5`（地板 0.05）；
+  * warmup 下层 = **摊还执行器** `clip(−(g−Σ)/n_rem, 物理域)`（c_L ≡ 0 的零成本动作）；
+  * 训练中的测试改跑 **20 步协议**：电价恒 300、风速随机取一列 + 随机起点 20 步、
+    开局 SOC = 0.25，触发频率与旧 9-case 相同（`episode_steps % 480 == 0` 且已过 warmup）。
 """
 import os
 import sys
+import time as _time_mod   # 注意: 函数内 'time' 被时间步长(float)占用
 import numpy as np
 import argparse
 from copy import deepcopy
@@ -66,6 +93,13 @@ sys.path.insert(0, _HSRL_DIR)
 from aifflor.aifflor_env import AifflorPhysics, WindBatteryAIF
 from aifflor import aifflor_turbine as aturb
 from aifflor.aifflor_ddpg import SP_TD3
+from model import proj_farm_level as _proj_farm_level   # 场级降载投影 (--farm_level)
+from model import proj_lin_wt_np as _proj_lin_wt_np     # 线性行为分支 (--lin_wt)
+from model import wt_bias_values as _wt_bias_values     # 3 输出头的 bias 映射
+from model import normalize_arch as _normalize_arch   # 7.1/7.2/7.3 → v7.1/...
+from model import actor_spec as _actor_spec           # arch → (h1, h2, pre_hidden)
+from aifflor import aifflor_hsrl as hsrl   # --hsrl 分支的全部口径 (单一真源)
+from aifflor import aifflor_branch as abr  # 同块首宽动作覆盖 (branch) 的全部口径
 from util import *
 from td3per.td3per_myfunc import (
     CheckAction, Normalize, Normalize_H,
@@ -97,8 +131,34 @@ import hsrl_warmup as hwarm       # warmup 调度 + 规则下层 + transition �
 RUN_TAG = 'aifflor'
 
 
+def _append_wind5_H(norm_obs, obs, env, args):
+    """上层 critic 专用：在原 obs 后追加 u2..u5（u1 已含在 obs 中）。
+
+    `--critic_wind5 0`（默认）⇒ 原样返回，历史路径逐位不变。
+    这些风速**只进入 critic**；actor 仍用原 `norm_obs`。
+    """
+    if not int(getattr(args, 'critic_wind5', 0) or 0):
+        return norm_obs
+    ups = env._upcoming_wind(4)
+    u1 = float(obs[1])
+    if ups is None:
+        ups = np.full(4, u1, dtype=float)
+    else:
+        ups = np.asarray(ups, dtype=float).reshape(-1)[:4]
+        if ups.size < 4:
+            pad = ups[-1] if ups.size else u1
+            ups = np.concatenate([ups, np.full(4 - ups.size, pad)])
+    return np.concatenate([np.asarray(norm_obs, dtype=float).reshape(-1),
+                           ups / 10.0])
+
+
 def init_wt_action_bias(agent, lo=0.05, hi=0.45, sig_value=0.0, verbose=True):
-    """把 actor 输出层前 5 维 (WT 轴向诱导因子 a) 的 bias 初始化到“中性宽带”。
+    """把 actor 输出层 bias 初始化到“中性宽带”。
+
+    两种结构：
+      * 默认（6 输出）：前 5 维 = 五台风机 `a` 的 `U(lo,hi)`，第 6 维 = `sig_value`；
+      * `--lin_wt`（**3 输出**）：第 0/1 维 = `a0/a4` 的 `U(lo,hi)`，第 2 维 = `sig_value`
+        （中间三台由线性插值展开，不需要也不能有单独的 bias）。
 
     为什么必须做 (run160/初始策略诊断):
       `model.py` 的 Actor 只把 fc4.weight 初始化成 ±init_w(0.003),
@@ -118,20 +178,27 @@ def init_wt_action_bias(agent, lo=0.05, hi=0.45, sig_value=0.0, verbose=True):
     if not hasattr(a, 'fc4'):
         return False
     nb = a.fc4.bias.data.shape[0]
+    is_lin = bool(getattr(agent, 'lin_wt', False))
+    n_wt = 2 if is_lin else min(5, nb)
     with torch.no_grad():
         b = a.fc4.bias.data
-        n_wt = min(5, nb)
-        b[:n_wt] = torch.tensor(np.random.uniform(lo, hi, n_wt), dtype=b.dtype)
-        if nb > n_wt:
-            b[n_wt:] = float(sig_value)
+        vals = _wt_bias_values(nb, lo=lo, hi=hi, sig_value=sig_value,
+                               lin_wt=is_lin)
+        b[:] = torch.tensor(vals, dtype=b.dtype)
         tgt = agent.actor_target.fc4.bias.data
         tgt.copy_(b)
     if verbose:
         cp = 4 * np.array([b[:n_wt].mean()]) * (1 - np.array([b[:n_wt].mean()])) ** 2
-        prGreen('init_wt_action_bias: WT bias = {} (mean a = {:.3f} -> Cp = {:.3f}); '
-                'signal bias = {}'.format(
-                    np.round(b[:n_wt].numpy(), 3), float(b[:n_wt].mean()),
-                    float(cp[0]), float(b[n_wt]) if nb > n_wt else None))
+        if is_lin:
+            prGreen('init_wt_action_bias (linear): a0/a4 bias = {} (mean a = {:.3f} -> '
+                    'Cp = {:.3f}); g bias = {}'.format(
+                        np.round(b[:2].numpy(), 3), float(b[:2].mean()),
+                        float(cp[0]), float(b[2]) if nb > 2 else None))
+        else:
+            prGreen('init_wt_action_bias: WT bias = {} (mean a = {:.3f} -> Cp = {:.3f}); '
+                    'signal bias = {}'.format(
+                        np.round(b[:n_wt].numpy(), 3), float(b[:n_wt].mean()),
+                        float(cp[0]), float(b[n_wt]) if nb > n_wt else None))
     return True
 
 
@@ -198,8 +265,9 @@ def train(num_iterations_H,
     phase_checked = 0
 
     # ---- warmup 期调度 + critic bias 触发状态 ----
-    #   warmup_sched: 上层确定性动作调度 (wt 0.33 起每块 ±0.05 clip[0.20,0.45]; 信号维恒 0
-    #                 ⇒ SOC 目标语义的项目 soc_target ≡ 3, 影子电价语义的项目影子价 ≡ 0)
+    #   warmup_sched: 上层动作调度（aifflor 默认 --warmup_wt_sched unified：偶数块 LHS
+    #                 全局覆盖 / 奇数块在结构先验上做**五维统一随机升降**，见 hsrl_warmup；
+    #                 信号维按 --warmup_sig 生成）
     #   bias_init   : warmup 块样本收集 + bias 一次性应用
     #                 (修 step == args.warmup 与块末 episode_steps%5==4 不同余导致永不触发的 bug;
     #                  触发点 = warmup 之后第一个块末, 仍在首次策略更新之前)
@@ -252,15 +320,25 @@ def train(num_iterations_H,
                 # 下层用规则组件**完全追踪**该目标(Δ≡0 ⇒ trackerr≡0)。
                 # --warmup_sig fixed 可退回"信号恒 0"的旧口径。
                 _wa = warmup_sched.action(float(observation[0]))   # None ⇒ 对照臂 (--warmup_sched random)
-                applied_action_H = original_action_H = (
-                    agent_H.random_action() if _wa is None else _wa)
+                _raw_H = agent_H.random_action() if _wa is None else _wa
+                if int(getattr(args, 'lin_wt', 0) or 0):
+                    # 线性行为分支：warmup 的 LHS/统一调度也要落在流形上
+                    _raw_H = np.asarray(_raw_H, dtype=float).copy()
+                    _apply_lin_wt(_raw_H, args)
+                applied_action_H = original_action_H = _raw_H
                 penalty_NN_H = 0
             else:
                 original_action_H = agent_H.select_action(norm_observation)
+                if int(getattr(args, 'lin_wt', 0) or 0):
+                    # select_action 内部已投影；这里再落一次是为了与 warmup 共用同一入口，
+                    # 且保证后续任何就地改写之后仍是线性型线（幂等）。
+                    original_action_H = np.asarray(original_action_H, dtype=float).copy()
+                    _apply_lin_wt(original_action_H, args)
                 applied_action_H, penalty_NN_H = CheckAction(original_action_H)
             # 越界乘性系数 (每块一个 H 动作 ⇒ 块内恒定; 系数<=0 时恒 1.0 ⇒ 旧口径逐位不变)
             viol_derate = violation_derate(original_action_H, args.viol_derate)
-            norm_observation_H = norm_observation
+            norm_observation_H = _append_wind5_H(
+                norm_observation, observation, env, args)
             pw_tru = env.PowerOutput(observation[1], applied_action_H)
             # SOC 目标 (块级固定) —— 上层信号语义
             soc_signal = float(applied_action_H[5])
@@ -360,6 +438,8 @@ def train(num_iterations_H,
         norm_observation2 = Normalize_H(observation2,
                                        phase_minute_of_day(episode_steps + 1),
                                        phase_mode, phase_table)
+        norm_observation2_H = _append_wind5_H(
+            norm_observation2, observation2, env, args)
 
         # ================================================================
         # 上层 H 奖励/成本 (非分段, 与 td3perrb 同口径)
@@ -453,7 +533,7 @@ def train(num_iterations_H,
             bias_init.on_block_end(step, sum_r1, sum_c1, agent_H)
 
             agent_H.observe_jump(norm_observation_H, original_action_H,
-                                 sum_r1, sum_c1, norm_observation2, done)
+                                 sum_r1, sum_c1, norm_observation2_H, done)
             # H 层 EMA 对偶上升 —— 用块实际成本 sum_c1 更新 lam1 (与 d_block_H 同口径)
             if step > args.warmup:
                 agent_H.update_ema_cost(sum_c1)
@@ -878,6 +958,973 @@ def train(num_iterations_H,
                       phase_mismatch))
 
 
+# =============================================================================
+# 诊断开关（默认全关 ⇒ 生产路径逐位不变）
+#   S1 固定风速+固定电价 / S2 变风速+固定电价 / S3 变风速+变电价 / E2 一维统一降载
+# =============================================================================
+DIAG = {'u': -1.0, 'pr': -1.0, 'scalar': 0, 'freeze_g': 0, 'lam_fixed': -1.0,
+        'pen_h': -1.0, 'center': 0}
+
+
+def _diag_fix_action(a):
+    """把 actor 的 6 维原始动作改写成受约束的形式（诊断用）。
+
+    * `scalar=1`：只保留第 1 位，`s = sigmoid(a[0]) ∈ (0,1)`，前 5 维统一取
+      `0.33·s` ⇒ 1 维"统一降载"参数化（实验 2）；`s` 可由 `a[0]/0.33` 还原。
+    * `freeze_g=1`：第 6 维（块总放电量 g）恒 0 ⇒ BESS 不参与（实验 1）。
+    """
+    a = np.asarray(a, dtype=float).reshape(-1).copy()
+    if DIAG['scalar']:
+        s = 1.0 / (1.0 + np.exp(-float(np.clip(a[0], -30.0, 30.0))))
+        a[:5] = 0.33 * s
+    if DIAG['freeze_g']:
+        a[5] = 0.0
+    return a
+
+
+def _apply_scalar_wt(a, args):
+    """--scalar_wt：把前 `na_box` 维风机动作就地压成同一个值（a_i = a_0）。
+
+    这是**刻意设计的 baseline 动作空间**：五台风机共用一个轴向因子 ⇒ 只剩 1 个自由度，
+    第 1..4 维"存在但无用"（对它们的梯度恒为 0）。第 6 维 g 不动。
+
+    为什么放在主循环（而不是只放在 agent 里）：warmup 的 LHS 调度、`--diag_scalar`、
+    `--explore_mix_blocks` 都会改写前 5 维，必须在它们**之后**、`check_action_H_hsrl`
+    **之前**落地，否则实际执行的动作就不是"五台同一个因子"。
+
+    注：不做 clip —— 越界仍由 `check_action_H_hsrl` 裁 + pen5 罚。因此当 a_0 越界时
+    5 台会同时越界、pen5 是"单台越界"的 5 倍；这是"一个动作驱动五台"的必然结果。
+    """
+    if not int(getattr(args, 'scalar_wt', 0) or 0):
+        return
+    nt = int(getattr(args, 'na_box', 5) or 5)
+    a[:nt] = float(a[0])
+
+
+def _apply_lin_wt(a, args):
+    """--lin_wt：把前 `na_box` 维就地压成"首尾两维 + 中间线性插值（两位小数）"。
+
+    线性行为分支（**刻意设计的动作流形**）：
+        a_i = a_0 + (a_{nt-1} − a_0) · i/(nt−1)，i = 1 … nt−2
+    中间维四舍五入到 `--lin_wt_decimals` 位（默认 2）；首尾维保持 actor 原值。
+    ⇒ 有效自由度 2（第 0 与第 nt−1 维），第 1..nt−2 维"存在但无用"。
+
+    为什么放在主循环（而不是只放在 agent 里）：warmup 的 LHS/统一调度、
+    `--diag_scalar`、`--explore_mix_blocks` 都会改写前 5 维，必须在它们**之后**、
+    `check_action_H_hsrl` / `CheckAction` **之前**落地，否则实际执行的动作就不在
+    线性流形上。
+
+    注：不做 clip —— 越界仍由动作检查裁 + pen5 罚。因此当首尾维越界时，由它们
+    推出来的中间维可能同时越界，pen5 按实际越界维数累计（不是 bug）。
+    """
+    if not int(getattr(args, 'lin_wt', 0) or 0):
+        return
+    nt = int(getattr(args, 'na_box', 5) or 5)
+    dec = int(getattr(args, 'lin_wt_decimals', 2))
+    a[:nt] = _proj_lin_wt_np(np.asarray(a[:nt], dtype=float), nt=nt, decimals=dec)
+
+
+# =============================================================================
+# HSRL 分支的训练主循环（--hsrl；口径总表见 aifflor/aifflor_hsrl.py）
+# =============================================================================
+def train_hsrl(num_iterations_H,
+               agent_H,
+               agent_L,
+               env,
+               env_test,
+               rbb_system,
+               wind_pool,
+               output,
+               max_episode_length=None,
+               debug=False,
+               upload=False,
+               use_csv=False):
+    """`--hsrl` 分支的训练主循环。
+
+    与 `train()` **并列而不共用**：HSRL 的每一条口径（块总放电量语义 / 无 bessdeg 的 H 奖励 /
+    绝对 pb 的 L 动作 / 指数式 c_L / 重标后的 λ2 / 摊还执行器 warmup / 20 步测试）都在这里
+    自成一体 ⇒ **未加 `--hsrl` 时旧 `train()` 一行都不被触碰**（"逐位不变"可断言）。
+
+    单位约定（全函数一致）：
+      * `pb`   ：BESS 功率 [MW]，**正 = 充电**（与 env / RBB 同号）；
+      * `a_L`  ：BESS **放电量** [MW·min]，**正 = 放电**（= −pb，公式里的 a_L^t）；
+      * `g`    ：H 下发的**块总放电量** [MW·min]，**正 = 放电**；
+      * 步长 = 1 min ⇒ 每步的"MW"与"MW·min"数值相等。
+    """
+    agent_H.is_training = True
+    agent_L.is_training = True
+    step = episode = episode_steps = 0
+    episode_reward = episode_cost = episode_cost2 = episode_profit = 0.
+    episode_bess_profit = 0.
+    episode_deg_discharge = 0.
+    episode_deg_charge = 0.
+    observation = None
+    time = hsrl.DT
+
+    # ---- H 层 EMA 对偶（口径未变: sum_c1 = 波动成本 + W_GAP·unfeasible_gap(≡0)）----
+    _h = hc.h_settings()
+    d_block_H = _h['d_block'] if _h else 50.0
+    # curriculum 地板：**HSRL 分支用 0（用户第六轮）** ⇒ 允许一直减半、由可达性自行停止
+    #   （此前沿用 `_h['d_block_min'] = D_BLOCK = 初值` ⇒ 减半是空操作、curriculum 被设计性禁用）。
+    #   ⚠ 非 HSRL 的旧 train() 仍用 `_h['d_block_min']`，逐位不变。
+    d_block_H_min = float(getattr(args, 'hsrl_d_block_h_min', hsrl.HSRL_D_BLOCK_H_MIN))
+    # ---- L 层 EMA 对偶（HSRL 重标: c_L 无量纲 ⇒ λ2 ∈ [2,50], d_block_L = 0.1）----
+    d_block_L = float(getattr(args, 'hsrl_d_block_l', hsrl.HSRL_D_BLOCK_L))
+    d_block_L_min = float(getattr(args, 'hsrl_d_block_l_min', hsrl.HSRL_D_BLOCK_L_MIN))
+    consecutive_satisfied_H = 0
+    consecutive_satisfied_L = 0
+
+    # ---- 越界/退化系数（命令行可覆盖；<=0 的覆盖值不生效，一律取模块常量）----
+    pen6_coef = float(getattr(args, 'hsrl_pen6_coef', hsrl.HSRL_PEN6_COEF) or hsrl.HSRL_PEN6_COEF)
+    viol_coef = float(getattr(args, 'hsrl_viol_coef', hsrl.HSRL_VIOL_COEF) or hsrl.HSRL_VIOL_COEF)
+    deg_coef = float(getattr(args, 'hsrl_deg_coef', hsrl.HSRL_DEG_COEF) or hsrl.HSRL_DEG_COEF)
+    # ---- 对偶: 分子来源（q=critic cost 的 Q / ema=实际块成本 EMA）与 twin 聚合（=twin 均值）----
+    dual_src = str(getattr(args, 'hsrl_dual_src', hsrl.HSRL_DUAL_SRC))
+    dual_q_agg = str(getattr(args, 'hsrl_dual_q_agg', hsrl.HSRL_DUAL_Q_AGG))
+    # `src=q` 时用哪种 Q 估计: recent_batch=近端 N 条状态的批均值 × 当前策略动作(默认, S1)
+    #                            point=旧的单点 Q(s0,a0)（风依赖强，A/B 对照）
+    dual_q_src = str(getattr(args, 'hsrl_dual_q_src', hsrl.HSRL_DUAL_Q_SRC))
+    dual_recent_n = int(getattr(args, 'hsrl_dual_recent_n', hsrl.HSRL_DUAL_RECENT_N))
+    # 块首 L 观测（Q 版对偶在块末要用它评估"当前策略的期望块成本"）
+    norm_observation_L0 = None
+    action_L0 = None
+    # 对偶诊断（块末更新，块内保持 —— 与 g 同惯例）
+    q_rate_H = float('nan')
+    q_rate_L = float('nan')
+    q_info_H = {'q_agg': float('nan')}
+    q_info_L = {'q_agg': float('nan')}
+    # 近端批（S1）诊断：块末更新，块内保持
+    b_info_H = {'q_agg': float('nan'), 'n_batch': 0, 'cost_recent_mean': float('nan')}
+    b_info_L = {'q_agg': float('nan'), 'n_batch': 0, 'cost_recent_mean': float('nan')}
+    # update 批均值（update_batch 分子）诊断：块末更新，块内保持
+    ud_info_H = {'q_agg': float('nan'), 'n_update': 0}
+
+    if use_csv:
+        df_rows = []
+        df_written = 0
+        df_episode_rows = []
+        df_episode_written = 0
+        df_test_rows = []
+        df_test_written = 0
+        df_update_rows = []
+        df_update_written = 0
+
+    # ---- 1440-step window counters for env metrics ----
+    window_violation_count = 0
+    window_power_sum = 0.0
+
+    # ---- 24h 相位特征 (--phase_feat) ----
+    phase_mode = int(getattr(args, 'phase_feat', 0))
+    phase_table = phase_daily_table() if phase_mode >= 2 else None
+    phase_sched = day_price_schedule()
+    phase_mismatch = 0
+    phase_checked = 0
+
+    # ---- warmup: 上层调度 + 下层"摊还执行器"自检 ----
+    warmup_sched, warmup_rule, bess_fill_stats = hwarm.build_from_args(args, agent_H, agent_L)
+    _wb = str(getattr(args, 'warmup_bess', 'rule'))
+    # HSRL 下 `--warmup_bess rule`（默认）⇒ **摊还执行器**（不是 SOC 目标追踪）:
+    #   命令 = clip(−(g−Σ)/n_rem, 物理域) ⇒ c_L ≡ 0、r2 = −退化项 —— 与策略期的零成本动作同源。
+    #   因此旧的 `check_residual_baseline`（断言"与 SOC 目标规则逐位相同"）在 HSRL 下**不适用**，
+    #   改跑 `hsrl.check_amortized_baseline`（断言"c_L≡0 + 命令恒在物理域内 + SOC 不越界"）。
+    _chk = hsrl.check_amortized_baseline()
+    prCyan('[HSRL] warmup 下层口径 = {} ({});  摊还执行器自检: {} 例, 其中被物理域裁剪 {} 例 '
+           '(裁剪时 c_L>0 属"做不到", 未裁剪时 c_L≡0), max c_L = {:.3e}'.format(
+               _wb, '摊还执行器' if _wb == 'rule' else ('价格条件随机' if _wb == 'price' else '绝对随机'),
+               _chk['n_checked'], _chk['n_clipped'], _chk['max_c_unclipped']))
+    assert _chk['fail'] == 0, 'HSRL 摊还执行器自检未通过: {}'.format(_chk)
+    bias_init = hinit.BiasInitTracker.from_args(args)
+    bias_init.value_scale = float(getattr(agent_H, 'value_scale', hc.value_scale()))
+    bias_init.discount = float(agent_H.discount)
+
+    # ---- 20 步测试的风速池（只含"天"列；FFC_speed_noise_1.csv 第 0 列是行号）----
+    wind_pool = None
+    try:
+        wind_pool = np.asarray(env_test.wind_noise.iloc[:, 1:].to_numpy(dtype=float))
+    except Exception as _e:                                   # pragma: no cover
+        prYellow('[HSRL test20] 风速池不可用 ({}); 本run 跳过 20 步测试'.format(_e))
+    test_seed = int(getattr(args, 'hsrl_test_seed', -1))
+    test_trigger = 0
+
+    c1_bound_coef = float(getattr(args, 'c1_bound_coef', 10.0))   # c1 越界项系数（见 --c1_bound_coef）
+    _progress = bool(int(getattr(args, 'progress', 1) or 0))
+    _prog_every = max(1, int(getattr(args, 'progress_every', 500) or 500))
+    _t0 = _time_mod.time()
+    _tag = os.path.basename(str(output).rstrip('/\\'))
+    explore_mix_blocks = int(getattr(args, 'explore_mix_blocks', 0) or 0)
+    _wt_lhs_rng = np.random.RandomState(int(getattr(args, 'seed', 0) or 0) + 7919)
+
+    # =================================================================
+    # 同块首宽动作覆盖（branch，计划书 documentation/aifflor_branch_wide_coverage_plan.md）
+    #   * 每个 branch 块：从**同一个块首 state** 再跑 len(modes) 个测试动作 × 5 步；
+    #   * 只写 replay（source=branch），**不推进主 episode、不写任何行为日志**；
+    #   * 随机流独立（`BranchController.rng`）⇒ 开关 branch 不改变 actor 的随机数轨迹。
+    # =================================================================
+    branch_ctl = abr.BranchController(args)
+    _branch_csv = bool(int(getattr(args, 'branch_csv', 1) or 0))
+    lower_ver = 0                      # 下层 BESS 版本（每块 L 更新后 +1；诊断口径）
+    df_branch_rows = []
+    df_branch_written = 0
+    _branch_blk_c1 = float('nan')
+    _branch_blk_r1 = float('nan')
+    _branch_enabled = bool(branch_ctl.enabled)
+
+    def _make_critic_state(_obs, _env, _minute):
+        """块末原始观测 → critic state（`Normalize_H` + 可选 `u2..u5`）。
+
+        ⚠ 必须在 env 处于**块末**时调用（`_append_wind5_H` 读 `env.count_wind`）。
+        branch 与 actor 用**同一个**构造 ⇒ 两边的 s' 口径必然一致。
+        """
+        return _append_wind5_H(Normalize_H(_obs, _minute, phase_mode, phase_table),
+                               _obs, _env, args)
+
+    if _branch_enabled:
+        prCyan(branch_ctl.summary())
+
+    while step < num_iterations_H:
+        prYellow('########### step:{} ###########'.format(step))
+        if observation is None:
+            observation = deepcopy(env.reset())          # [Pr,U,E,P_G_last]
+            reset_E = float(np.random.uniform(float(args.soc_reset_low),
+                                              float(args.soc_reset_high)))
+            env.E = reset_E
+            observation[2] = reset_E
+            norm_observation = Normalize_H(observation, phase_minute_of_day(0),
+                                           phase_mode, phase_table)
+            agent_H.reset(norm_observation)
+
+        pm_now = phase_minute_of_day(episode_steps)
+        if phase_mode > 0:
+            if abs(float(observation[0]) - phase_sched[pm_now]) > 1e-6:
+                phase_mismatch += 1
+            phase_checked += 1
+
+        # ================================================================
+        # 块首: H 决策 —— 第 6 维 = 本块总放电量 g [MW·min]（放电为正）
+        # ================================================================
+        if episode_steps % 5 == 0:
+            sum_r1 = 0.0
+            sum_c1 = 0.0
+            sum_c2 = 0.0
+            sum_disch = 0.0
+            E_block_start = float(observation[2])
+            feas_c_max, feas_d_max = hsrl.feasible_total(E_block_start)
+            if step <= args.warmup:
+                _wa = warmup_sched.action(float(observation[0]))   # None ⇒ 对照臂
+                if _wa is None:
+                    original_action_H = np.asarray(agent_H.random_action(), dtype=float).copy()
+                else:
+                    original_action_H = np.asarray(_wa, dtype=float).copy()
+                # 第 6 维 g：**在块级可行域 [−C_max, +D_max] 内随机游走**（不再按电价）
+                _g6 = (warmup_sched.g_walk(-feas_c_max, feas_d_max)
+                       if warmup_sched is not None else hsrl.random_g())
+                original_action_H[5] = float(_g6)
+                if getattr(args, 'farm_level', 0):
+                    original_action_H = _proj_farm_level(
+                        torch.tensor(original_action_H[None, :], dtype=torch.float32)).numpy()[0]
+                original_action_H = _diag_fix_action(original_action_H)
+                _apply_lin_wt(original_action_H, args)
+                _apply_scalar_wt(original_action_H, args)
+                applied_action_H, _pen5_w, _pen6_w = hsrl.check_action_H_hsrl(
+                    original_action_H, E_block_start,
+                    pen_coef=(DIAG['pen_h'] if DIAG['pen_h'] > 0 else None),
+                    pen6_coef=pen6_coef)
+                penalty_NN_H = 0.0          # warmup 期不计越界罚（与旧口径一致）
+                pen6_H = 0.0
+            else:
+                original_action_H = agent_H.select_action(norm_observation)
+                if getattr(args, 'farm_level', 0):
+                    original_action_H = _proj_farm_level(
+                        torch.tensor(original_action_H[None, :], dtype=torch.float32)).numpy()[0]
+                original_action_H = _diag_fix_action(original_action_H)
+                # ---- 早期覆盖混合（--explore_mix_blocks）: a = ε·actor + (1−ε)·U(0,0.5) ----
+                if explore_mix_blocks > 0:
+                    _blk_i = max(0, (int(step) - int(args.warmup)) // 5)
+                    if _blk_i < explore_mix_blocks:
+                        _eps = _blk_i / float(explore_mix_blocks)
+                        _ar = _wt_lhs_rng.uniform(0.0, 0.5, 5)
+                        original_action_H = np.asarray(original_action_H, dtype=float).copy()
+                        original_action_H[:5] = _eps * original_action_H[:5] + (1.0 - _eps) * _ar
+                # --lin_wt / --scalar_wt 必须在**所有改写之后、clip 之前**落地（diag_fix /
+                # explore_mix 都会打散前 5 维）；否则实际执行的动作不在目标流形上。
+                _apply_lin_wt(original_action_H, args)
+                _apply_scalar_wt(original_action_H, args)
+                applied_action_H, penalty_NN_H, pen6_H = hsrl.check_action_H_hsrl(
+                    original_action_H, E_block_start,
+                    pen_coef=(DIAG['pen_h'] if DIAG['pen_h'] > 0 else None),
+                    pen6_coef=pen6_coef)
+            g_raw = float(original_action_H[5])
+            g_applied = float(applied_action_H[5])
+            viol_derate = violation_derate(original_action_H, args.viol_derate)
+            norm_observation_H = _append_wind5_H(
+                norm_observation, observation, env, args)
+            pw_tru = env.PowerOutput(observation[1], applied_action_H)
+            pb_l = list()
+
+            # ============================================================
+            # 同块首宽动作覆盖（branch，计划 §3.3）
+            #   此刻 env 恰好停在**块首**（本块一步都还没推进）⇒ 这里就是 s_block。
+            #   跑完由 `run_branch_block` 的 `restore_env` 原样恢复，
+            #   `episode_steps / E / P_G_prev / count_wind / count_price` 一位不变。
+            #   ⚠ 只写 replay（source=branch）：λ/EMA/curriculum/CSV/TB/test 一律不看。
+            # ============================================================
+            if _branch_enabled and branch_ctl.trigger(step):
+                _snap = abr.snapshot_env(env)
+                # 该块末是否 episode 终止（与主循环 `done` 的判据同式）
+                _block_done = bool(
+                    max_episode_length
+                    and (episode_steps + abr.BLOCK - 1) >= max_episode_length - 1)
+                _minute_end = phase_minute_of_day(episode_steps + abr.BLOCK)
+                _blk_id = branch_ctl.begin_block()
+                _c1s, _r1s = [], []
+                for _mode in branch_ctl.modes:
+                    _a5b = branch_ctl.action(_mode)          # 独立随机流
+                    _gb = branch_ctl.goal(feas_c_max, feas_d_max)
+                    _bres = abr.run_branch_block(
+                        env, rbb_system, _a5b, _gb, _snap, _block_done,
+                        _make_critic_state, minute_end=_minute_end,
+                        freeze_lower=branch_ctl.freeze_lower,
+                        viol_derate_coef=args.viol_derate)
+                    _a6b = np.concatenate([np.asarray(_bres['a5'], dtype=float),
+                                           np.array([float(_gb)])])
+                    agent_H.push_branch_transition(
+                        norm_observation_H, _a6b, _bres['r1'], _bres['c1'],
+                        _bres['s2'], _bres['done'], mode=_mode,
+                        block_id=_blk_id, lower_ver=lower_ver)
+                    branch_ctl.note(_mode, _bres)
+                    _c1s.append(float(_bres['c1']))
+                    _r1s.append(float(_bres['r1']))
+                    prPurple('--branch-- [{}] a={} g={:.3f} | r1={:.2f} c1={:.3f} | '
+                           'P_F_mean={:.3f} max={:.3f}'.format(
+                               abr.MODE_NAME[_mode],
+                               np.round(_bres['a5'], 3), _gb, _bres['r1'],
+                               _bres['c1'], float(np.mean(_bres['P_F'])),
+                               _bres['P_F_max']))
+                    if use_csv and _branch_csv:
+                        _a5c = np.asarray(_bres['a5'], dtype=float).reshape(-1)
+                        df_branch_rows.append({
+                            'step': step, 'block_id': _blk_id,
+                            'mode': abr.MODE_NAME[_mode],
+                            **{'a{}'.format(i + 1): float(_a5c[i])
+                               for i in range(_a5c.size)},
+                            'g': float(_gb), 'r1': _bres['r1'], 'c1': _bres['c1'],
+                            'P_F_mean': float(np.mean(_bres['P_F'])),
+                            'P_F_max': _bres['P_F_max'], 'n_fold': _bres['n_fold'],
+                            'soc_start': _bres['soc_start'], 'soc_end': _bres['soc_end'],
+                            'sum_disch': _bres['sum_disch'],
+                            'lam1': float(agent_H.lam), 'lower_ver': int(lower_ver),
+                        })
+                # 注：branch 把 physics 预取缓存填成了测试动作的键，`restore_env` 已把
+                #     `_pf_state` 置 None ⇒ 下一步 `PowerOutput` 会重新预取（无状态残留）。
+                _branch_blk_c1 = float(np.mean(_c1s)) if _c1s else float('nan')
+                _branch_blk_r1 = float(np.mean(_r1s)) if _r1s else float('nan')
+                if upload:
+                    _cov = branch_ctl.coverage()
+                    writer.add_scalar('branch/c1_mean', _branch_blk_c1, step)
+                    writer.add_scalar('branch/r1_mean', _branch_blk_r1, step)
+                    writer.add_scalar('branch/n_trans', branch_ctl.n_trans, step)
+                    writer.add_scalar('branch/cover_lo', _cov['frac_lo'], step)
+                    writer.add_scalar('branch/cover_hi', _cov['frac_hi'], step)
+                    writer.add_scalar('branch/cover_fold', _cov['frac_fold'], step)
+                    writer.add_scalar('branch/buffer_n_branch', agent_H.memory.n_branch, step)
+                    writer.add_scalar('branch/buffer_frac',
+                                      (agent_H.memory.n_branch
+                                       / max(1, len(agent_H.memory))), step)
+                    writer.add_scalar('branch/batch_frac',
+                                      float(getattr(agent_H, 'last_batch_branch_frac', 0.0)),
+                                      step)
+
+        prGreen('--H-- ori a_t = {} (g_raw={:.3f} MW·min)'.format(
+            np.round(np.asarray(original_action_H, dtype=float), 3), g_raw))
+
+        ptur = float(pw_tru)
+        pg_prev = float(observation[-1])
+        E_current = float(observation[2])
+        pb_lo, pb_hi = hsrl.feasible_power(E_current)     # 每步物理域 [MW, 正=充电]
+
+        # ================================================================
+        # 下层 L 观测 (6 维): [u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5, need/2.5]
+        #   第 6 维 = c_L 的参照点 need = (g − Σ已放电)/(δ − t_L)（**本步开始前**的 Σ/n_rem）
+        # ================================================================
+        _n_rem_L = 5 - (episode_steps % 5)
+        need_L = hsrl.plan_need(g_applied, sum_disch, _n_rem_L)
+        norm_observation_L = hsrl.build_L_obs_hsrl(
+            observation[1], observation[0], E_current, pg_prev, g_applied, need_L)
+        prPurple('--L-- obs = {} (need={:.4f})'.format(
+            np.round(norm_observation_L, 3), need_L))
+        if episode_steps % 5 == 0:            # 下层每个 5-step 块 = 一个 episode
+            agent_L.reset(norm_observation_L)
+            # 块首观测 + 块首**实际执行**的动作（Q 版对偶要在块首、用实际动作评估 L 的
+            # cost：块末观测已近 episode 终止，Q_c 会退化成"最后一步的成本"）
+            norm_observation_L0 = np.array(norm_observation_L, dtype=float, copy=True)
+            action_L0 = None
+
+        # ================================================================
+        # 下层 L 动作: **绝对 pb**，只按物理域 (SOC + 额定功率) 裁剪
+        # ================================================================
+        if step <= args.warmup:
+            if _wb == 'price' and getattr(warmup_rule, 'is_price', False):
+                pb_cmd_L = float(warmup_rule.act(float(observation[0]), pb_lo, pb_hi))
+            elif _wb == 'random' or warmup_rule is None:
+                pb_cmd_L = float(np.asarray(agent_L.random_action(),
+                                            dtype=float).reshape(-1)[0])
+            else:   # rule (默认) ⇒ 摊还执行器
+                pb_cmd_L = hsrl.amortized_rule_action(
+                    g_applied, sum_disch, _n_rem_L, E_current)
+            original_action_L = np.array([pb_cmd_L], dtype=np.float64)
+            viol_L = 0.0
+            penalty_NN_L = 0.0
+        else:
+            original_action_L = np.asarray(agent_L.select_action(norm_observation_L),
+                                           dtype=float).reshape(-1)
+            pb_cmd_L = float(original_action_L[0])
+            viol_L = max(0.0, pb_cmd_L - pb_hi) + max(0.0, pb_lo - pb_cmd_L)
+            penalty_NN_L = viol_coef * viol_L
+        prGreen('--L-- cmd = {:.4f} MW | 物理域 [{:.4f}, {:.4f}] | 越界 {:.4f} MW | '
+                'n_rem = {}'.format(pb_cmd_L, pb_lo, pb_hi, viol_L, _n_rem_L))
+        if episode_steps % 5 == 0:
+            # 块首实际执行的动作（Q 版对偶的评估点；见 aifflor_hsrl.q_cost_rate 的说明）
+            action_L0 = np.array(original_action_L, dtype=float, copy=True)
+
+        action = np.concatenate((applied_action_H, np.array([pb_cmd_L])))
+        # RBB 在 HSRL 下以 fluctuation_limit=inf 构造 ⇒ 退化为"纯物理裁剪 + 记录":
+        #   pbrule ≡ clip(命令, 物理域), clip_amount ≡ viol_L, unfeasible_gap ≡ 0。
+        pb_original = float(pb_cmd_L)
+        pbrule, rbb_info = rbb_system.compute_pbrule(
+            pb_original=pb_original, ptur=ptur, pg_prev=pg_prev, E=E_current)
+
+        action_rbb = action.copy()
+        action_rbb[-1] = pbrule
+        pw_tru2, observation2, action_L_env, penalty_L, done, done_L, info = \
+            env.step(action_rbb[:6], action_rbb[6:], pw_tru)
+        action_rbb[6:] = action_L_env
+        pb_applied = float(np.asarray(action_L_env, dtype=float).reshape(-1)[0])
+        a_L_disch = hsrl.discharge_of(pb_applied)      # 放电为正 [MW·min]
+        prGreen('Applied action = {}.'.format(np.round(np.asarray(action_rbb, dtype=float), 3)))
+        norm_observation2 = Normalize_H(observation2,
+                                        phase_minute_of_day(episode_steps + 1),
+                                        phase_mode, phase_table)
+        norm_observation2_H = _append_wind5_H(
+            norm_observation2, observation2, env, args)
+
+        # ================================================================
+        # H 奖励: r1 = pr·P_G·dt − pen5 − pen6（**无 bessdeg**；**无块末 gap 罚**）
+        # ================================================================
+        r1, c1_step, reward_details = hsrl.cal_rew_rb_hsrl(
+            observation, observation2, action_rbb, rbb_info,
+            penalty_NN=penalty_NN_H + pen6_H, time=time, ptur=ptur,
+            pb_cmd=pb_original, turbine_derate=viol_derate)
+        # 诊断：奖励中心化（以"标称动作的出力"为基线）⇒ 奖励只剩"比标称好多少"，
+        #   动作效应不再被状态/绝对收益淹没（S1 实测 ∂Q_p/∂a 只有真值的 1e-4 量级）。
+        if DIAG['center']:
+            _pnom = float(env.PowerOutput(observation[1], env.nominal()))
+            r1 = r1 - float(observation[0]) * (float(ptur) - _pnom) * time
+        P_F = reward_details['P_F']
+
+        # ---- 越界项计入 c1（HSRL 主循环）：cost critic 的目标对 clip 不变（a<0 与 a=0 物理同值），
+        #      于是它只能外推界内斜率、把"界外"估成更便宜 ⇒ actor 被吸引出界（实测 Q_c(-0.5)=-34.8
+        #      vs 界内 +14.2）。这里给 cost 通道一个真实的"界"代价，量纲与 c1 一致（MW·step）。
+        if c1_bound_coef > 0.0:
+            _o5 = np.asarray(original_action_H, dtype=float).reshape(-1)[:5]
+            _viol = float(np.sum(np.maximum(0.0, -_o5) + np.maximum(0.0, _o5 - 0.5)))
+            if _viol > 0.0:
+                c1_step = c1_step + c1_bound_coef * _viol
+                reward_details['c1_bound'] = c1_bound_coef * _viol
+
+        sum_r1 += r1
+        sum_c1 += c1_step
+        gap_pen = 0.0        # HSRL: 块末 SOC 目标 gap 罚已删除（执行偏差由 c_L 承接）
+        gap_raw = 0.0
+
+        # ================================================================
+        # L 奖励/成本: r2 = −200·越界 − 20·放电 ;  c_L = 1 − exp(−|need − a_L|)
+        #   need = (g − Σ已放电)/(δ − t_L)，Σ 与 a_L 都用**实际施加值**（env 回传）
+        # ================================================================
+        c2, c2_info = hsrl.lower_cost_hsrl(g_applied, sum_disch, _n_rem_L, a_L_disch,
+                                           return_info=True)
+        r2 = hsrl.lower_reward_hsrl(viol_L, a_L_disch,
+                                    viol_coef=viol_coef, deg_coef=deg_coef)
+        deg_step = deg_coef * max(0.0, a_L_disch)
+        sum_c2 += c2
+        sum_disch += a_L_disch
+
+        # 下一状态 L 观测: 第 6 维要用**更新后**的 Σ 与 n_rem 重算（need' = (g−Σ−a_L)/(n_rem−1)）
+        need_L_next = hsrl.plan_need(g_applied, sum_disch, max(1, _n_rem_L - 1))
+        norm_observation2_L = hsrl.build_L_obs_hsrl(
+            observation2[1], observation2[0], float(observation2[2]),
+            float(observation2[-1]), g_applied, need_L_next)
+
+        prGreen('r1 = {} (turb={}, bess={}, bessdeg 已移除) | pen5 = {}, pen6 = {:.3f}'.format(
+            round(r1, 3), round(reward_details['turbine_profit'], 3),
+            round(reward_details['bess_profit'], 3),
+            round(penalty_NN_H, 3), round(pen6_H, 3)))
+        prGreen('c1 = {} (fluct={}, unfeasible_gap={})'.format(
+            round(c1_step, 3), round(reward_details['c1_fluct'], 3),
+            round(reward_details['unfeasible_gap'], 4)))
+        prGreen('g = {:.4f} MW·min (raw {:.4f}) | Σ已放电 = {:.4f} | n_rem = {} | '
+                'need = {:.4f} | a_L = {:.4f} | dev = {:+.4f}'.format(
+                    g_applied, g_raw, c2_info['sum_disch_before'], _n_rem_L,
+                    c2_info['need'], c2_info['a_L'], c2_info['dev']))
+        prGreen('r2 = {} (越界 {:.4f} MW, 退化 {:.3f}) | c_L = {:.6f} | SOC = {:.4f}'.format(
+            round(r2, 3), viol_L, round(deg_step, 3), c2, reward_details['SOC']))
+
+        pb_l.append(pb_original)
+
+        if P_F > 3.0 + 1e-4:
+            window_violation_count += 1
+        window_power_sum += observation2[-1]
+
+        if max_episode_length and episode_steps >= max_episode_length - 1:
+            done = True
+
+        # ---- 块末: 两层各自结算（对偶已移到本块 update **之后**，见下方）----
+        if episode_steps % 5 == 4:
+            bias_init.on_block_end(step, sum_r1, sum_c1, agent_H)
+            agent_H.observe_jump(norm_observation_H, original_action_H,
+                                 sum_r1, sum_c1, norm_observation2_H, done)
+            done_L = True
+        hwarm.fill_bess_transition(
+            agent_L, norm_observation_L, original_action_L, r2, c2,
+            norm_observation2_L, done_L,
+            applied_pb=float(pbrule), warmup=bool(step <= args.warmup),
+            cmd_pb=float(pb_cmd_L), rule_pb=None, stats=bess_fill_stats)
+
+        if step > args.warmup:
+            if episode_steps % 5 == 4:
+                for _ in range(args.utd_h):
+                    agent_H.update_policy()
+                if agent_H.ema_cost is not None and agent_H.ema_cost <= d_block_H:
+                    consecutive_satisfied_H += 1
+                else:
+                    consecutive_satisfied_H = 0
+                for _ in range(args.utd_l):
+                    agent_L.update_policy()
+                # ---- 下层 BESS 版本 +1（`lower_ver` 只是诊断口径）----
+                #   计划 §9.2 担心"branch 用冻结 lower ⇒ 旧 branch 的 c1 标签会过时"：
+                #   `--branch_freeze_lower 1`（默认）时 branch 的 `pb≡0` ⇒ 它的 c1 **完全
+                #   不含下层策略**，标签不会过期 ⇒ 不需要按版本加权采样（这里只记录版本）。
+                lower_ver += 1
+                agent_H.lower_ver = int(lower_ver)
+                if _branch_enabled:
+                    # 计划 §6.2：β 从 β0 线性降到 0.2·β0；β0=0（默认）⇒ 恒 0（关闭）
+                    agent_H.branch_sup_beta = float(branch_ctl.sup_beta(branch_ctl.n_blocks))
+                if consecutive_satisfied_H >= hc.H_CURRICULUM_BLOCKS:
+                    d_block_H = max(d_block_H / 2.0, d_block_H_min)
+                    consecutive_satisfied_H = 0
+                    prGreen('H: d_block_H halved to {}'.format(d_block_H))
+
+                _block_stats = None
+                if agent_H.record_update_stats and len(agent_H.update_stats) > 0:
+                    _stats = agent_H.update_stats
+                    _mean = {k: float(np.mean([s[k] for s in _stats])) for k in _stats[0]}
+                    agent_H.update_stats = []
+                    _block_stats = _stats          # 供对偶的 `update_batch` 分子使用
+                    if upload:
+                        for _k, _v in _mean.items():
+                            writer.add_scalar('update/' + _k, _v, step)
+                    if use_csv:
+                        df_update_rows.append({'step': step, **_mean})
+                        df_update_written = flush_csv_append_batch(
+                            '{}/update_stats_H.csv'.format(output),
+                            df_update_rows, df_update_written)
+                        df_update_rows = []
+
+                # ================================================================
+                # 对偶上升（块末，**放在本块 update 之后**）
+                #   * **λ1 的分子默认 = 本块 update 已算好的 `Qc` 批均值**（`q_c_mean`/`q_c2_mean`，
+                #     即 PER 批在行为动作下的 cost Q 均值）—— 用户口径：靠**缓冲的自然淘汰**
+                #     （环形容量 rmsize）让这个均值随策略改进而下降，从而驱动 λ1 下降/上升；
+                #     它不含"当日风况"这一项（跨批平均）⇒ 直接消掉风况引起的慢漂。
+                #   * λ2 的分子 = 近端批均值 × 当前策略动作（S1；`update_batch` 要给 L 开
+                #     `record_update_stats`，本轮按用户口径**只改 lam1**）。
+                #   * EMA 仍每块维护（日志 / curriculum / 回退）。
+                # ================================================================
+                if norm_observation_L0 is None:
+                    norm_observation_L0 = np.array(norm_observation_L, dtype=float, copy=True)
+                if action_L0 is None:
+                    action_L0 = np.array(original_action_L, dtype=float, copy=True)
+                # 诊断（单点 Q 在 (s₀, 实际执行动作)；成本可忽略）
+                _, q_info_H = hsrl.q_cost_rate(
+                    agent_H, norm_observation_H, a_t=original_action_H, horizon='infinite',
+                    agg=dual_q_agg, return_info=True)
+                _, q_info_L = hsrl.q_cost_rate(
+                    agent_L, norm_observation_L0, a_t=action_L0, horizon='finite',
+                    agg=dual_q_agg, return_info=True)
+                b_info_H = {'q_agg': float('nan'), 'n_batch': 0, 'cost_recent_mean': float('nan')}
+                b_info_L = {'q_agg': float('nan'), 'n_batch': 0, 'cost_recent_mean': float('nan')}
+                ud_info_H = {'q_agg': float('nan'), 'n_update': 0}
+                # ---- λ1 的分子 ----
+                if dual_src == 'ema':
+                    q_rate_H = float(agent_H.ema_cost) if agent_H.ema_cost is not None else None
+                elif dual_q_src == 'update_batch':
+                    q_rate_H, ud_info_H = hsrl.update_batch_cost_rate(
+                        agent_H, stats=_block_stats, horizon='infinite', agg=dual_q_agg,
+                        return_info=True)
+                elif dual_q_src == 'recent_batch':
+                    q_rate_H, b_info_H = hsrl.policy_batch_cost_rate(
+                        agent_H, n=dual_recent_n, horizon='infinite', agg=dual_q_agg,
+                        return_info=True)
+                else:                                   # point
+                    q_rate_H, _ = hsrl.q_cost_rate(
+                        agent_H, norm_observation_H, a_t=original_action_H,
+                        horizon='infinite', agg=dual_q_agg, return_info=True)
+                # ---- λ2 的分子（本轮固定 S1；`--hsrl_dual_src ema` 时走 EMA）----
+                if dual_src == 'ema':
+                    q_rate_L = float(agent_L.ema_cost) if agent_L.ema_cost is not None else None
+                else:
+                    q_rate_L, b_info_L = hsrl.policy_batch_cost_rate(
+                        agent_L, n=dual_recent_n, horizon='finite', agg=dual_q_agg,
+                        return_info=True)
+                agent_H.update_ema_cost(sum_c1)
+                hsrl.dual_update_H_hsrl(agent_H, d_block_H, q_rate=q_rate_H,
+                                        src=dual_src, ema=agent_H.ema_cost)
+                if DIAG['lam_fixed'] >= 0:
+                    agent_H.lam = float(DIAG['lam_fixed'])
+                agent_L.update_ema_cost(sum_c2)
+                hsrl.dual_update_L_hsrl(agent_L, d_block_L, q_rate=q_rate_L,
+                                        src=dual_src, ema=agent_L.ema_cost)
+                _rh = float('nan') if q_rate_H is None else q_rate_H
+                _rl = float('nan') if q_rate_L is None else q_rate_L
+                prCyan('dual[{}/{}]: H rate={:.4f} (ratio={:.3f}, lam1={:.5f}, n_upd={}) | '
+                       'L rate={:.4f} (ratio={:.3f}, lam2={:.3f}, n_recent={})'.format(
+                           dual_src, dual_q_src, _rh, _rh / max(d_block_H, 1e-9),
+                           agent_H.lam, ud_info_H.get('n_update', 0), _rl,
+                           _rl / max(d_block_L, 1e-9), agent_L.lam,
+                           b_info_L.get('n_batch', 0)))
+                q_rate_H = _rh
+                q_rate_L = _rl
+                # L 层 curriculum: 连续满足块数 ⇒ 预算减半（阈值 = EMA 时间常数）
+                if agent_L.ema_cost is not None and agent_L.ema_cost <= d_block_L:
+                    consecutive_satisfied_L += 1
+                else:
+                    consecutive_satisfied_L = 0
+                if consecutive_satisfied_L >= hsrl.HSRL_L_CURRICULUM_BLOCKS:
+                    d_block_L = max(d_block_L / 2.0, d_block_L_min)
+                    consecutive_satisfied_L = 0
+                    prGreen('L: d_block_L halved to {}'.format(d_block_L))
+
+            # ---- 20 步测试（触发频率与旧 9-case 相同: episode_steps % 480 == 0）----
+            if episode_steps % 480 == 0 and wind_pool is not None:
+                per_blk, overall, meta = hsrl.twenty_step_test_hsrl(
+                    agent_H, agent_L, env_test, rbb_system, wind_pool,
+                    seed=(None if test_seed < 0 else test_seed),
+                    phase_mode=phase_mode, phase_table=phase_table,
+                    penalty6_coef=pen6_coef,
+                    viol_derate_coef=args.viol_derate,
+                    wind_col=(-1 if int(args.hsrl_test_wind_col) < 0
+                              else int(args.hsrl_test_wind_col)),
+                    wind_start=(-1 if int(args.hsrl_test_wind_start) < 0
+                                else int(args.hsrl_test_wind_start)),
+                    random_wind=(str(args.hsrl_test_wind) == 'random'))
+                test_trigger += 1
+                prCyan('[HSRL test20] #{} step={} 风列={} 起点={} SOC {:.3f}→{:.3f} | '
+                       'r1={:.2f} c1={:.2f} r2={:.2f} c2={:.4f} 越界={:.3f} 退化={:.2f} | '
+                       'Σ放电={:.3f} (g 均值 {:.3f})'.format(
+                           test_trigger, step, meta['wind_col'], meta['wind_start'],
+                           meta['soc_start'], meta['soc_end'], overall['r1'],
+                           overall['c1'], overall['r2'], overall['c2'],
+                           overall['viol'], overall['deg'],
+                           float(np.sum([m['sum_disch'] for m in per_blk])),
+                           overall['g']))
+                if use_csv:
+                    _common = {'step': step, 'trigger': test_trigger,
+                               'wind_col': meta['wind_col'],
+                               'wind_start': meta['wind_start'], 'price': meta['price']}
+                    for _i, m in enumerate(per_blk):
+                        df_test_rows.append(dict(
+                            _common, block=_i, **{k: m[k] for k in (
+                                'r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'pen5', 'pen6',
+                                'cvm', 'pf_viol', 'profit', 'profit_econ', 'soc_start',
+                                'soc_end', 'dsoc', 'g', 'g_raw', 'sum_disch', 'cL_max',
+                                'dev_mean', 'need_mean', 'pb_sum')}))
+                    df_test_rows.append(dict(
+                        _common, block='OVERALL', **{k: overall[k] for k in (
+                            'r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'pen5', 'pen6',
+                            'cvm', 'pf_viol', 'profit', 'profit_econ', 'soc_start',
+                            'soc_end', 'dsoc', 'g', 'g_raw', 'sum_disch', 'cL_max',
+                            'dev_mean', 'need_mean')}))
+                    df_test_written = flush_csv_append_batch(
+                        '{}/df_test20_hsrl.csv'.format(output),
+                        df_test_rows, df_test_written)
+                    df_test_rows = []
+                if upload:
+                    for _k in ('r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'pen6',
+                               'profit', 'profit_econ', 'dsoc', 'soc_end', 'g'):
+                        writer.add_scalar('test20/overall/' + _k, overall[_k], step)
+                    writer.add_scalar('test20/overall/cvm', overall['cvm'], step)
+                    writer.add_scalar('test20/overall/pf_viol', overall['pf_viol'], step)
+                    for _i, m in enumerate(per_blk):
+                        for _k in ('r1', 'c1', 'r2', 'c2', 'deg', 'viol', 'g',
+                                   'sum_disch', 'cL_max'):
+                            writer.add_scalar('test20/block{}/{}'.format(_i, _k),
+                                              m[_k], step)
+
+        # ---- 逐步数据落盘 ----
+        if use_csv:
+            df_rows.append({
+                'step': step,
+                'observation': observation,
+                'observation2': observation2,
+                'phase_minute': pm_now,
+                # 上层
+                'original_action_H': original_action_H,
+                'applied_action_H': applied_action_H,
+                'g_raw': g_raw,
+                'g': g_applied,
+                'feas_c_max': feas_c_max,
+                'feas_d_max': feas_d_max,
+                'pen5_H': penalty_NN_H,
+                'pen6_H': pen6_H,
+                # 下层
+                'norm_observation_L': norm_observation_L,
+                'obs_need': float(norm_observation_L[5]),   # 第 6 维（c_L 参照点的归一化值）
+                'original_action_L': original_action_L,
+                'pb_cmd': pb_cmd_L,
+                'pb_applied': pb_applied,
+                'a_L_disch': a_L_disch,
+                'pb_lo': pb_lo,
+                'pb_hi': pb_hi,
+                'viol_L': viol_L,
+                'n_rem_L': _n_rem_L,
+                'sum_disch_before': c2_info['sum_disch_before'],
+                'sum_disch_after': sum_disch,
+                'need': c2_info['need'],
+                'dev': c2_info['dev'],
+                'action_rbb': action_rbb,
+                'r1': r1, 'c1': c1_step,
+                'r2': r2, 'c2': c2, 'deg_L': deg_step,
+                'gap_pen': gap_pen, 'gap_raw': gap_raw,
+                'lam1': agent_H.lam, 'lam2': agent_L.lam,
+                'lam1_phys': agent_H.lam / max(hc.lam_scale(), 1e-12),
+                'dual_src': dual_src,
+                'dual_q_src': dual_q_src,
+                'q_cost_H': q_info_H['q_agg'], 'rate_c_H': q_rate_H,
+                'ratio_c_H': q_rate_H / max(d_block_H, 1e-9),
+                'q_batch_H': b_info_H.get('q_agg', float('nan')),
+                'rate_batch_H': (b_info_H.get('rate', float('nan')) if dual_src == 'q'
+                                 and dual_q_src == 'recent_batch' else float('nan')),
+                'n_recent_H': b_info_H.get('n_batch', 0),
+                'cost_recent_H': b_info_H.get('cost_recent_mean', float('nan')),
+                'q_upd_H': ud_info_H.get('q_agg', float('nan')),
+                'q_upd_raw_H': ud_info_H.get('q_raw', float('nan')),
+                'n_upd_H': ud_info_H.get('n_update', 0),
+                'q_cost_L': q_info_L['q_agg'], 'rate_c_L': q_rate_L,
+                'ratio_c_L': q_rate_L / max(d_block_L, 1e-9),
+                'q_batch_L': b_info_L.get('q_agg', float('nan')),
+                'n_recent_L': b_info_L.get('n_batch', 0),
+                'd_block_H': d_block_H, 'd_block_L': d_block_L,
+                'ema_c1_H': agent_H.ema_cost, 'ema_cL_L': agent_L.ema_cost,
+                # RBB (= 纯物理裁剪)
+                'pb_original': rbb_info['pb_original'],
+                'pbrule': rbb_info['pbrule'],
+                'pbphysicsmin': rbb_info['pbphysicsmin'],
+                'pbphysicsmax': rbb_info['pbphysicsmax'],
+                'clip_amount': rbb_info['clip_amount'],
+                'unfeasible_gap': rbb_info['unfeasible_gap'],
+                'is_infeasible': float(rbb_info['is_infeasible']),
+                # 风况/电价档位 (仅诊断)
+                'wind_level': reward_details['wind_level'],
+                'price_level': reward_details['price_level'],
+                'pr': reward_details['pr'],
+                'u': reward_details['u'],
+                'turbine_profit': reward_details['turbine_profit'],
+                'bess_profit': reward_details['bess_profit'],
+                'revenue': reward_details['revenue'],
+                'degradation': reward_details['degradation'],
+                'degradation_ref490': reward_details['degradation_ref490'],
+                'c1_fluct': reward_details['c1_fluct'],
+                'SOC': reward_details['SOC'],
+                'P_F': P_F,
+                'soc_next': float(observation2[2]),
+                'bess_profit_net': (reward_details['bess_profit']
+                                    - reward_details['degradation_ref490']),
+            })
+            if step % 50 == 0:
+                df_written = flush_csv_append_batch(
+                    '{}/df_hsrl.csv'.format(output), df_rows, df_written)
+                df_rows = []
+                if df_branch_rows:
+                    df_branch_written = flush_csv_append_batch(
+                        '{}/df_branch_hsrl.csv'.format(output),
+                        df_branch_rows, df_branch_written)
+                    df_branch_rows = []
+
+        # ---- Periodic checkpoint ----
+        if step > 0 and step % 2000 == 0:
+            agent_H.save_checkpoint(output, step)
+            agent_L.save_checkpoint(output, step)
+            prCyan('Checkpoint saved at step {}'.format(step))
+
+        if upload:
+            writer.add_scalar('r1', r1, step)
+            writer.add_scalar('c1', c1_step, step)
+            writer.add_scalar('r2', r2, step)
+            writer.add_scalar('c2', c2, step)
+            writer.add_scalar('deg_L', deg_step, step)
+            writer.add_scalar('viol_L', viol_L, step)
+            writer.add_scalar('pen6_H', pen6_H, step)
+            writer.add_scalar('g', g_applied, step)
+            writer.add_scalar('g_raw', g_raw, step)
+            writer.add_scalar('sum_disch', c2_info['sum_disch_before'], step)
+            writer.add_scalar('need', c2_info['need'], step)
+            writer.add_scalar('dev', c2_info['dev'], step)
+            writer.add_scalar('wind_speed', env.u, step)
+            writer.add_scalar('lam1', agent_H.lam, step)
+            writer.add_scalar('lam2', agent_L.lam, step)
+            writer.add_scalar('lam1_phys', agent_H.lam / max(hc.lam_scale(), 1e-12), step)
+            writer.add_scalar('dual/q_cost_H', q_info_H['q_agg'], step)
+            writer.add_scalar('dual/rate_c_H', q_rate_H, step)
+            writer.add_scalar('dual/ratio_c_H', q_rate_H / max(d_block_H, 1e-9), step)
+            writer.add_scalar('dual/q_cost_L', q_info_L['q_agg'], step)
+            writer.add_scalar('dual/rate_c_L', q_rate_L, step)
+            writer.add_scalar('dual/ratio_c_L', q_rate_L / max(d_block_L, 1e-9), step)
+            writer.add_scalar('d1', d_block_H, step)
+            writer.add_scalar('d2', d_block_L, step)
+            if agent_H.ema_cost is not None:
+                writer.add_scalar('ema_c1_H', agent_H.ema_cost, step)
+            if agent_L.ema_cost is not None:
+                writer.add_scalar('ema_cL_L', agent_L.ema_cost, step)
+            writer.add_scalar('soc', float(observation[2]), step)
+            writer.add_scalar('P_F', P_F, step)
+            writer.add_scalar('phase/hour', pm_now / 60.0, step)
+            if phase_checked > 0:
+                writer.add_scalar('phase/check_mismatch_frac',
+                                  phase_mismatch / float(phase_checked), step)
+            writer.add_scalar('seg/price_level',
+                              {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}.get(
+                                  reward_details['price_level'], 0), step)
+            writer.add_scalar('seg/wind_level',
+                              {'HIGH': 3, 'MEDIUM': 2, 'LOW': 1}.get(
+                                  reward_details['wind_level'], 0), step)
+            writer.add_scalar('reward_upper/turbine_profit',
+                              reward_details['turbine_profit'], step)
+            writer.add_scalar('reward_upper/bess_profit',
+                              reward_details['bess_profit'], step)
+            writer.add_scalar('reward_upper/degradation_ref490',
+                              reward_details['degradation_ref490'], step)
+            writer.add_scalar('rbb/clip_amount', rbb_info['clip_amount'], step)
+            writer.add_scalar('rbb/pbrule', float(pbrule), step)
+            writer.add_scalar('rbb/pb_original', pb_original, step)
+            if episode_steps % 5 == 4:
+                writer.add_scalar('sum_r1', sum_r1, step)
+                writer.add_scalar('sum_c1', sum_c1, step)
+                writer.add_scalar('sum_c2', sum_c2, step)
+                writer.add_scalar('sum_disch_block', sum_disch, step)
+                for i in range(5):
+                    writer.add_scalar('action/a_H_original_{}'.format(i),
+                                      original_action_H[i], step)
+                    writer.add_scalar('action/a_H_clipped_{}'.format(i),
+                                      applied_action_H[i], step)
+                writer.add_scalar('action/g', g_applied, step)
+                writer.add_scalar('action/pb_rule_amortized',
+                                  hsrl.amortized_rule_action(
+                                      g_applied, 0.0, 1, E_block_start), step)
+            if step > 0 and step % 1440 == 0:
+                writer.add_scalar('env/window_violation_count',
+                                  window_violation_count, step)
+                writer.add_scalar('env/window_power_sum', window_power_sum, step)
+                window_violation_count = 0
+                window_power_sum = 0.0
+
+        # ---- 推进 ----
+        step += 1
+        if _progress and step % _prog_every == 0:
+            _el = _time_mod.time() - _t0
+            _rate = step / max(1e-9, _el)
+            _left = (num_iterations_H - step) / max(1e-9, _rate)
+            print('  [{}] {:>7}/{} ({:5.1f}%)  {:5.1f} 步/秒  已用 {:4.0f} min  剩余约 {:4.0f} min'
+                  .format(_tag, step, num_iterations_H,
+                          100.0 * step / max(1, num_iterations_H), _rate,
+                          _el / 60.0, max(0.0, _left) / 60.0),
+                  file=sys.__stdout__, flush=True)
+        episode_steps += 1
+        episode_reward += r1
+        episode_cost += c1_step
+        episode_cost2 += c2
+        episode_profit += observation2[-1] * observation[0] * time \
+            - 490.0 * max(-float(pbrule), 0) * time
+        episode_bess_profit += reward_details['bess_profit'] \
+            - 490.0 * max(-float(pbrule), 0) * time
+        episode_deg_discharge += max(-float(pbrule), 0.0) * time
+        episode_deg_charge += max(float(pbrule), 0.0) * time
+        norm_observation = deepcopy(norm_observation2)
+        observation = deepcopy(observation2)
+        pw_tru = pw_tru2
+
+        if done:
+            agent_H.save_model(output)
+            agent_L.save_model(output)
+            prGreen('##########{}: episode_profit:{} episode_reward:{} step:{}'.format(
+                episode, round(episode_profit, 2), round(episode_reward, 2), step))
+            if upload:
+                writer.add_scalar('episode_reward', episode_reward, episode)
+                writer.add_scalar('episode_cost', episode_cost, episode)
+                writer.add_scalar('episode_cost2', episode_cost2, episode)
+                writer.add_scalar('episode_profit', episode_profit, episode)
+                writer.add_scalar('env/bessprofit', episode_bess_profit, episode)
+                writer.add_scalar('env/deg_charge', episode_deg_charge, episode)
+                writer.add_scalar('env/deg_discharge', episode_deg_discharge, episode)
+                writer.add_scalar('wind_day', env.j, episode)
+            if use_csv:
+                df_episode_rows.append({
+                    'episode': episode,
+                    'episode_reward': episode_reward,
+                    'episode_cost': episode_cost,
+                    'episode_cost2': episode_cost2,
+                    'episode_profit': episode_profit,
+                    'bess_profit': episode_bess_profit,
+                    'deg_charge': episode_deg_charge,
+                    'deg_discharge': episode_deg_discharge,
+                    'wind_day': env.j,
+                })
+                df_episode_written = flush_csv_append_batch(
+                    '{}/df_episode_hsrl.csv'.format(output),
+                    df_episode_rows, df_episode_written)
+                df_episode_rows = []
+            observation = None
+            episode_steps = 0
+            episode_reward = episode_cost = episode_cost2 = episode_profit = 0.
+            episode_bess_profit = 0.
+            episode_deg_discharge = episode_deg_charge = 0.
+            episode += 1
+
+    if use_csv:
+        flush_csv_append_batch('{}/df_hsrl.csv'.format(output), df_rows, df_written)
+        flush_csv_append_batch('{}/df_episode_hsrl.csv'.format(output),
+                               df_episode_rows, df_episode_written)
+        flush_csv_append_batch('{}/df_test20_hsrl.csv'.format(output),
+                               df_test_rows, df_test_written)
+        flush_csv_append_batch('{}/update_stats_H.csv'.format(output),
+                               df_update_rows, df_update_written)
+        if _branch_enabled and _branch_csv:
+            flush_csv_append_batch('{}/df_branch_hsrl.csv'.format(output),
+                                   df_branch_rows, df_branch_written)
+
+    if _branch_enabled:
+        # branch 口径汇总（只打日志，不参与任何训练量）
+        prCyan(branch_ctl.summary())
+        prCyan('[branch] replay: actor {} 条 / branch {} 条 | 含 branch 的 critic 批 {} 次 | '
+               '上一批 branch 占比 {:.1%}'.format(
+                   agent_H.memory.n_actor, agent_H.memory.n_branch,
+                   int(getattr(agent_H, 'n_updates_with_branch', 0)),
+                   float(getattr(agent_H, 'last_batch_branch_frac', 0.0))))
+
+    if _progress:
+        try:
+            import hsrl_metrics
+            _m = hsrl_metrics.summarize(output, tail=0.2, tag=_tag)
+            print('', file=sys.__stdout__)
+            print(hsrl_metrics.SUMMARY_HEADER, file=sys.__stdout__, flush=True)
+            print(hsrl_metrics.format_row(_m), file=sys.__stdout__, flush=True)
+        except Exception as _e:
+            print('[summary] 汇总失败: {}'.format(_e), flush=True)
+
+    if phase_mode > 0:
+        prGreen('phase check: mode={} dims={} checked={} mismatch={} ({:.4f}%)'.format(
+            phase_mode, PHASE_DIM[phase_mode], phase_checked, phase_mismatch,
+            100.0 * phase_mismatch / max(phase_checked, 1)))
+
+
 if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(
@@ -908,7 +1955,8 @@ if __name__ == "__main__":
     parser.add_argument('--rate',
                         default=0.01,
                         type=float,
-                        help='learning rate')
+                        help='critic 学习率（2026-11-03 起默认 **0.01**；此前 0.003。'
+                             '依据：v7 run20 的表现，用户口径）')
     parser.add_argument('--prate',
                         default=0.0001,
                         type=float,
@@ -960,8 +2008,9 @@ if __name__ == "__main__":
                         help='越界乘性惩罚系数 c: 风机收益 × exp(-c·Σ前5维越界量) '
                              '(默认 %.1f = **关闭**; 5.0 = 已证伪的旧口径, 见 README run14 分析)'
                              % VIOL_DERATE_COEF)
-    parser.add_argument('--bsize', default=256, type=int,
-                        help='minibatch size')
+    parser.add_argument('--bsize', default=32, type=int,
+                        help='minibatch size（2026-11-03 起默认 **32**；此前 256。'
+                             '依据：v7 run20 的表现，用户口径）')
     # ---- memory 容量 ----
     #   ✅ 口径 = **条数直接就是环境步数**（2026-10 更正，去掉历史遗留的 x5）:
     #   旧注释写 "1 条 = n 个块 = 5n 个环境步 ⇒ rmsize x 5n"，那是**基于一个错误前提**
@@ -980,7 +2029,8 @@ if __name__ == "__main__":
     parser.add_argument('--tau',
                         default=0.001,
                         type=float,
-                        help='moving average for target network')
+                        help='目标网络软更新系数（moving average for target network）。'
+                             '2026-11-03 核对：默认**本来就是 0.001**，未改动')
     parser.add_argument('--ou_theta',
                         default=0.15,
                         type=float,
@@ -1006,8 +2056,11 @@ if __name__ == "__main__":
                         default=200000,
                         type=int,
                         help='train iters each timestep')
+    parser.add_argument('--noise_zero_step', default=115200, type=int,
+                        help='探索噪声归零的环境步：warmup 结束后 ε 从 1 线性降到 0，于该步恰好归零；'
+                             '0=不用（退回 --epsilon 的决策次数口径）。默认 115200')
     parser.add_argument('--epsilon',
-                        default=4000,
+                        default=10000,
                         type=int,
                         help='【H 层】探索噪声 ε 由 1 线性衰减到 0 所需的【决策次数】。'
                              'H 每 5 个环境步决策一次 ⇒ 4000 次 = 20k 环境步'
@@ -1068,7 +2121,7 @@ if __name__ == "__main__":
     # RBB parameters (硬裁剪 + L 层可行域观测输入)
     parser.add_argument('--rbb_fluctuation_limit', default=3.0, type=float,
                         help='Max grid power fluctuation between steps (MW)')
-    parser.add_argument('--rbb_rated_power', default=10.0, type=float,
+    parser.add_argument('--rbb_rated_power', default=0.5, type=float,
                         help='BESS rated charge/discharge power (MW)')
 
     # 上层 gap 罚的豁免裕度 (下层 c2 无死区)
@@ -1077,16 +2130,34 @@ if __name__ == "__main__":
                              '(默认 0.1)')
 
     # ---- 探索噪声幅度 (逐维; 与 td3perrb 上层同口径) ----
+    # 2026-10-29 改：wide 的幅度带由 U[0.05, 0.25] 收窄到 **U[0.00, 0.05]**。
+    #   依据：branch 的测试动作在带内的**设计间距**是 0.20~0.25（prior≈0.20–0.33 /
+    #   low≈0–0.10 / high≈0.40–0.50），而旧噪声 std≈0.093、峰值 0.25 ⇒ **噪声幅度 ≈
+    #   设计间距**，会把"同块 5 个动作"的配对结构抹平（且触边删失后堆在 0/0.5，
+    #   run14 实测 a>0.45 占 35.7%）。收窄到 ≤0.05 后：std≈0.017、峰值 0.05
+    #   = 间距的 1/4 ⇒ 只保留"局部光滑 + 少量状态探索"，覆盖率交给
+    #   `--branch_actions`（平衡、无删失、不随 π 移动）。
+    #   ⚠ `--wt_noise` 从此**只管 legacy**；wide 的下界用 `--wt_noise_min`。
+    parser.add_argument('--wt_noise_mode', default='wide',
+                        choices=['wide', 'legacy'],
+                        help='WT 探索噪声口径: wide=aifflor 默认，逐维幅度 '
+                             'U[wt_noise_min,wt_noise_max]、触边截断噪声、不衰减; '
+                             'legacy=旧 ε 衰减口径')
     parser.add_argument('--wt_noise', default=0.05, type=float,
-                        help='WT 5 维探索噪声幅度 (±wt_noise*eps)')
+                        help='**legacy 专用**: 起始幅度 (±wt_noise·eps)，随 ε 衰减到 '
+                             '--wt_noise_floor。wide 模式下本参数不生效（用 --wt_noise_min）')
+    parser.add_argument('--wt_noise_min', default=0.0, type=float,
+                        help='wide: 风机维**幅度下界**（逐维 A_i~U[min,max]，默认 0.0）')
+    parser.add_argument('--wt_noise_max', default=0.05, type=float,
+                        help='wide: 风机维**幅度上界**（默认 0.05 = 设计间距 0.20 的 1/4；'
+                             '旧默认 0.25 会把 branch 的 5 动作配对抹平）')
     parser.add_argument('--sig_noise_max', default=0.2, type=float,
                         help='SOC 目标信号维探索噪声幅度上限 (±sig_noise_max*eps)')
-    parser.add_argument('--sig_noise_min', default=0.01, type=float,
+    parser.add_argument('--sig_noise_min', default=0.0, type=float,
                         help='SOC 目标信号维探索噪声**地板** (eps 收敛到它, 不再降到 0); '
                              '0.01 ⇒ SOC 目标抖动 ±0.05 MWh = SOC_TOL(0.1) 的一半')
-    parser.add_argument('--wt_noise_floor', default=0.01, type=float,
-                        help='WT 5 维探索噪声**地板** (0 = 20k 步后这些维完全不再探索); '
-                             '0.01 = 行为带 [0,0.5] 的 2%, 折算单机功率抖动约 ±2.4%')
+    parser.add_argument('--wt_noise_floor', default=0.0, type=float,
+                        help='legacy 专用: WT 5 维噪声地板 (wide 模式忽略)')
 
     # ---- 24h 相位特征 (--phase_feat) ----
     parser.add_argument('--phase_feat', default=0, type=int, choices=[0, 1, 2],
@@ -1095,8 +2166,8 @@ if __name__ == "__main__":
 
     # ---- 输出层 bias 初始化 (与 td3perrb 一致) ----
     parser.add_argument('--wt_bias_init', default=1, type=int, choices=[0, 1],
-                        help='1: 把 actor 输出层 WT 5 维 bias 初始化到“中性宽带” '
-                             '[0.05,0.45]; 0: 用 PyTorch 默认')
+                        help='1: 把 actor 输出层 WT bias 初始化到“中性宽带” [0.05,0.45]'
+                             '（默认 5 维；--lin_wt 时映射到 a0/a4 两维）；0: 用 PyTorch 默认')
 
     parser.add_argument('--value_scale', default=hc.VALUE_SCALE, type=float,
                         help='H 层 r1/c1 进入值函数回归空间的统一缩放 s '
@@ -1110,7 +2181,7 @@ if __name__ == "__main__":
                         choices=['uniform', 'legacy'],
                         help='H 层 c1 口径: uniform=波动当量(默认, hsrl_cost 单一真源); '
                              'legacy=各项目原公式(对照臂)')
-    parser.add_argument('--critic_bias_init', default='estimate',
+    parser.add_argument('--critic_bias_init', default='none',
                         choices=['estimate', 'none'],
                         help='critic 输出层 bias 的价值基线初始化: estimate=用 warmup 观测的'
                              '块收益估计 r̄/(1-γ) (默认); none=不初始化(对照臂)')
@@ -1120,25 +2191,305 @@ if __name__ == "__main__":
                         help='显式指定成本 critic 基线 (>0 生效, 覆盖 estimate)')
     parser.add_argument('--max_steps', default=0, type=int,
                         help='>0 时覆盖 train_iter_H, 用于短程 A/B')
-    hwarm.add_warmup_args(parser)
+    # ---- 诊断专用（默认全关 ⇒ 生产路径逐位不变；见 documentation/diag_two_items_plan.md）----
+    parser.add_argument('--explore_mix_blocks', default=0, type=int,
+                        help='warmup 后前 N 块用 a=ε·actor+(1−ε)·U(0,0.5) 混合（ε 线性 0→1），把覆盖延伸到训练早期；0=关')
+    parser.add_argument('--c1_smooth', default=1, type=int,
+                        help='1(默认)=c1 的两个折点(abs(dP) 与 20*(P_F-3)+)改为连续可导的 softplus 平滑；0=硬折点；'
+                             '取值偏差 ≤ eps + 20·ln2/β（默认 β=100, eps=0.05 ⇒ 0.19 MW·step）')
+    parser.add_argument('--c1_smooth_beta', default=100.0, type=float, help='softplus 温度 β（越大越接近硬折点）')
+    parser.add_argument('--c1_smooth_eps', default=0.05, type=float, help='平滑 abs(dP) 的 ε（MW）')
+    parser.add_argument('--farm_level', default=0, type=int,
+                        help='1=场级降载：actor 输出投影到 a_i=s·c_i 射线（只保留 1 个宏观自由度, '
+                             '期望行为=高风整体降/升出力）；不改奖励与 c1 定义')
+    parser.add_argument('--scalar_wt', default=0, type=int,
+                        help='1=**刻意设计的 baseline 动作空间**：五台风机的轴向因子全部等于'
+                             '动作第 0 维（a_i=a_0）⇒ 只剩 1 个自由度，第 1..4 维"存在但无用"'
+                             '（投影线性 ⇒ 对它们的梯度恒为 0）。第 6 维 g 不受影响。'
+                             '与 --farm_level 互斥；warmup/探索噪声/diag 改写之后仍强制相等')
+    parser.add_argument('--lin_wt', default=0, type=int,
+                        help='1=**线性行为分支（结构版）**：actor 输出层只保留首尾'
+                             'a0/a{na_box-1} 与额外维（H 的 g），共 2+(nb_actions−na_box) 个'
+                             '神经元（上层 = 3: a0/a4/g）；中间维由线性插值展开并四舍五入到'
+                             '--lin_wt_decimals 位小数（默认 2）。critic 仍吃 6 维动作；'
+                             '噪声/target smoothing 只加在 3 个自由维上。'
+                             '与 --scalar_wt / --farm_level 互斥；warmup/diag 改写之后'
+                             '仍强制落在“首尾 + 线性插值”流形上')
+    parser.add_argument('--lin_wt_decimals', default=2, type=int,
+                        help='--lin_wt 的中间维小数位数（默认 2；<0 关闭取整）')
+    parser.add_argument('--aux_model', default=0, type=int,
+                        help='1=k=1 的 1-step 监督模型 f_r/f_c（MSE, 无 bootstrap），actor 的梯度改用 '
+                             '∇_a[f_r − λ f_c]（model-based 策略改进）；0=关闭（默认）')
+    parser.add_argument('--aux_rate', default=1e-3, type=float, help='aux 模型的 Adam 学习率')
+    parser.add_argument('--aux_mix', default=1.0, type=float, help='actor 目标里 aux 项的权重 β（1=纯 aux）')
+    parser.add_argument('--aux_warmup', default=5000, type=int,
+                        help='aux 训练多少次更新后才接管 actor 梯度（线性 ramp）')
+    parser.add_argument('--critic_feat_power', default=0, type=int,
+                        help='1=给 critic 增加输入 P(a,u)/5（无尾流解析代理 k·u³·Σ4a(1−a)², R²≈0.992）'
+                             '——把 c1=|P−P_G| 的折点搬到输入坐标上; 默认 0')
+    parser.add_argument('--critic_feat_power_k', default=1.357e-3, type=float,
+                        help='P_hat 的标定系数 k（由数据无截距回归得到）')
+    parser.add_argument('--cost_clip', default=1, type=int,
+                        help='cost 塔只看 clip 到 [0,0.5] 后的风机动作（c1 只是 clip(a) 的函数；越界梯度由 profit 塔的 pen5 给）。1=开(默认)')
+    parser.add_argument('--na_box', default=5, type=int, help='风机动作维数（前 na_box 维夹到 [0,0.5]）')
+    parser.add_argument('--log_file', default=1, type=int,
+                        help='1=把逐行详细输出写入 <output>/train.log, 控制台只留进度行与汇总行（与 diag 一致）')
+    parser.add_argument('--progress', default=1, type=int,
+                        help='1=打印 diag 同款进度行（每 --progress_every 步）与训练结束汇总行')
+    parser.add_argument('--progress_every', default=500, type=int, help='进度行间隔（环境步）')
+    parser.add_argument('--c1_bound_coef', default=0.0, type=float,
+                        help='把越界量也计入 c1（MW·step / 单位 a）: c1 += 该系数 × Σ[max(0,-a)+max(0,a-0.5)]'
+                             '；让 cost critic 看到"界"（否则它会外推界内斜率、把界外估成更便宜）。0=关')
+    parser.add_argument('--critic_arch', default='v7', type=_normalize_arch,
+                        choices=['v1', 'v1af', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7',
+                                 'v7.1', 'v7.2', 'v7.3'],
+                        help='critic/actor 结构（**默认 v7**，2026-11-04 起；此前 v6）: '
+                             'v7=critic cat(state,action)→400→300→400→1 + actor state→400→300→400→action; '
+                             'v7.1=cat(state,action)→500→400→500→1 + actor state→500→400→500→action; '
+                             'v7.2=(s→128 ∥ a→128)→cat(256)→400→300→400→1 + '
+                             'actor state→128→400→300→400→action; '
+                             'v7.3=(s→128 ∥ a→128)→cat(256)→500→400→500→1 + '
+                             'actor state→128→500→400→500→action; '
+                             'v6=双流(s→32→32 ∥ a→64→64)→128→256→256→128→1（原始 a 不重复拼入）; '
+                             'v1=历史; v1af=动作首层; '
+                             'v2=双流(s16-100 ∥ a32-64 → square(残差)→128→64)（2026-10 之前的生产默认）; '
+                             '7.1/7.2/7.3 是 v7.1/v7.2/v7.3 的等价写法')
+    parser.add_argument('--critic_act', default='relu', choices=['relu', 'leaky'],
+                        help='critic 激活: relu=历史; leaky=LeakyReLU(0.01)（防死单元）')
+    parser.add_argument('--critic_out_init', default='fanin', choices=['3e3', 'fanin'],
+                        help='critic 输出层权重初始化: 3e3=历史(±3e-3); fanin=PyTorch 默认(±1/√fan_in≈0.14)')
+    parser.add_argument('--critic_action_first', default=0, type=int,
+                        help='1 => critic 的动作从第一层进网（fc1 = nb_states+nb_actions -> 4*hidden1；默认 0=旧口径）')
+    parser.add_argument('--critic_wind5', default=0, type=int,
+                        help='1 => 上层 critic 输入追加 u2..u5（u1 已在 obs；actor 仍 4 维）。'
+                             '默认 0=关闭，历史路径逐位不变')
+    parser.add_argument('--diag_u', default=-1.0, type=float,
+                        help='>=0 ⇒ 全训练期恒定风速 [m/s]（实验 1-S1）')
+    parser.add_argument('--diag_pr', default=-1.0, type=float,
+                        help='>=0 ⇒ 全天恒定电价 [元/MWh]（实验 1-S1/S2）')
+    parser.add_argument('--diag_scalar', default=0, type=int,
+                        help='1 ⇒ actor 只输出一个标量 s=sigmoid(a0)，前 5 维统一取 0.33·s（实验 2）')
+    parser.add_argument('--diag_freeze_g', default=0, type=int,
+                        help='1 ⇒ 第 6 维 g ≡ 0（BESS 不参与；实验 1）')
+    parser.add_argument('--diag_lambda_fixed', default=-1.0, type=float,
+                        help='>=0 ⇒ 每次对偶更新后把 agent_H.lam 钉到该值（actor 空间；实验 1 用 0）')
+    parser.add_argument('--diag_center_reward', default=0, type=int,
+                        help='1 => 奖励中心化: r1 -= pr*(P_G-P_nom(u))*dt（把动作效应从状态基线上抬出来）')
+    parser.add_argument('--pen_h', default=100.0, type=float,
+                        help='>0 ⇒ 覆盖 H 前 5 维越界罚系数 [元/单位]（实验 1 用 400 把动作压在界内）')
+
+
+    # ==================================================================
+    # HSRL 方法分支（--hsrl）—— 口径总表见 aifflor/aifflor_hsrl.py
+    # ==================================================================
+    parser.add_argument('--hsrl', action='store_true',
+                        help='启用 HSRL 分支（**方法分支**）: H 第 6 维 = 本 5 步块内的'
+                             '**总放电量 g [MW·min]**（放电为正；可行域 = SOC + 额定功率，'
+                             '**不含波动约束**，越界线性罚 400 元/MW·min）; '
+                             'H 奖励去掉 bessdeg 与块末 SOC 目标 gap 罚; '
+                             'L 动作 = **绝对 pb**（只按物理域裁剪）; '
+                             'r2 = −200·越界[MW] − 20·放电[MW·min]; '
+                             'c_L = 1 − exp(−|(g−Σ已放电)/(δ−t_L) − a_L|); '
+                             'λ2 ∈ [2, 50]（初值 10）, d_block_L = 0.5; '
+                             'L 观测(6 维) = [u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5, '
+                             'need/2.5]（need = c_L 的参照点 (g−Σ)/n_rem）; '
+                             'warmup 下层 = 摊还执行器; 训练中测试改 20 步协议。'
+                             '不加该参数时旧路径**逐位不变**')
+    parser.add_argument('--hsrl_pen6_coef', default=hsrl.HSRL_PEN6_COEF, type=float,
+                        help='HSRL: H 第 6 维越界罚系数 [元/MW·min] (默认 %.0f, 不封顶)'
+                             % hsrl.HSRL_PEN6_COEF)
+    parser.add_argument('--hsrl_viol_coef', default=hsrl.HSRL_VIOL_COEF, type=float,
+                        help='HSRL: L 动作越界罚系数 [元/MW] (默认 %.0f)' % hsrl.HSRL_VIOL_COEF)
+    parser.add_argument('--hsrl_deg_coef', default=hsrl.HSRL_DEG_COEF, type=float,
+                        help='HSRL: L 放电退化成本 [元/MW·min, 只对放电] '
+                             '(默认 %.1f = 越界罚的 1/10)' % hsrl.HSRL_DEG_COEF)
+    parser.add_argument('--hsrl_sig_noise_max', default=0.5, type=float,
+                        help='HSRL: 第 6 维探索噪声上限 [MW·min] (默认 0.5 = 满量程 2.5 的 20%%)')
+    parser.add_argument('--hsrl_sig_noise_min', default=0.025, type=float,
+                        help='HSRL: 第 6 维探索噪声地板 [MW·min] (默认 0.025 = 满量程的 1%%)')
+    parser.add_argument('--hsrl_d_block_l', default=hsrl.HSRL_D_BLOCK_L, type=float,
+                        help='HSRL: L 层每块 sum_c_L 预算的**初值** (默认 %.2f；地板见 '
+                             '--hsrl_d_block_l_min = %.1f)' % (hsrl.HSRL_D_BLOCK_L,
+                                                              hsrl.HSRL_D_BLOCK_L_MIN))
+    parser.add_argument('--hsrl_dual_src', default=hsrl.HSRL_DUAL_SRC,
+                        choices=['q', 'ema'],
+                        help='HSRL: **对偶的分子** q=critic cost 的 Q（默认；比实际块成本的 EMA '
+                             '平滑得多 ⇒ λ 波动小）；ema=实际块成本 EMA（历史口径，A/B 对照）')
+    parser.add_argument('--hsrl_dual_q_agg', default=hsrl.HSRL_DUAL_Q_AGG,
+                        choices=['mean', 'min', 'max'],
+                        help='HSRL: Q 的 twin 聚合（对偶专用，独立于 --cost_critic_mode）: '
+                             'mean=双臂均值（默认，无偏；critic 回归目标已用 max，对偶再用 max '
+                             '是双重高估 ⇒ 会复现"高估→λ 顶死"）；min=保守；max=与目标一致')
+    parser.add_argument('--hsrl_dual_q_src', default=hsrl.HSRL_DUAL_Q_SRC,
+                        choices=['update_batch', 'recent_batch', 'point'],
+                        help='HSRL: src=q 时**用哪种 Q 估计**做分子（λ1）。'
+                             'update_batch（默认）= 直接用 update_policy 本块已算好的 cost Q '
+                             '**批均值**（q_c_mean/q_c2_mean）⇒ 靠缓冲自然淘汰让均值随策略下降、'
+                             '且不含当日风况；recent_batch = 近端 N 条状态的批均值 × 当前策略动作'
+                             '（λ2 固定用它）；point = 旧的单点 Q(s0,a0)（A/B 对照）')
+    parser.add_argument('--hsrl_dual_recent_n', default=hsrl.HSRL_DUAL_RECENT_N, type=int,
+                        help='HSRL: recent_batch（λ2，以及 λ1 选 recent_batch 时）的近端条数'
+                             '（默认 %d: H 每块 1 条 ⇒ ≈1 天）' % hsrl.HSRL_DUAL_RECENT_N)
+    parser.add_argument('--hsrl_lam1_min', default=hsrl.HSRL_LAM1_PHYS_MIN, type=float,
+                        help='HSRL: λ1 的**物理价下限** [元/(MW·step)]（默认 {:.1f}；= 名义边际收益 9.67 的 '
+                             '21%%、低电价边际收益 5.0 的 40%%，且 < BESS 退化边际价 20 ⇒ 界内波动不值得'
+                             '动用 BESS）。当前实现把上界设为 20 的 2.5× = 50'.format(
+                                 hsrl.HSRL_LAM1_PHYS_MIN))
+    parser.add_argument('--hsrl_lam1_max', default=hsrl.HSRL_LAM1_PHYS_MAX, type=float,
+                        help='HSRL: λ1 的**物理价上限** [元/(MW·step)]（默认 %.1f = max(平抑资源边际成本: '
+                             'BESS 退化 20, 峰价降载 16.33) 的 2.5×；界外波动单价是 20·λ1 ⇒ '
+                             '20×50 = 1000 远大于峰价 16.33）。⚠ 上界必须 > 下界' % hsrl.HSRL_LAM1_PHYS_MAX)
+    parser.add_argument('--hsrl_d_block_h_min', default=hsrl.HSRL_D_BLOCK_H_MIN, type=float,
+                        help='HSRL: H 层 curriculum 的**收敛下限**（地板，默认 %.1f ⇒ 可一直减半，'
+                             '由"连续 50 块不满足 ema ≤ d"自行停止）。此前沿用 hc.h_settings 的 '
+                             'd_block_min = 初值 15 ⇒ 减半是空操作（curriculum 被禁用）'
+                             % hsrl.HSRL_D_BLOCK_H_MIN)
+    parser.add_argument('--hsrl_d_block_l_min', default=hsrl.HSRL_D_BLOCK_L_MIN, type=float,
+                        help='HSRL: L 层 curriculum 的**收敛下限**（地板，默认 %.1f；此前 0.05）'
+                             % hsrl.HSRL_D_BLOCK_L_MIN)
+    parser.add_argument('--hsrl_test_wind', default='fixed', choices=['fixed', 'random'],
+                        help='HSRL: test20 的风速段 fixed=**固定段**（默认 col=%d/start=%d，'
+                             '每次触发同一场景 ⇒ 配对看收敛）; random=每次触发随机取列+起点'
+                             % (hsrl.HSRL_TEST_WIND_COL, hsrl.HSRL_TEST_WIND_START))
+    parser.add_argument('--hsrl_test_wind_col', default=-1, type=int,
+                        help='HSRL: test20 固定风速段的**列**（天），默认 -1 ⇒ 用常量 %d'
+                             % hsrl.HSRL_TEST_WIND_COL)
+    parser.add_argument('--hsrl_test_wind_start', default=-1, type=int,
+                        help='HSRL: test20 固定风速段的**起点**（天内步），默认 -1 ⇒ 用常量 %d'
+                             % hsrl.HSRL_TEST_WIND_START)
+    parser.add_argument('--hsrl_test_seed', default=-1, type=int,
+                        help='HSRL: 仅 --hsrl_test_wind random 时生效的采样种子 '
+                             '(>0 固定; 默认 -1 = 每次触发重新随机)。采样用**独立** RandomState '
+                             '⇒ 不吃训练流、不改变训练轨迹')
+    # aifflor 默认 warmup 风机动作 = 'unified'（一半 LHS + 一半五维统一随机升降噪声）；
+    # 其余 main 不传该参数 ⇒ 共享默认仍为 'lhs'，行为逐位不变。
+    hwarm.add_warmup_args(parser, wt_sched_default='unified')
+    # 同块首宽动作覆盖（branch）：默认**全关**（--branch_every 0）⇒ 历史行为逐位不变
+    abr.add_branch_args(parser)
     args = parser.parse_args()
+    # ---- baseline 动作空间（--scalar_wt）：与场级射线投影互斥 ----
+    #   --farm_level: 1 个自由度，但保留逐台形状 a_i = s·c_i
+    #   --scalar_wt : 1 个自由度，且**连形状也不要** a_i = a_0（第 1..4 维无用）
+    #   --lin_wt    : 2 个自由度，首尾 a_0/a_4 + 中间线性插值（第 1..3 维无用）
+    # 同时开会让"到底投影到哪条流形"变得不可判读 ⇒ 直接拒绝。
+    assert not (int(getattr(args, 'scalar_wt', 0) or 0)
+                and int(getattr(args, 'farm_level', 0) or 0)), \
+        '--scalar_wt 与 --farm_level 互斥（两者都是把动作压到 1 个自由度，语义不同）'
+    assert not (int(getattr(args, 'lin_wt', 0) or 0)
+                and (int(getattr(args, 'scalar_wt', 0) or 0)
+                     or int(getattr(args, 'farm_level', 0) or 0))), \
+        '--lin_wt 与 --scalar_wt / --farm_level 互斥（动作流形不同，不能叠加）'
     args = hwarm.resolve_warmup(args)   # WARMUP_AUTO: 正式口径 warmup=bsize*mult, 期零网络更新
     hc.set_mode(args.c1_mode)
     hc.set_value_scale(args.value_scale)   # 值函数回归空间归一化 (单一真源)
     hc.set_cost_scale(args.cost_scale)   # cost 通道缩放 (λ 自动跟随)
     _HCFG = hc.h_settings()
     prCyan(hc.summary())
+    # ---- 探索噪声日程：warmup 后 ε:1→0，在 --noise_zero_step 处归零 ----
+    if getattr(args, 'warmup', None) is None:
+        args.warmup = int(hwarm.WARMUP_STEPS)
+    _nzs = int(getattr(args, 'noise_zero_step', 0) or 0)
+    if _nzs > 0:
+        _span = max(1, _nzs - int(args.warmup))
+        args.epsilon = max(1, int(round(_span / 5.0)))     # 决策次数 = 块数
+    hc.set_smooth(int(getattr(args, 'c1_smooth', 0) or 0),
+                  float(getattr(args, 'c1_smooth_beta', 100.0)),
+                  float(getattr(args, 'c1_smooth_eps', 0.05)))
+    if int(getattr(args, 'c1_smooth', 0) or 0):
+        prCyan('[c1] 平滑已开启: β={} ε={}（折点连续可导; 偏差 ≤ {:.3f} MW·step）'.format(
+            args.c1_smooth_beta, args.c1_smooth_eps,
+            args.c1_smooth_eps + 20.0 * 0.693147 / args.c1_smooth_beta))
     args.output = get_output_folder(args.output, args.env)
+    # ---- 控制台只显示 diag 同款进度/汇总；详细逐行输出写入 <output>/train.log ----
+    if int(getattr(args, 'log_file', 1) or 0):
+        try:
+            os.makedirs(args.output, exist_ok=True)
+            _lf = open(os.path.join(args.output, 'train.log'), 'w', encoding='utf-8', buffering=1)
+            sys.stdout = _lf
+            print('[log] 详细输出 → {}（控制台只显示进度与汇总）'
+                  .format(os.path.join(args.output, 'train.log')),
+                  file=sys.__stdout__, flush=True)
+        except Exception as _e:
+            print('[log] 重定向失败, 保持控制台输出: {}'.format(_e), file=sys.__stdout__, flush=True)
     if args.resume == 'default':
         args.resume = 'output/{}-run0'.format(args.env)
 
-    max_E = 6.
+    max_E = 0.5
     upload = True
     use_csv = True
     args.max_episode_length = 1440  # 1d = 24h*60m = 1440 steps
     args.train_iter_H = 1000 * args.max_episode_length
     if getattr(args, 'max_steps', 0) and args.max_steps > 0:
         args.train_iter_H = int(args.max_steps)
+
+    # ---- 诊断开关落地（默认 -1/0 ⇒ 不进入任何分支，生产路径逐位不变）----
+    DIAG['u'] = float(getattr(args, 'diag_u', -1.0))
+    DIAG['pr'] = float(getattr(args, 'diag_pr', -1.0))
+    DIAG['scalar'] = int(getattr(args, 'diag_scalar', 0))
+    DIAG['freeze_g'] = int(getattr(args, 'diag_freeze_g', 0))
+    DIAG['lam_fixed'] = float(getattr(args, 'diag_lambda_fixed', -1.0))
+    DIAG['pen_h'] = float(getattr(args, 'pen_h', -1.0))
+    DIAG['center'] = int(getattr(args, 'diag_center_reward', 0))
+    _nzs = int(getattr(args, 'noise_zero_step', 0) or 0)
+    if str(getattr(args, 'wt_noise_mode', 'wide')) == 'wide':
+        prCyan('[train] pen_h={} | WT noise=wide U[{},{}]（逐维、触边截断噪声、**不衰减**）| '
+               'signal noise ε 1→0 于 {} 块'.format(
+                   getattr(args, 'pen_h', 100.0),
+                   getattr(args, 'wt_noise_min', 0.0),
+                   getattr(args, 'wt_noise_max', 0.05),
+                   (_nzs if _nzs > 0 else getattr(args, 'epsilon', 0))))
+    else:
+        prCyan('[train] pen_h={} wt_noise={} floor={} | 噪声日程: ε 1→0 于 step {}'
+               '（warmup {} 起，跨 {} 块/{} 步）'.format(
+                   getattr(args, 'pen_h', 100.0),
+                   getattr(args, 'wt_noise', 0.05),
+                   getattr(args, 'wt_noise_floor', 0.0),
+                   (_nzs if _nzs > 0 else '按 --epsilon={} 块'.format(
+                       getattr(args, 'epsilon', 0))),
+                   getattr(args, 'warmup', None),
+                   getattr(args, 'epsilon', 0),
+                   (int(getattr(args, 'epsilon', 0)) * 5)))
+    if any([DIAG['u'] >= 0, DIAG['pr'] >= 0, DIAG['scalar'], DIAG['freeze_g'],
+            DIAG['lam_fixed'] >= 0]):
+        prCyan('[DIAG] u={} pr={} scalar={} freeze_g={} lam_fixed={} pen_h={}'.format(
+            DIAG['u'], DIAG['pr'], DIAG['scalar'], DIAG['freeze_g'],
+            DIAG['lam_fixed'], DIAG['pen_h']))
+    # 生产口径的 critic 结构（**v6** + 无 bias，2026-10-29 起为默认；--critic_arch/--critic_bias_init 可覆盖）
+    #   历史：2026-10 之前是 v2；`--critic_wind5` 仍**默认关闭**（0）。
+    _arch_eff = _normalize_arch(
+        'v1af' if int(getattr(args, 'critic_action_first', 0) or 0)
+        else str(getattr(args, 'critic_arch', 'v6') or 'v6'))
+    prCyan('[critic] arch={} act={} out_init={} bias_init={} rate={} cost_clip={} warmup_wt_sched={}'.format(
+        _arch_eff,
+        getattr(args, 'critic_act', 'relu'), getattr(args, 'critic_out_init', '3e3'),
+        getattr(args, 'critic_bias_init', 'none'), getattr(args, 'rate', 0.01),
+        getattr(args, 'cost_clip', 1), getattr(args, 'warmup_wt_sched', 'lhs')))
+    _aspec = _actor_spec(_arch_eff)
+    if _aspec is not None:
+        _h1, _h2, _pre = _aspec
+        _chain = ('{}→'.format(_pre) if _pre else '') + '{}→{}→{}'.format(_h1, _h2, _h1)
+        prCyan('[actor] {} ⇒ actor 结构: state→{}→action '
+               '(--hidden1/--hidden2 只作用于 L 层)'.format(_arch_eff, _chain))
+    if int(getattr(args, 'scalar_wt', 0) or 0):
+        prLightPurple('[baseline] 动作空间 = 1 个自由度: 五台风机轴向因子全部 = a[0]'
+                  '（a_i = a_0；第 1..4 维存在但无用, 梯度恒 0）；g 独立。'
+                  'warmup/探索噪声之后仍强制相等。c1 平滑={} critic_arch={}'.format(
+                      int(getattr(args, 'c1_smooth', 0) or 0),
+                      getattr(args, 'critic_arch', 'v6')))
+    if int(getattr(args, 'lin_wt', 0) or 0):
+        _na_box = int(getattr(args, 'na_box', 5) or 5)
+        _actor_nb = 2 + max(0, 6 - _na_box)
+        prLightPurple('[linear] actor 输出层 = {} 个神经元（a0/a{}/g...）；critic 仍 6 维动作；'
+                      'checkpoint = actor_{}.pkl；中间维 = 线性插值并四舍五入到 {} 位小数；'
+                      '噪声/target smoothing 只作用于自由维；g 独立。warmup/探索噪声之后仍强制'
+                      '落在该流形上。c1 平滑={} critic_arch={}'.format(
+                          _actor_nb, _na_box - 1, _actor_nb,
+                          int(getattr(args, 'lin_wt_decimals', 2)),
+                          int(getattr(args, 'c1_smooth', 0) or 0),
+                          getattr(args, 'critic_arch', 'v6')))
+    _c1b = float(getattr(args, 'c1_bound_coef', 10.0))
+    if _c1b > 0.0:
+        prCyan('[c1] 越界项已开启: c1 += {} × Σ[max(0,-a)+max(0,a-0.5)]  (MW·step)'.format(_c1b))
     # 只在**未显式指定**（--seed 默认 -1）时随机化。显式 --seed >= 0 必须被尊重，
     # 否则"同 seed 配对 A/B"会被随机种子混淆（历史 bug：本行曾无条件覆盖用户传入的 --seed）。
     if args.seed is None or int(args.seed) < 0:
@@ -1191,6 +2542,14 @@ if __name__ == "__main__":
     env = WindBatteryAIF(max_E, args.nb_turbine, upload, None, physics=aif_physics)
     env_test = WindBatteryAIF(max_E, args.nb_turbine, upload, None,
                               physics=aif_physics_test)
+    # ---- 诊断：恒定风速 / 恒定电价（默认 -1 ⇒ 不动生产路径）----
+    if DIAG['u'] >= 0:
+        _udf = pd.DataFrame(np.full((1440, 201), float(DIAG['u'])))
+        env.wind_noise = _udf
+        env_test.wind_noise = _udf.copy()
+    if DIAG['pr'] >= 0:
+        env.diag_const_pr = float(DIAG['pr'])
+        env_test.diag_const_pr = float(DIAG['pr'])
     prCyan("口径: " + aturb.declared_scope())
 
     if args.seed > 0:
@@ -1206,12 +2565,47 @@ if __name__ == "__main__":
         time=1.0 / 60,
         fluctuation_limit=args.rbb_fluctuation_limit,
     )
+    if args.hsrl:
+        # HSRL: 波动窗口**不参与**任何裁剪与奖励 ⇒ 用 inf 关掉它, RBB 退化为
+        # "纯 SOC + 额定功率裁剪 + 记录"(其 pbphysicsmin/max 与 aifflor_hsrl.feasible_power
+        # 逐位同式) ⇒ `pbrule ≡ clip(命令, 物理域)`、`unfeasible_gap ≡ 0`。
+        rbb_system.fluctuation_limit = float('inf')
+        # 对偶的模块级默认（Q 分子 / twin 聚合）按命令行覆盖
+        hsrl.HSRL_DUAL_SRC = str(args.hsrl_dual_src)
+        hsrl.HSRL_DUAL_Q_AGG = str(args.hsrl_dual_q_agg)
+        hsrl.HSRL_DUAL_Q_SRC = str(args.hsrl_dual_q_src)
+        prCyan(hsrl.summary())
+        _lo1, _hi1, _init1 = hsrl.lam1_phys_bounds(args.hsrl_lam1_min, args.hsrl_lam1_max)
+        prCyan('[HSRL] 对偶: 分子 = {} | twin 聚合 = {} | λ1 物理价 ∈ [{:.3f}, {:.3f}] '
+               '元/(MW·step) (actor 空间 ×{:.3g} = [{:.4f}, {:.4f}], 初值 {:.4f})'.format(
+                   ('critic cost 的 Q（{}）'.format(
+                       {'update_batch': '本块 update 的 Qc 批均值（靠缓冲自然淘汰跟随策略）',
+                        'recent_batch': '近端 %d 条批均值 × 当前策略动作' % args.hsrl_dual_recent_n,
+                        'point': '块首单点 Q(s0,a0)'}.get(args.hsrl_dual_q_src, args.hsrl_dual_q_src))
+                    if args.hsrl_dual_src == 'q' else '实际块成本 EMA'),
+                   args.hsrl_dual_q_agg,
+                   _lo1 / max(1e-12, hc.lam_scale()), _hi1 / max(1e-12, hc.lam_scale()),
+                   hc.lam_scale(), _lo1, _hi1, _init1))
 
     # 上层 H: TD3 + EMA 实际成本对偶 (lam1 ∈ [3, 100], 初始 5.0) —— 与 td3perrb 一致
     nb_states_H = 4 + PHASE_DIM[int(getattr(args, 'phase_feat', 0))]
-    print('H nb_states = {} (4 base + {} phase dims, --phase_feat={})'.format(
-        nb_states_H, PHASE_DIM[int(getattr(args, 'phase_feat', 0))], args.phase_feat))
+    _wind5 = bool(int(getattr(args, 'critic_wind5', 0) or 0))
+    critic_nb_states_H = nb_states_H + (4 if _wind5 else 0)
+    print('H nb_states = {} (4 base + {} phase dims, --phase_feat={}) | '
+          'critic_nb_states = {} (--critic_wind5={})'.format(
+              nb_states_H, PHASE_DIM[int(getattr(args, 'phase_feat', 0))],
+              args.phase_feat, critic_nb_states_H, args.critic_wind5))
+    # ---- branch（同块首宽动作覆盖）：critic 批的来源分层比例 ----
+    #   计划书 §4.2：actor 50–60% / branch 40–50%。关闭时 `branch_mix=0` ⇒
+    #   `update_policy` 走历史整池采样路径（逐位不变）。
+    _branch_on = (int(getattr(args, 'branch_every', 0) or 0) > 0
+                  or int(getattr(args, 'branch_pilot_blocks', 0) or 0) > 0)
+    _branch_frac = (float(getattr(args, 'branch_critic_frac', 0.45) or 0.0)
+                    if _branch_on else 0.0)
+    _branch_beta = (float(getattr(args, 'branch_sup_beta', 0.0) or 0.0)
+                    if _branch_on else 0.0)
     agent_H = SP_TD3(nb_states=nb_states_H, nb_actions=6, args=args,
+                     critic_nb_states=critic_nb_states_H,
                      lam_max=(_HCFG['lam_max'] if _HCFG else 100.0), lam_min=(_HCFG['lam_min'] if _HCFG else 3.0),
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
                      record_update_stats=True,
@@ -1220,13 +2614,28 @@ if __name__ == "__main__":
                      noise_clip=args.noise_clip,
                      cost_critic_mode=args.cost_critic_mode,
                      wt_noise=args.wt_noise,
+                     wt_noise_mode=args.wt_noise_mode,
+                     wt_noise_min=args.wt_noise_min,
+                     wt_noise_max=args.wt_noise_max,
                      sig_noise_max=args.sig_noise_max,
                      sig_noise_min=args.sig_noise_min,
                      wt_noise_floor=args.wt_noise_floor,
-                     nstep=args.nstep, target_agg=args.target_agg)
+                     nstep=args.nstep, target_agg=args.target_agg,
+                     branch_mix=_branch_frac, branch_sup_beta=_branch_beta,
+                     actor_arch=(_arch_eff if _aspec is not None else None))
     print('[H] nstep={} target_agg={} (n 步回报: 自助传播深度 50->{:.1f}; '
           '复现历史 run1~run10 请传 --nstep 1)'.format(
               args.nstep, args.target_agg, 50.0 / max(1, args.nstep)))
+    if _branch_on:
+        prCyan(abr.declared_scope())
+        prCyan('[branch] critic 批 branch 占比 = {:.2f} | 每 {} 块一次 | pilot 前 {} 块每块 | '
+               'freeze_lower={} | goal_pm1={} | 辅助监督 β0={} (衰减 {} 块) | CSV={}'.format(
+                   _branch_frac, int(getattr(args, 'branch_every', 0) or 0),
+                   int(getattr(args, 'branch_pilot_blocks', 0) or 0),
+                   int(getattr(args, 'branch_freeze_lower', 1) or 0),
+                   int(getattr(args, 'branch_goal_pm1', 0) or 0),
+                   _branch_beta, int(getattr(args, 'branch_sup_blocks', 20000) or 20000),
+                   int(getattr(args, 'branch_csv', 1) or 0)))
     if args.viol_derate > 0:
         print('[H] 越界乘性惩罚 c={:.2f}: r1 的风机收益 × exp(-{:.2f}·Σ前5维越界量); '
               '记录列(revenue/turbine_profit/degradation/profit)不变'.format(
@@ -1234,6 +2643,10 @@ if __name__ == "__main__":
     else:
         print('[H] 越界乘性惩罚已关闭 (--viol_derate 0): 与历史 run 逐位一致')
     agent_H.lam = _HCFG['lam_init'] if _HCFG else 5.0
+    if args.hsrl:
+        # λ1 的**物理价**区间/初值（见 aifflor_hsrl.HSRL_LAM1_PHYS_* 与 README §3.8）
+        _lo1, _hi1, _init1 = hsrl.lam1_phys_bounds(args.hsrl_lam1_min, args.hsrl_lam1_max)
+        agent_H.lam_min, agent_H.lam_max, agent_H.lam = _lo1, _hi1, _init1
     # 值函数回归空间归一化 (s = hc.value_scale()): 只作用于 H 层 r1/c1 进入
     # critic 之前; buffer/对偶/日志/CSV 仍是原始口径 (见 hsrl_cost 末尾小节)。
     agent_H.value_scale = hc.value_scale()
@@ -1243,6 +2656,13 @@ if __name__ == "__main__":
         agent_H.ema_lam_lr = _HCFG['ema_lam_lr']   # uniform: 乘性对偶步长
     if args.wt_bias_init:
         init_wt_action_bias(agent_H, lo=0.05, hi=0.45, sig_value=0.0)
+    if args.hsrl:
+        # HSRL: 第 6 维量纲从"归一化信号 ∈[−0.5,0.5]"换成 **[MW·min]（满量程 ±2.5）**
+        # ⇒ 探索噪声同步重标（前 5 维风机维保持恒定 wt_noise 不变）。
+        agent_H.explore_amp[5] = float(args.hsrl_sig_noise_max)
+        agent_H.explore_floor[5] = float(args.hsrl_sig_noise_min)
+        prYellow('[HSRL] 第 6 维探索噪声: amp={} -> floor={} [MW·min] (满量程 ±{:.2f})'.format(
+            args.hsrl_sig_noise_max, args.hsrl_sig_noise_min, hsrl.HSRL_G_FULL))
 
     # 下层 L: 保留 td3per 自己的 RL BESS 操作
     #   * 观测 5 维蒸馏 = [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
@@ -1254,17 +2674,33 @@ if __name__ == "__main__":
     #       初值 L_LAM_INIT = 1.0 (中性兑换率)
     #   * 每块 1 次**乘性**对偶: λ2 ← clip(λ2·exp(hst.L_EMA_LAM_LR·(EMA_c2/d_block_L − 1)), 0.5, 2);
     #       步级折扣 --l_discount
-    agent_L = SP_TD3(nb_states=5, nb_actions=1, args=args,
-                     lam_max=hst.L_LAM_MAX, lam_min=hst.L_LAM_MIN,
-                     ema_lam=True, ema_alpha=0.02, ema_lam_lr=hst.L_EMA_LAM_LR,
-                     policy_delay=args.l_policy_delay,
-                     policy_noise=args.l_policy_noise,
-                     noise_clip=args.noise_clip,
-                     cost_critic_mode=args.cost_critic_mode)
-    agent_L.lam = hst.L_LAM_INIT
-    agent_L.cost_limit = hst.L_COST_LIMIT  # L层c2专用初始值（单一真源）
+    # ---- HSRL 分支: 动作语义变成"绝对 pb"、cost 换成图中指数式 ⇒
+    #      λ2 的区间/初值/预算随之重标 (c_L 无量纲 vs r2 元量级; 见 aifflor_hsrl.py) ----
+    if args.hsrl:
+        # HSRL: 观测 = [u/10, pr/1000, SOC/0.5, P_G(t−1)/5, g/2.5, need/2.5]（6 维;
+        #   第 6 维 = c_L 的参照点 (g−Σ已放电)/n_rem ⇒ 策略能直接看到"本步该出多少"）
+        agent_L = SP_TD3(nb_states=6, nb_actions=1, args=args,
+                         lam_max=hsrl.HSRL_L_LAM_MAX, lam_min=hsrl.HSRL_L_LAM_MIN,
+                         ema_lam=True, ema_alpha=0.02, ema_lam_lr=hsrl.HSRL_L_EMA_LAM_LR,
+                         policy_delay=args.l_policy_delay,
+                         policy_noise=args.l_policy_noise,
+                         noise_clip=args.noise_clip,
+                         cost_critic_mode=args.cost_critic_mode)
+        agent_L.lam = hsrl.HSRL_L_LAM_INIT
+        agent_L.cost_limit = hsrl.HSRL_L_COST_LIMIT
+    else:
+        agent_L = SP_TD3(nb_states=5, nb_actions=1, args=args,
+                         lam_max=hst.L_LAM_MAX, lam_min=hst.L_LAM_MIN,
+                         ema_lam=True, ema_alpha=0.02, ema_lam_lr=hst.L_EMA_LAM_LR,
+                         policy_delay=args.l_policy_delay,
+                         policy_noise=args.l_policy_noise,
+                         noise_clip=args.noise_clip,
+                         cost_critic_mode=args.cost_critic_mode)
+        agent_L.lam = hst.L_LAM_INIT
+        agent_L.cost_limit = hst.L_COST_LIMIT  # L层c2专用初始值（单一真源）
     agent_L.value_scale = 1.0   # L 层 r2/c2 不归一化 (值函数尺度本就 O(1))
     # ---- 残余动作: L actor 输出层零初始化 ⇒ t=0 时 Δ≡0 ⇒ 起点逐位等于规则下层 ----
+    #      HSRL 下同样是零初始化, 但语义 = "起点 pb = 0 (不充不放)"。
     hinit.zero_actor_output(agent_L, verbose=True)
     # L 层探索半宽 [MW] (残余动作量级): 旧式 ±0.05 MW 比所需动作小 ~50 倍
     agent_L.explore_amp = np.full(1, float(getattr(args, 'l_noise_amp', 1.0)), dtype=np.float32)
@@ -1277,26 +2713,57 @@ if __name__ == "__main__":
              '探索衰减: L 每 {} 次决策 / H 每 {} 次决策'.format(
                  args.l_policy_delay, args.l_policy_noise, args.policy_delay, args.policy_noise,
                  agent_L.discount, agent_H.discount, args.l_epsilon, args.epsilon))
-    prCyan('下层奖励/成本口径: r2 = -1·min(clip_amount, 20) [两段 clip 合计]; '
-           'c2 = +1·trackerr [MW] (dist(实际施加 pb, 参考集合=Soctrack范围∩平抑窗口)); '
-           'F=∅ ⇒ 无范围, 只有纯粹一个竭力值 r* (顶到才不罚); '
-           'L 观测 = [pg(t-1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]')
+    if not args.hsrl:
+        prCyan('下层奖励/成本口径: r2 = -1·min(clip_amount, 20) [两段 clip 合计]; '
+               'c2 = +1·trackerr [MW] (dist(实际施加 pb, 参考集合=Soctrack范围∩平抑窗口)); '
+               'F=∅ ⇒ 无范围, 只有纯粹一个竭力值 r* (顶到才不罚); '
+               'L 观测 = [pg(t-1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]')
+    else:
+        prCyan('下层奖励/成本口径 (HSRL): r2 = -{:.0f}·越界[MW] - {:.0f}·放电[MW·min]; '
+               'c_L = 1 - exp(-|(g-Σ已放电)/(5-t_L) - a_L|); '
+               'L 观测(6 维) = [u/10, pr/1000, SOC/0.5, P_G(t-1)/5, g/{:.1f}, need/{:.1f}]; '
+               'warmup 下层 = {}'.format(
+                   args.hsrl_viol_coef, args.hsrl_deg_coef, hsrl.HSRL_G_FULL,
+                   hsrl.OBS_NEED_SCALE,
+                   '摊还执行器' if str(getattr(args, 'warmup_bess', 'rule')) == 'rule'
+                   else getattr(args, 'warmup_bess')))
     #TODO 是否预训练
     # agent_H.load_weights('output/1_2310S-run18')
     # agent_L.load_weights('output/1_2310S-run18')
 
     if args.mode == 'train':
-        train(args.train_iter_H,
-              agent_H,
-              agent_L,
-              env,
-              env_test,
-              rbb_system,
-              args.output,
-              max_episode_length=args.max_episode_length,
-              debug=args.debug,
-              upload=upload,
-              use_csv=use_csv)
+        if args.hsrl:
+            # ---- HSRL 分支: 20 步测试的风速池 = FFC_speed_noise_1.csv 的"天"列 ----
+            _hsrl_wind_pool = None
+            try:
+                _hsrl_wind_pool = np.asarray(
+                    env_test.wind_noise.iloc[:, 1:].to_numpy(dtype=float))
+            except Exception as _e:
+                prYellow('[HSRL] 风速池不可用 ({}); 20 步测试将被跳过'.format(_e))
+            train_hsrl(args.train_iter_H,
+                       agent_H,
+                       agent_L,
+                       env,
+                       env_test,
+                       rbb_system,
+                       _hsrl_wind_pool,
+                       args.output,
+                       max_episode_length=args.max_episode_length,
+                       debug=args.debug,
+                       upload=upload,
+                       use_csv=use_csv)
+        else:
+            train(args.train_iter_H,
+                  agent_H,
+                  agent_L,
+                  env,
+                  env_test,
+                  rbb_system,
+                  args.output,
+                  max_episode_length=args.max_episode_length,
+                  debug=args.debug,
+                  upload=upload,
+                  use_csv=use_csv)
         if upload:
             writer.close()
         prCyan('[aifflor] 训练结束 —— 物理调用统计:')

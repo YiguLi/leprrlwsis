@@ -155,11 +155,11 @@ W_GAP = 10.0
 #      下层的 SocTracker 默认没有死区 (尽力追随), 因此不会出现
 #      "规则停住、上层却照罚"的幽灵税 (不对称方向是安全的)。
 #      仅当把 --tracker_dead_zone 调成 > 本值时, 幽灵税才会回归。
-SOC_TOL = 0.1
+SOC_TOL = 0.01
 # SOC 目标映射: a6 ∈ [-0.5, 0.5] → soc_target ∈ [0.5, 5.5]
-SOC_TARGET_CENTER = 3.0
-SOC_TARGET_SPAN = 5.0
-SOC_TARGET_MIN, SOC_TARGET_MAX = 0.5, 5.5
+SOC_TARGET_CENTER = 0.25
+SOC_TARGET_SPAN = 0.4166666666666667
+SOC_TARGET_MIN, SOC_TARGET_MAX = 0.041666666666666664, 0.4583333333333333
 
 # 退化系数 (元/MWh): 放电侧; 充电侧可以取更小 (k_c = 0 表示只在放电计退化)
 DEG_COST_DISCHARGE = 490.0
@@ -481,14 +481,14 @@ def Cal_Rew_RLRB(observation, observation2, action_rbb, rbb_info,
 # 7. Action checking
 # =============================================================================
 
-PENALTY_NN_H_COEF = 400.0  # [元/单位] H 层动作越界罚 (机组限功率 [0,0.5]×5 + 信号 [±0.5])
+PENALTY_NN_H_COEF = 10.0   # [元/单位] H 层动作越界罚 (机组限功率 [0,0.5]×5 + 信号 [±0.5])；2026-10 用户口径: 400→10
                          #   原 200 -> 400: 越界仍未压住, 先整体加倍。
                          #   ⚠ s_p=1000 ⇒ critic 空间 0.4/单位, 而框内经济斜率实测 0.27~4.5
                          #   ⇒ 仍然同量级, 不改变"边界位置落在 critic 噪声里"的结论。
 PENALTY_NN_L_COEF = 200.0  # [元/单位] 下层 1 维动作罚 —— **保持 200 不变** (仅诊断, 不进 r2 公式)
 
 
-def CheckAction(action, charge=10.):
+def CheckAction(action, charge=0.5):
     """Clip actions to feasible ranges. WT: [0,0.5], Signal: [-0.5,0.5], Bat: [-charge,charge].
 
     上层 (6 维): WT 越界与信号越界按 100/MW 计罚, penalty_NN_H **不封顶**。
@@ -541,12 +541,12 @@ def CheckAction(action, charge=10.):
 # 8. Normalization
 # =============================================================================
 
-def Normalize(obs, max_E=6.):
-    return np.array([obs[0] / 1000, obs[1] / 10, obs[2] / 10, obs[3] / 10])
+def Normalize(obs, max_E=0.5):
+    return np.array([obs[0] / 1000, obs[1] / 10, obs[2] / 0.5, obs[3] / 5.0])
 
 
-def Original(obs, max_E=6.):
-    return np.array([obs[0] * 1000, obs[1] * 10, obs[2] * 10, obs[3] * 10])
+def Original(obs, max_E=0.5):
+    return np.array([obs[0] * 1000, obs[1] * 10, obs[2] * 0.5, obs[3] * 5.0])
 
 
 # =============================================================================
@@ -675,7 +675,7 @@ def representative_phase_minute(price):
     return PHASE_REP_MINUTE.get(int(round(float(price))), 210)
 
 
-def Normalize_H(obs, phase_minute=0, phase_feat=1, max_E=6.):
+def Normalize_H(obs, phase_minute=0, phase_feat=1, max_E=0.5):
     """H 层观测 = Normalize(obs) ⊕ 相位特征 (phase_feat=0 时退化为原来的 4 维)."""
     base = Normalize(obs, max_E=max_E)
     if int(phase_feat) <= 0:

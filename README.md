@@ -63,6 +63,7 @@
 | H-DDPG | `H_main.py` + `H_ddpg.py` | 双层 DDPG（上层功率分配 + 下层储能控制） |
 | S-DDPG | `S_main.py` + `S_ddpg.py` | PDO-DDPG（策略解耦优化）单层架构 |
 | RBB | `rbb/` | 上层 DDPG 学习 + **下层规则** BESS 的首个版本；其 `rbb_rule_bess.RuleBasedBESS` 被 `per` / `td3per` 等方法复用 |
+| **testPg** | `testpg/` | **aifflor 的对照实验臂**：固定风机行为 `[0.2,0.2,0.2,0.2,0.33]` + 只学标量降载率 `rate`（H 动作 2 维 `[rate, goal]`），其余与 aifflor 同口径；未注册进 `test_five_days.py`（见 `testpg/README.md`） |
 
 ### 命名约定（据代码与各目录 README 归纳，非官方规范）
 
@@ -109,8 +110,8 @@ PRRBB ──(加 LLM)──→ PRLE          TD3PRRBB ──(加 LLM)──→ T
   `F ≠ ∅` 时零成本集合是该区间；`F = ∅` 时**不存在范围, 只有纯粹一个竭力值 `r*`**
   （窗口里离 Soctrack 范围最近的端点）, 顶到它才不罚；
   块首够不着的目标跳变由 r1 块末 gap 罚承接）。
-  H 层动作越界罚（`penalty_NN_H`）现为 **400 元/单位**（`PENALTY_NN_H_COEF`，本轮由 200 加倍；
-  下层 `PENALTY_NN_L_COEF = 200` 不变；⚠ `s_p=1000` ⇒ critic 空间 0.4/单位，与经济斜率仍同量级）。
+  H 层动作越界罚（`penalty_NN_H`）现为 **10 元/单位**（`PENALTY_NN_H_COEF`，2026-10 用户口径：400→10，只作"可区分越界"的信号；
+  下层 `PENALTY_NN_L_COEF = 200` 不变；⚠ `s_p=1000` ⇒ critic 空间 **0.01/单位**（原 400 时是 0.4）。）
   ⚠️ 改造前的 `output/TD3PER-run*` 权重（4 维 H 观测 + 影子电价下层）与新代码不兼容。
 - `td3leprrlrb` ← `td3prrlrb`：增加 **LLM 在线微调风速分段阈值**（±1 m/s 硬约束）+ 回放池 relabel
 - `td3prle` ← `td3prrbb`：增加 LLM 元控制器；`prle` ← `prrbb` 同理
@@ -281,8 +282,10 @@ python td3leprrlrb/td3leprrlrb_main.py    # 需配置 LLM
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `--warmup` | 200 | warmup 块数（**已不再纯随机**，见文末附注） |
+| `--warmup` | **7200 步** | warmup 时长（单位是**步**，不是块）。默认由 `hsrl_warmup.resolve_warmup` 解析为 **`WARMUP_STEPS` = 7200 步 = 1440 个块 = 5 个完整 episode/天**（2026-10-23 起由 1440 步改为 7200；`td3per` 与其余 8 个入口共用这同一真源）：覆盖完整电价三档 × 风况日循环 ⇒ warmup 的 (s,a) 与策略期同分布；H 层缓冲 1440 条 ≫ `bsize`(256) ⇒ 首个 minibatch 不复制同一条 transition。warmup 期**零网络更新**（`if step > args.warmup` 守卫 + `BiasInitTracker` 运行期断言），价值基线 bias 在 warmup 之后第一个块末（step = 7204）一次性应用。⚠ `--warmup` 的默认 `None` 是**哨兵**而非 7200：写死数值会让旧口径 `--warmup_bsize_mult` 永远失效。复现历史：1440 步/288 块口径传 `--warmup 1440`，200 块口径传 `--warmup 200`，绑 bsize 传 `--warmup_bsize_mult 4`。`td3per` 启动时另打印 `[warmup7200]` 一行自检（块数/缓冲/bias 触发步） |
 | `--warmup_sched` | `fixed` | warmup 上层动作调度：`fixed` = 1/3 起每块 ±0.05、clip[0.05,0.45]、信号维恒 0；`random` = 旧 `random_action()`（对照臂） |
+| `--warmup_sig` | **`random`** | **warmup 期 goal（第 6 维 / SOC 目标信号）的生成方式**（2026-10-30 起默认纯随机，真源 = `hsrl_warmup.SIG_MODE_DEFAULT`）：`random` = 每块 **i.i.d. `U(--warmup_sig_lo, --warmup_sig_hi)`**，**不看电价、不看上一块**（块内 5 步固定），把整条信号带均匀铺满（1440 块 ⇒ 每 0.1 宽 ≈144 个样本；实测均值 ≈0、std 0.289、lag-1 自相关 ≈0）；`price_walk` = **旧口径**（300 上调 / 580 不动 / 980 下调的累积游走，实测 91% 的块停在端点；复现历史 warmup 请显式传）；`fixed` = 恒 0（更旧口径）。⚠ 纯随机的**代价**：目标每块独立跳变（平均 \|Δtarget\| ≈0.14 MWh ≈ 电池单块可移动量 0.0417 MWh 的 3.4 倍）⇒ **块末 gap 罚明显变大**（静态估算：从 `price_walk` 的 ≈0 升到平均 0.69/块、76% 的块 >0、p90 1.63；不计 RBB 窗口）；想让随机目标也可达，用 `--warmup_sig_lo/hi` 收窄采样带（收到 ±0.1 时目标步幅 ≈ 单块可移动量）。warmup 下层仍由规则臂**完全追踪**该目标（Δ≡0 ⇒ trackerr≡0） |
+| `--warmup_wt_sched` | `lhs` | warmup 风机 5 维生成方式：`lhs` = LHS 全局覆盖（其余入口默认）；`unified` = **aifflor 默认** —— 一半 LHS + 一半"五维统一随机升降噪声"（奇数块 `a_i = prior_i + o`，`o` 每块加**同一个** ±0.05，整场同向升降；偶数块走 LHS）；`mix` = 先验邻域 + 全局覆盖；`walk` = 旧逐维游走（复现历史 run） |
 | `--warmup_bess` | `rule` | BESS-RL 项目（per/prrbb/prle/td3per/td3prrbb/td3prle）warmup 下层行为：`rule` = RBB 窗口 + SOC 目标跟踪（确定性，无随机）；`random` = 旧 `agent_L.random_action()`（对照臂） |
 | `--warmup_soc_target` | 3.0 | warmup 期规则下层跟踪的 SOC 目标（MWh） |
 | `--discount` | 0.99 | 折扣因子（以 5 min 的"块"为单位） |
@@ -299,6 +302,8 @@ python td3leprrlrb/td3leprrlrb_main.py    # 需配置 LLM
 | `--rbb_fluctuation_limit` | 3.0 | RBB 波动限值（MW） |
 | `--rbb_rated_power` | 10.0 | RBB 额定功率（MW） |
 | `--nolow` | **关闭** | **nolow 分支**（仅 td3per / td3perseg 有）：取消 H 层**第 6 维 SOC 目标信号** ⇒ H 动作 = **5 维**风机动作；BESS **只做一件事：全力朝 SOC = `SOC_TARGET_CENTER`(3.0) 方向充/放** —— 规则 = **单一真源 `hst.rule_action`**（与 `SocTracker.act` 逐位一致，目标钉在 3.0）：`|δ| ≤ soc_tol ⇒ clip(0, W)`（窗口不含 0 时做**最小幅度被迫吞吐** = 只平抑；**不是 0**）；否则 `clip(δ/g, W)`（`g` 取"一步填平" ⇒ 全力朝 3.0）。取值恒在窗口内 ⇒ **平抑约束（`|pg(t)−pg(t−1)| ≤ 3`）不被打破**。⚠ 若在 `δ=0` 时硬返回 0，SOC 会冻在 3.0、平抑整体失效（run101 实测 SOC 恒 3.0、`P_F>3` 占比 11.3% = 不动作基线）⇒ 该退化场景已由 `agentutil/test_nolow_branch.py` 的 A2 段钉住。**下层 RL 完全旁路**（BESS 全部由规则决定：不构造 L 命令、不更新 L、`r2≡c2≡0`、L 网络不落盘）；SOC 目标相关的 **gap 罚恒 0**。记录名同步带后缀：`RUN_TAG=td3pernolow` / `--env TD3PERNOLOW` ⇒ `output/TD3PERNOLOW-runNN` + `df_td3pernolow.csv`（td3perseg 同理 ⇒ `TD3PERSEGNOLOW`）。H 网络因此存成 `actor_5.pkl`（历史 run 是 `actor_6.pkl`）⇒ **`test_five_days.py` 尚不支持该分支**（见文末待办），run 内 test9（`nine_case_test(nolow=True)`）已支持 |
+| `--critic_arch` | **`v6`** | **仅 `td3per`（2026-10 新增）**：critic 结构。`v6` = `model.V6_DIMS` 双流（`s→32→32 ∥ a→64→64 →96→128→256→256→128→1`，原始 `a` 不再重复拼入；`ns=4/na=6` 时 150,081 参数 vs v1 的 14,441）；`v1` = 改造前结构（`--hidden1/--hidden2` 生效）。⚠ **`SP_TD3` 构造函数**在拿不到 `args.critic_arch` 时回落 **`v1`**（`agentutil` 的探针/契约测试因此逐位不变），生产路径由 CLI 决定。`--critic_act relu/leaky`、`--critic_out_init 3e3/fanin`、下层单独 `--l_critic_arch inherit/v1/v2/v6`。**老 checkpoint 的 arch 由 `load_weights` 从 `critic_p_<na>.pkl` 自动推断并重建**（v1↔v6 双向），评测脚本无需手填。**复现改造前请 `--critic_arch v1`**；详见 `documentation/td3per_branch_v6.md` |
+| `--branch_*` | **关闭** | **仅 `td3per`（2026-10 新增，移植自 `aifflor`）**：**同块首宽动作覆盖**。每 K 块（`--branch_every`，0=关；`--branch_pilot_blocks N` = 前 N 块每块都跑）从**同一完整块首 state** 再跑 `--branch_actions`（默认 `prior,low,high,uniform`，另有 `ramp/alt/single`）个测试动作 ×5 步，块级 `(s,a,Σr1,Σc1,s')` 全部写进同一 replay 当 TD 数据；**actor loss / λ / EMA / curriculum / CSV / TB / test 只用 actor 行**（critic 批按 `--branch_critic_frac` 0.45 分池、池内按 priority^α、branch 池内按 mode 均衡），branch 不进 n 步链（`n_boot=γ`，actor 是 `γ^n`）。第 6 维 = **SOC 目标信号**：`--branch_signal soc`（默认，目标 = 块首 SOC ⇒ 冻结下层时 gap≡0）、`target`/`zero`/`pm1`/`random`；下层 `--branch_lower freeze`（默认，`pb` 命令 0 且仍受 RBB 窗口夹裁）/`rule`（`hst.rule_action` 零成本基线）/`none`（严格 `pb≡0`）。成本：`--branch_every 10` ≈ **1.4×**、`4` ≈ 2.0×。产出 `df_branch_td3per.csv` + TB `branch/*`；契约测试 `python agentutil/test_td3per_branch_v6_contract.py`（1627 条断言）。详见 `documentation/td3per_branch_v6.md` |
 
 ---
 
@@ -824,7 +829,8 @@ PyTorch 默认 ±1/√50（实测初值 `Q ≈ 0.0804`），而 H 层块收益�
 **问题（`output/TD3PRRLRB-run3` day0 实测）**
 
 1. **bias 初始化从不触发**：触发条件写成"块末分支内 `step == args.warmup`"，而 episode 长度
-   1440 是 5 的倍数 ⇒ 块末步恒为 `step ≡ 4 (mod 5)`，默认 `--warmup 200 ≡ 0` **永不相等**。
+   1440 是 5 的倍数 ⇒ 块末步恒为 `step ≡ 4 (mod 5)`，当时默认 `--warmup 200 ≡ 0` **永不相等**
+   （**现行默认已是 7200 步 = 1440 块**，见参数字典的 `--warmup` 行；200 只是历史口径）。
    结果 critic 起点 = `fc3.bias` 的 PyTorch 默认值（实测 `q_p_mean = 0.0497`）。
 2. **warmup 自身是唯一"BESS 疯狂 churn"的窗口**：上层全随机 ⇒ `soc_target` 每块跳 ±2.5 MWh，
    而 RBB 窗口内每块只能移动 0.36~0.52 MWh（85% 的块目标不可达）⇒ `SocTracker` 全程顶格往返；

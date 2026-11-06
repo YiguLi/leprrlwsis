@@ -178,11 +178,11 @@ for _stream in (sys.stdout, sys.stderr):
 # 常量（与各项目 main 保持一致）
 # ----------------------------------------------------------------------------
 DT = 1.0 / 60.0                 # 步长 (小时)
-MAX_E = 6.0                     # BESS 容量 (MWh)
+MAX_E = 0.50                     # BESS 容量 (MWh)
 NB_TURBINE = 5                  # 风机台数
 EPISODE_LENGTH = 1440           # 1 day = 24h × 60min
 FLUCT_LIMIT = 3.0               # 波动限值 (MW)
-RATED_POWER = 10.0              # BESS 额定功率 (MW)
+RATED_POWER = 0.5              # BESS 额定功率 (MW)
 ETA_C = ETA_D = 0.98
 BESS_DEG_RMB_PER_MWH = 490.0    # 放电退化成本 (元/MWh 放电量)
 VIOL_TOL = 1e-6                 # 越限判定浮点容差
@@ -484,7 +484,7 @@ def _detect_nb_states(model_dir, nb_actions=6):
     sd = torch.load(path, map_location='cpu')
     if not isinstance(sd, dict):
         return None
-    for key in ('fc1.weight', '0.weight'):
+    for key in ('fc0.weight', 'fc1.weight', '0.weight'):
         if key in sd and hasattr(sd[key], 'shape') and len(sd[key].shape) == 2:
             return int(sd[key].shape[1])
     for key, val in sd.items():
@@ -511,17 +511,61 @@ def _detect_hidden(model_dir, nb_actions=6):
     return int(sd['fc1.weight'].shape[0]), int(sd['fc2.weight'].shape[0])
 
 
-def _build_args(device, seed, hidden=None):
+def _detect_actor_pre(model_dir, nb_actions=6):
+    """从 actor_<nb_actions>.pkl 的 `fc0.weight` 反推 v7.2/v7.3 的 state 编码器宽度。
+
+    2026-11-06 新增的结构：v7.2/v7.3 的 actor 是
+    `state→128→hidden1→hidden2→hidden1→action`，比历史 Actor 多一层 `fc0`。
+    没有 `fc0` ⇒ 返回 None（v1/v6/v7/v7.1 的 actor 形状不变）。
+    """
+    import torch
+    path = os.path.join(model_dir, 'actor_{}.pkl'.format(nb_actions))
+    if not os.path.isfile(path):
+        return None
+    sd = torch.load(path, map_location='cpu')
+    if not isinstance(sd, dict) or 'fc0.weight' not in sd:
+        return None
+    return int(sd['fc0.weight'].shape[0])
+
+
+def _detect_critic_arch(model_dir, nb_actions=6, nb_states=4):
+    """从 `critic_p_<na>.pkl` 反推 critic 结构（v1/v1af/v2/v3/v4/v5/v6/v7/v7.1/v7.2/v7.3）。
+
+    2026-11-04 起**训练默认 v7**，但历史模型是 v1/v6 ⇒ 评测必须按权重重建
+    （`load_state_dict` 在结构不符时只会报形状错误，不会自动换结构）。
+    识别不出来时返回 None（调用方保持"不设 critic_arch" ⇒ agent 用历史回落值）。
+    """
+    import torch
+    from model import infer_arch
+    path = os.path.join(model_dir, 'critic_p_{}.pkl'.format(nb_actions))
+    if not os.path.isfile(path):
+        return None
+    try:
+        sd = torch.load(path, map_location='cpu')
+    except Exception:
+        return None
+    if not isinstance(sd, dict):
+        return None
+    try:
+        return str(infer_arch(sd, int(nb_states), int(nb_actions)))
+    except Exception:
+        return None
+
+
+def _build_args(device, seed, hidden=None, actor_pre=None):
     """构造 agent 构造函数需要的 args 命名空间。
 
     hidden : (hidden1, hidden2) or None
         H/L 隐层宽度, **按模型目录探测后覆写**(见 _detect_hidden); None 时用下面
         的默认值 (= 六个 TD3 main 的当前默认)。
+    actor_pre : int or None
+        v7.2/v7.3 actor 的 state 编码器宽度（`fc0`），见 _detect_actor_pre。
     """
     ns = argparse.Namespace()
     # 默认值 = 六个 TD3 main 的当前默认; 真实维度在下面按 checkpoint 覆写
     ns.hidden1 = 16
     ns.hidden2 = 100
+    ns.actor_pre = None
     ns.rate = 0.01
     ns.prate = 0.0001
     ns.warmup = 200
@@ -531,6 +575,8 @@ def _build_args(device, seed, hidden=None):
     ns.rmsize = 20000
     if hidden:
         ns.hidden1, ns.hidden2 = int(hidden[0]), int(hidden[1])
+    if actor_pre:
+        ns.actor_pre = int(actor_pre)
     ns.window_length = 1
     ns.tau = 0.001
     ns.ou_theta = 0.15
@@ -663,6 +709,12 @@ class ProjectRunner:
             self.soc_target_from_signal = myf_mod.soc_target_from_signal
 
         # ---- 智能体 ----
+        # critic 结构：按 checkpoint 识别（v7 默认时代 / 历史 v1/v6 模型都要能加载）
+        _arch = _detect_critic_arch(model_dir, 6, nb_H)
+        if _arch:
+            args.critic_arch = _arch
+            if verbose:
+                print('    [{}] critic arch = {}（按 checkpoint 识别）'.format(key, _arch))
         AgentCls, _ = _resolve(self.spec['agent'])
         agent_H = AgentCls(nb_states=nb_H, nb_actions=6, args=args,
                            **self.spec['h_kwargs'])
@@ -673,7 +725,19 @@ class ProjectRunner:
 
         agent_L = None
         if self.spec['lower'] == 'rl':
-            agent_L = AgentCls(nb_states=5, nb_actions=1, args=args,
+            # L 的 actor 宽度可能与 H 不同：v7 的 H=400/300、L=16/100；
+            # v7.2/v7.3 的 L 没有 fc0。按 actor_1.pkl 单独探测，避免用 H 的宽度
+            # 去构造 L（否则 load_state_dict 会因形状不符失败）。
+            l_args = args
+            _l_hidden = _detect_hidden(model_dir, 1)
+            _l_pre = _detect_actor_pre(model_dir, 1)
+            if _l_hidden or _l_pre:
+                l_args = deepcopy(args)
+                if _l_hidden:
+                    l_args.hidden1 = int(_l_hidden[0])
+                    l_args.hidden2 = int(_l_hidden[1])
+                l_args.actor_pre = _l_pre
+            agent_L = AgentCls(nb_states=5, nb_actions=1, args=l_args,
                                **self.spec['l_kwargs'])
             if self.spec.get('l_lam') is not None:
                 agent_L.lam = self.spec['l_lam']
@@ -1328,7 +1392,8 @@ def main():
                       .format(label, key, run_no, len(model_dirs), model_dir))
                 print('-' * 96)
                 run_args = _build_args(device, args.seed,
-                                       _detect_hidden(model_dir, 6))
+                                       _detect_hidden(model_dir, 6),
+                                       _detect_actor_pre(model_dir, 6))
                 runner = ProjectRunner(
                     key, model_dir, device, run_args, engine,
                     phase_feat=args.phase_feat, soc_init=args.soc_init,

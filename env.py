@@ -28,9 +28,22 @@ def _get_matlab():
 # Fixed random day sequence — permanently saved to file.
 # Generated once with np.random.RandomState(42).randint(1, 200, size=199).
 # All training runs share this identical sequence for fair comparison.
+#: 风速池文件（可用 HSRL_WIND_CSV 覆盖；默认 = 生产口径的加噪池）
+WIND_CSV = os.environ.get('HSRL_WIND_CSV', 'FFC_speed_noise_1.csv')
+
 _DAY_SEQ_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               'fixed_day_sequence.csv')
 FIXED_DAY_SEQUENCE = pd.read_csv(_DAY_SEQ_PATH, header=None).values.flatten().tolist()
+
+#: 评测开局 SOC 的**旧口径**（历史 bug 保留常量用于复现）：
+#: `max_E = 5 MWh` 时代写死 5.0；现在 max_E = 0.5，5.0 = **10 倍容量** ⇒
+#:   RBB 的充电上限 `(max_E − E)/(η·dt)` 变成负数 ⇒ 可行域退化 ⇒ 首步走
+#:   `compute_pbrule` 的不可行分支、输出 `pbphysicsmax ≈ −275 MW` 的假放电
+#:   （P_F ≈ 275 MW、c1 ≈ 5.7e3，9-case 的 case 0 被彻底污染）。
+#: 现默认 = 容量中点（0.5·max_E）。要复现旧数据：
+#:   `env.legacy_test_soc5 = True`（或直接 `env.test_soc0 = 5.0`）。
+LEGACY_TEST_SOC0 = 5.0
+
 
 class WindBattery:
     # ------------------------------------------------------------------
@@ -42,12 +55,27 @@ class WindBattery:
     # `nominal_action` 非 None 时直接用它（可给完整向量）；否则用标量铺满 nt 维。
     nominal_action_value = 0.3333
     nominal_action = None
+    #: 每个固定风速日重复使用的 episode 数（1 = 历史口径；aifflor 覆写为 3）
+    DAY_REPEAT = 1
 
     def nominal(self):
         """标称动作向量（长度 = num_turbine）。"""
         if self.nominal_action is not None:
             return np.asarray(self.nominal_action, dtype=float).reshape(-1)[:self.num_turbine]
         return np.full(self.num_turbine, float(self.nominal_action_value), dtype=float)
+
+    def test_soc_start(self):
+        """评测（TestReset / ScenarioReset）的开局 SOC [MWh]。
+
+        优先级：显式 `env.test_soc0` > `env.legacy_test_soc5`（旧口径 5.0）> 容量中点。
+        见 `LEGACY_TEST_SOC0` 的注释（旧值 5.0 在 max_E=0.5 下会让首步出现 −275 MW 假放电）。
+        """
+        v = getattr(self, 'test_soc0', None)
+        if v is not None:
+            return float(v)
+        if getattr(self, 'legacy_test_soc5', False):
+            return float(LEGACY_TEST_SOC0)
+        return 0.5 * float(self.max_E)
 
     def __init__(self, max_E, num_turbine, upload, engine, physics=None):
         self.u = 10.
@@ -75,7 +103,7 @@ class WindBattery:
         self.pr = self.price_list[0]
         
         # wind_speed_2 (Sequence)
-        self.wind_noise = pd.read_csv("FFC_speed_noise_1.csv")
+        self.wind_noise = pd.read_csv(WIND_CSV)
         self.wind_test_scenarios = pd.read_csv("test_scenarios.csv")
         self.count_wind = 0
 
@@ -93,10 +121,13 @@ class WindBattery:
 
     def reset(self):
         # 1. reset电池
-        self.E = 3.
+        self.E = 0.25
         
         # 2. reset风速（固定随机序列，保证跨项目可比较）
-        idx = self.episode_count % len(FIXED_DAY_SEQUENCE)
+        # 每个风速日重复 DAY_REPEAT 次：episode 0..R-1 → day[0],
+        # R..2R-1 → day[1], ...（默认 R=1 = 历史逐日口径）
+        idx = (self.episode_count // max(1, int(self.DAY_REPEAT))) \
+            % len(FIXED_DAY_SEQUENCE)
         self.j = FIXED_DAY_SEQUENCE[idx]
         self.episode_count += 1
         # print(self.j)
@@ -123,7 +154,7 @@ class WindBattery:
             self.u = self.wind_noise.iloc[self.count_wind, 1]# + self.is_noise*np.random.normal(0, self.gauss_noise) #TODO 噪声
         else:
             self.u = self.wind_test_scenarios.iloc[self.count_wind, day-1]# + self.is_noise*np.random.normal(0, self.gauss_noise) #TODO 噪声
-        self.E = 5.
+        self.E = self.test_soc_start()
 
         # a_temp = np.array([0.1416, 0.1645, 0.1968, 0.2461, 0.3333])
         a_temp = self.nominal()
@@ -181,7 +212,13 @@ class WindBattery:
             float: 当前时间点的电价 (RMB/MWh)
         """
         self.count_price += 1  # 时间计数器加1（每分钟计数一次）
-        
+
+        # --- 诊断开关：恒定电价（实验 1 的"固定电价"段；默认 None ⇒ 生产路径不变）---
+        _cpr = getattr(self, 'diag_const_pr', None)
+        if _cpr is not None:
+            self.pr = float(_cpr)
+            return self.pr
+
         # 判断当前时间点属于哪个时段
         if self.count_price in range(7 * 60) or self.count_price in range(23 * 60, 24 * 60):
             # 低谷时段：0:00-7:00 和 23:00-24:00
@@ -295,7 +332,7 @@ class WindBattery:
         self.scenario_wind = wind_seq
         self.scenario_price = price_seq
         self.scenario_idx = 0
-        self.E = 5.
+        self.E = self.test_soc_start()
 
         self.pr = price_seq[0]
         self.u = wind_seq[0]

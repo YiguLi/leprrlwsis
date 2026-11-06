@@ -338,7 +338,7 @@ if __name__ == "__main__":
         args.resume = 'output/{}-run0'.format(args.env)
 
     #TODO 修改的命令ppyp
-    max_E = 6.
+    max_E = 0.5
     nb_turbine = 5
     upload = True
     use_csv = True

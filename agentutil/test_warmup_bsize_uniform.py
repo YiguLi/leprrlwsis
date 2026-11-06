@@ -1,15 +1,23 @@
 # -*- coding: utf-8 -*-
-"""正式口径契约：`warmup = --bsize × --warmup_bsize_mult`（默认 4）+ **warmup 期零更新**。
+"""正式口径契约：`warmup = WARMUP_STEPS = 7200 步（= 1440 块 = 5 个 episode/天）`
++ **warmup 期零更新**。
+
+⚠ 口径变更史：2026-10-23（`0fa074f`）把默认时长由 **1440 步** 改为 **7200 步**，
+且**不再与 `--bsize` 挂钩**（旧口径 `warmup = 4 × bsize` 只剩 `--warmup_bsize_mult>0` 的
+复现臂）。本文件原先按 1440 / 4×bsize 断言，已同步为 7200（`agentutil/test_td3per_warmup7200.py`
+是 `td3per` 侧的同一口径的更细契约）。
 
 判据（逐 main + 共享真源）：
-  ① 12 个正式 main（+ 派生臂 aifflorpave）的 `--warmup` 默认是 `None`（WARMUP_AUTO），
+  ① 12 个正式 main（+ 派生臂 aifflorpave）的 `--warmup` 默认是 `None`（**哨兵**，
+     不是写死的 7200 —— 写死会让 `--warmup_bsize_mult` 失效），
      且都调用 `<hwarm>.resolve_warmup(args)`；
-  ② `resolve_warmup` 的算术：未传 ⇒ mult×bsize；显式传 ⇒ 尊重显式值（可复现历史 run）；
+  ② `resolve_warmup` 的算术：未传 ⇒ **`WARMUP_STEPS` = 7200**（不绑 bsize）；
+     `--warmup_bsize_mult > 0` ⇒ 旧口径 `mult×bsize`；显式传 ⇒ 尊重显式值（可复现历史 run）；
   ③ **零更新契约**：每个 `update_policy()` 调用点都必须位于（更浅缩进的）
      `if step > args.warmup:` 守卫块内；
   ④ `hsrl_agent_init.BiasInitTracker.on_block_end` 在 warmup 期发现
      `agent.update_count != 0` 时**抛错**，为 0 时不抛；
-  ⑤ `first_trigger_step(bsize×mult)` 落在块末（≡4 mod 5）且 = warmup 本身（当 warmup≡4 mod 5）。
+  ⑤ `first_trigger_step(warmup)` 落在块末（≡4 mod 5）且 ≥ warmup（差 < 5）。
 
 用法::  python agentutil/test_warmup_bsize_uniform.py     # exit 0 = PASS
 """
@@ -68,18 +76,19 @@ for f in MAINS:
     check(has_auto and has_call, '%-34s auto=%s resolve=%s' % (f, has_auto, has_call))
 
 print('=' * 84)
-print('② resolve_warmup 算术（**固定 1440 步，与 --bsize 解耦**）')
-check(hwarm.WARMUP_STEPS == 1440, 'WARMUP_STEPS = 1440（一个 episode/一天）')
+print('② resolve_warmup 算术（**固定 7200 步 = 1440 块，与 --bsize 解耦**）')
+check(hwarm.WARMUP_STEPS == 7200, 'WARMUP_STEPS = 7200 步（= 1440 块 = 5 个 episode/天）')
+check(float(hwarm.WARMUP_BSIZE_MULT) == 0.0, 'WARMUP_BSIZE_MULT = 0（默认不绑 bsize）')
 a = hwarm.resolve_warmup(_A(256), verbose=False)
-check(a.warmup == 1440, 'bsize=256, 未传 ⇒ 1440（实测 %d）' % a.warmup)
+check(a.warmup == 7200, 'bsize=256, 未传 ⇒ 7200（实测 %d）' % a.warmup)
 b = hwarm.resolve_warmup(_A(64), verbose=False)
-check(b.warmup == 1440, 'bsize=64, 未传 ⇒ **同样 1440**（与 bsize 解耦，实测 %d）' % b.warmup)
+check(b.warmup == 7200, 'bsize=64, 未传 ⇒ **同样 7200**（与 bsize 解耦，实测 %d）' % b.warmup)
 c = hwarm.resolve_warmup(_A(256, warmup=200), verbose=False)
 check(c.warmup == 200, '显式 --warmup 200 ⇒ 200（最高优先，实测 %d）' % c.warmup)
 d = hwarm.resolve_warmup(_A(256, mult=4.0), verbose=False)
 check(d.warmup == 1024, '旧口径 --warmup_bsize_mult 4 ⇒ 1024（实测 %d）' % d.warmup)
 e = hwarm.resolve_warmup(_A(512), verbose=False)
-check(e.warmup == 1440, 'bsize=512 ⇒ 仍 1440（实测 %d；此时 H 缓冲 288<512 会告警）' % e.warmup)
+check(e.warmup == 7200, 'bsize=512 ⇒ 仍 7200（实测 %d；H 缓冲 1440≥512 ⇒ 不告警）' % e.warmup)
 
 print('=' * 84)
 print('③ 零更新契约：update_policy() 必须在更浅缩进的 `if step > args.warmup:` 块内')
@@ -121,10 +130,11 @@ except AssertionError:
 check((not raised2) and t2.n_warmup_blocks == 1, 'update_count=0 ⇒ 不抛且计数 +1（%d）' % t2.n_warmup_blocks)
 
 print('=' * 84)
-print('⑤ first_trigger_step 落在块末')
-for w in (1000, 1024, 256, 200):
+print('⑤ first_trigger_step 落在块末（≥ warmup 且差 < 5）')
+for w in (1000, 1024, 1440, 200, 7200):
     ts = hinit.first_trigger_step(w)
-    check(ts % 5 == 4 and ts >= w, 'warmup=%-5d ⇒ trigger=%-5d (≡4 mod 5 ✓)' % (w, ts))
+    check(ts % 5 == 4 and w <= ts < w + 5,
+          'warmup=%-5d ⇒ trigger=%-5d (≡4 mod 5 ✓, 差 %d)' % (w, ts, ts - w))
 
 print('=' * 84)
 print('TEST PASSED' if not FAIL else '**TEST FAILED**: %s' % FAIL)

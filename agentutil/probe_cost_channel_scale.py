@@ -96,21 +96,44 @@ def _emit_spy(start, n_used):
 
 ag._emit_nstep = _emit_spy
 
-N = 40
+N = 200
+rng2 = np.random.RandomState(7)
+# 用**变化的**真实分布值（打破"常数 ⇒ 折叠与缩放不可分"的退化）
+R_VALS = rng2.normal(217.0, 200.0, N)      # 块级 r1 之和的量级（实测 mean 216.8 sd 225.6）
+C_VALS = rng2.gamma(2.0, 2.85, N)          # 块级 c1 之和的量级（实测 mean 5.74）
+print('灌入 N=%d 条 (r ~ N(217,200), c ~ Gamma)' % N)
+print('  灌入 r: mean %.4f  sd %.4f' % (R_VALS.mean(), R_VALS.std()))
+print('  灌入 c: mean %.4f  sd %.4f' % (C_VALS.mean(), C_VALS.std()))
+
 for i in range(N):
     s = rng.uniform(0, 1, 4).astype(np.float32)
     s2 = rng.uniform(0, 1, 4).astype(np.float32)
     a = rng.uniform(0, 0.5, 5).astype(np.float32)
-    ag.observe_jump(s, a, 1000.0, 5.7, s2, False)
+    ag.observe_jump(s, a, float(R_VALS[i]), float(C_VALS[i]), s2, False)
 
-print('灌入 N=%d 条 (r=1000, c=5.7)' % N)
-print('_emit_nstep 被调 %d 次；前 3 次:' % len(calls))
+print('  _emit_nstep 被调 %d 次；前 3 次窗内/写入值:' % len(calls))
 for st, nu, rs, cs, sr, sc in calls[:3]:
-    print('  start=%d n_used=%d  窗内 r=%s  c=%s  ⇒ 写入 r_sum=%.4f c_sum=%.4f'
-          % (st, nu, np.round(rs, 2), np.round(cs, 3), sr, sc))
-if calls:
-    print('  ⇒ 窗内 5 条 r 之和 %.1f（应 5000）与写入值 %.1f 的比值 %.4f'
-          % (sum(calls[0][2]), calls[0][4], calls[0][4] / sum(calls[0][2])))
+    print('    start=%d n=%d  窗内 r=%s' % (st, nu, np.round(rs, 1)))
+    print('                窗内 c=%s  ⇒ 写入 r=%.2f  c=%.2f'
+          % (np.round(cs, 2), sr, sc))
+G = float(np.sum(0.95 ** np.arange(5)))
+print('\n  Σγ^k = %.4f' % G)
+print('  窗口内 r 的算术和均值 %.2f；若写入值 ≈ 和×%.4f ⇒ 折叠；≈ 和 ⇒ 裸值'
+      % (np.mean([sum(c[2]) for c in calls]), G))
+rew_stored = np.array([d[2] for d in ag.memory._storage], dtype=float)
+cos_stored = np.array([d[3] for d in ag.memory._storage], dtype=float)
+print('\n  _storage 里 reward: mean %.3f  sd %.3f' % (rew_stored.mean(), rew_stored.std()))
+print('  _storage 里 cost  : mean %.3f  sd %.3f' % (cos_stored.mean(), cos_stored.std()))
+print('  灌入 r 的均值 %.3f ⇒ 存储/灌入 = %.4f' % (R_VALS.mean(), rew_stored.mean() / R_VALS.mean()))
+print('  灌入 c 的均值 %.3f ⇒ 存储/灌入 = %.4f' % (C_VALS.mean(), cos_stored.mean() / C_VALS.mean()))
+print('\n  判定：比值 ≈ Σγ^k(%.4f) ⇒ n-step 折叠；≈ 1 ⇒ 裸块值；≈ 5 ⇒ 另有 ×5' % G)
+
+for _ in range(4):
+    ag.update_policy()
+st_ = ag.update_stats[-1]
+print('\n  update_stats[-1]: reward_mean %.3f  cost_mean %.3f'
+      % (st_['reward_mean'], st_['cost_mean']))
+print('  （内部已 ×s_p ×s_c；若存储即裸值则应与 _storage 均值一致）')
 print('灌入 N=%d 条' % N)
 mem = ag.memory
 print('memory 长度 = %d（rmsize=%d，未满 ⇒ 不覆盖）' % (len(mem), _Args.rmsize))

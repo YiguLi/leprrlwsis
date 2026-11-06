@@ -34,6 +34,38 @@ Key differences from SP_DDPG:
   4. PER priority based on twin-min TD errors (unchanged formula shape).
   5. 逐维探索噪声 (WT 5 维 ±wt_noise·ε; 信号维 ±max(sig_noise_max·ε,
      sig_noise_min)), 由 td3perrb 移植。
+
+2026-10 新增（两项，均可单独关闭）
+---------------------------------
+  * **critic 结构**（`--critic_arch`，**默认 v7**，2026-11-04 起；此前默认 v6）:
+    `v7` = `model.Critic(arch='v7')` 的 `cat(s,a)→400→300→400→1`（ns=4/na=6 时 245,501
+    参数）+ actor `s→400→300→400→a`（245,106）；`v6` = 双流
+    `s→32→32 ∥ a→64→64 → cat(96) →128→256→256→128→1`（150,081）；`v1` = 改造前结构
+    （逐位复现历史）。`--critic_arch v1/v6` 仍可复现旧 run。
+    ⚠ `SP_TD3` 构造函数在拿不到 `args.critic_arch` 时回落 **v1**（探针/契约测试不变）。
+    `load_weights` 会按 checkpoint 的 state_dict 自动推断 arch 并重建（v1↔v6↔v7）。
+  * **branch**（`--branch_every` / `--branch_pilot_blocks`，默认关闭）: 同块首宽动作覆盖，
+    口径唯一真源 = `td3per/td3per_branch.py`（移植自 `aifflor`，见
+    `documentation/td3per_branch_v6.md`）。branch 只进 critic TD（分池采样 + actor 掩码），
+    不进 n 步链（`n_boot=γ`），actor/λ/EMA/CSV/TB/test 只用 actor 行。
+
+2026-11-06 新增：`--hsrl` 方法分支（默认关闭，与 aifflor `--hsrl` 同口径）
+-----------------------------------------------------------------------
+  * 第 6 维 = **块总放电量 `g [MW·min]`**（不再是 SOC 目标信号）；H 奖励无 bessdeg、
+    无块末 gap 罚；L 动作 = **绝对 pb**；`r2 = −200·越界 − 20·放电`；
+    `c_L = 1 − exp(−|need − a_L|)`；λ1∈[2,50]、λ2∈[2,50]；L 观测 6 维；
+    warmup 下层 = 摊还执行器；训练中测试改 **test20**。
+  * 口径唯一真源 = `td3per/td3per_hsrl.py`（与 `aifflor/aifflor_hsrl.py` **数值逐位一致**，
+    由 `agentutil/test_td3per_hsrl_parity.py` 断言）；主循环 = `td3per_main.train_hsrl()`
+    （与旧 `train()` 并列）。
+  * 未加 `--hsrl` 时该模块一行都不会被调用 ⇒ 历史路径逐位不变。
+  * 同时对齐的引擎无关旋钮（仅 `--hsrl` 下生效）：WT 噪声 wide（U[0,0.05]、触边截断、
+    不衰减）、`--noise_zero_step 115200`（ε=21600 次决策）、cost 塔输入 clip 到 [0,0.5]、
+    warmup 风机调度 `unified` + prior 混合 bias、RBB `fluctuation_limit=inf`。
+  * 对照与验收表见 `documentation/td3per_vs_aifflor.md` §5。
+
+口径与契约测试见 `documentation/td3per_branch_v6.md` /
+`agentutil/test_td3per_branch_v6_contract.py`。
 """
 
 from td3per.td3per_ddpg import SP_TD3
