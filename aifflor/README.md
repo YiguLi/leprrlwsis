@@ -1,4 +1,4 @@
-# AIFFLOR —— `td3per` 的 FLORIS 引擎版
+﻿# AIFFLOR —— `td3per` 的 FLORIS 引擎版
 
 > **一句话**：`aifflor` 基本上就是 `td3per` 把 **WFSim 风场仿真器换成 FLORIS**，
 > 其余完全一致。
@@ -316,10 +316,15 @@ corr(WFSim, FLORIS 标定后) = 0.999959        ← 轨迹几乎一致
 2026-10 之前是 `v2`，更早是 `v1`）：
 
 ```text
-v7 : cat(state, action) → 400→300→400→1  +  actor state→400→300→400→action   # 2026-11-04 起默认
-v6 : s→32→32 ∥ a→64→64 → [32+64]=96 → 128→256→256→128→1   # 原始 a 不再重复拼入（旧默认）
-v2 : s: ns→hidden1→hidden2 ∥ a→32→64 → square(带残差)→128→64→1   # 更早的生产默认
-v1 : fc1(x)→fc4→cat(a)→fc2→fc5→fc3                            # 历史口径
+v7   : cat(state, action) → 400→300→400→1  +  actor state→400→300→400→action   # 2026-11-04 起默认
+v7.1 : cat(state, action) → 500→400→500→1  +  actor state→500→400→500→action   # 2026-11-06
+v7.2 : (s→128 ∥ a→128) → cat(256) → 400→300→400→1
+       + actor state→128→400→300→400→action                                    # 2026-11-06
+v7.3 : (s→128 ∥ a→128) → cat(256) → 500→400→500→1
+       + actor state→128→500→400→500→action                                    # 2026-11-06
+v6   : s→32→32 ∥ a→64→64 → [32+64]=96 → 128→256→256→128→1   # 原始 a 不再重复拼入（旧默认）
+v2   : s: ns→hidden1→hidden2 ∥ a→32→64 → square(带残差)→128→64→1   # 更早的生产默认
+v1   : fc1(x)→fc4→cat(a)→fc2→fc5→fc3                            # 历史口径
 ```
 
 - `v7` 的宽度写死在 `model.V7_DIMS`（`--hidden1/--hidden2` 对它**不生效**，与 v5/v6 同口径）；
@@ -334,6 +339,21 @@ v1 : fc1(x)→fc4→cat(a)→fc2→fc5→fc3                            # 历史
   （L 是 1 维 BESS 动作，仍 16/100，避免无谓放大）。
   ⚠ 因此 v7 的 actor checkpoint（`actor_6.pkl`）与 2026-11-03 之前的 v7 run
   （如 `AIFFLOR-V7-run20`，16/100）**形状不兼容**，不能直接续训/加载。
+- **v7.1 / v7.2 / v7.3（2026-11-06）**：在 v7 同一接线上新增的三个可选结构，
+  canonical CLI 值是 `v7.1/v7.2/v7.3`（也接受 `7.1/7.2/7.3`），**默认仍是 v7**：
+  - `v7.1`：critic `cat(s,a)→500→400→500→1` + actor `s→500→400→500→a`
+    （H critic 406 901 参数、actor 406 406）；
+  - `v7.2`：critic `(s→128 ∥ a→128)→cat(256)→400→300→400→1` +
+    actor `s→128→400→300→400→a`（H critic 345 437、actor 295 346）；
+  - `v7.3`：critic `(s→128 ∥ a→128)→cat(256)→500→400→500→1` +
+    actor `s→128→500→400→500→a`（H critic 531 437、actor 469 046）。
+  其中 256 是**拼接宽度**（128+128），不是额外隐藏层；v7.2/v7.3 的 actor 多一层
+  `fc0` state 编码器。`--hidden1/--hidden2` 对新结构同样**不生效**；L 层 actor 仍 16/100。
+  结构/参数/恢复/评测接线见 `documentation/critic_arch_v7x.md`，
+  契约测试 `python agentutil/test_critic_arch_v7x.py`（162 项，纯静态）。
+- **checkpoint 识别**：`infer_arch` 按 `h1` 形状区分 v7.1/v7，按 `s1/a1` 的 128 维 +
+  `m1` 输入 256 区分 v7.2/v7.3；`test_five_days` 还会从 `actor_6.pkl` 的 `fc0`
+  反推 v7.2/v7.3 的 actor 编码器。
 - 该开关同时作用于 **H 和 L 两个 critic**（HSRL 下 `agent_L` 共用同一 `args`；
   L 的动作维 = 1，`--critic_feat_power` 会因 `nb_actions ≠ feat_nt+1` 自动关闭）。
 - `infer_arch` 按 checkpoint 的 `h1/h2/h3/out` 键唯一识别 v7（`build_critic_from_sd`、

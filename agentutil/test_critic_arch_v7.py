@@ -304,9 +304,9 @@ def section_g():
     ok(tuple(M.V7_ACTOR_DIMS) == (400, 300), 'model.V7_ACTOR_DIMS = (400, 300)')
     ok('V7_ACTOR_DIMS' in dsrc and "actor_arch" in dsrc,
        'aifflor_ddpg 按 actor_arch 覆写 actor 宽度')
-    ok('actor_arch=' in src and "_arch_eff == 'v7'" in src,
-       'aifflor_main 只给 H 层传 actor_arch=v7（L 层不放大）')
-    ok("'[actor] v7" in src, 'main 启动日志会打印 v7 的 actor 结构')
+    ok('actor_arch=' in src and '_aspec is not None' in src,
+       'aifflor_main 只给 H 层传 actor_arch（L 层不放大）')
+    ok("'[actor] {} ⇒" in src, 'main 启动日志会打印 actor 结构')
 
 
 def section_h():

@@ -60,10 +60,69 @@ V7_DIMS = (400, 300, 400)
 #: L 层 1 维动作仍用 `--hidden1/--hidden2`，避免 1 维动作网被放大 100 倍）。
 V7_ACTOR_DIMS = (400, 300)
 
+#: v7.1 critic 的固定宽度（**与 --hidden1/--hidden2 无关**）。
+#:
+#: 2026-11-06 按用户口径新增：动作与状态仍在首层拼接，但三层宽度改成
+#:     input (= ns + na') → 500 → 400 → 500 → 1
+V71_DIMS = (500, 400, 500)
+
+#: v7.2 critic：state / action **各自先过一层 128 维编码器**，再拼接：
+#:     s: ns → 128
+#:     a: na' → 128
+#:     cat(128+128 = 256) → 400 → 300 → 400 → 1
+#: 注意：256 是拼接宽度，不是额外的隐藏层（用户 2026-11-06 确认口径）。
+V72_DIMS = dict(s=128, a=128, merge=(400, 300, 400))
+
+#: v7.3 critic：与 v7.2 相同，但合并后的主干换成 500→400→500：
+#:     s: ns → 128
+#:     a: na' → 128
+#:     cat(256) → 500 → 400 → 500 → 1
+V73_DIMS = dict(s=128, a=128, merge=(500, 400, 500))
+
+#: 新版本的 CLI 别名：用户口径常写 `7.1/7.2/7.3`，内部 canonical 带 `v` 前缀。
+ARCH_ALIASES = {'7.1': 'v7.1', '7.2': 'v7.2', '7.3': 'v7.3'}
+
+
+def normalize_arch(arch):
+    """把 `7.1/7.2/7.3` 归一成 `v7.1/v7.2/v7.3`；其它值原样返回。"""
+    if arch is None:
+        return None
+    a = str(arch).strip()
+    return ARCH_ALIASES.get(a, a)
+
+
+#: arch → actor 规格 `(hidden1, hidden2, pre_hidden)`。
+#:
+#: `model.Actor` 的既有形状是 `state→hidden1→hidden2→hidden1→action`；
+#: `pre_hidden` 是本次新增的可选 state 编码层（`fc0`），用于 v7.2/v7.3 的
+#: 128 维编码器 ⇒ `state→128→hidden1→hidden2→hidden1→action`。
+#: v7.1/v7.3 的 actor 主干是 500-400-500；v7.2 是 400-300-400 + 128 编码器。
+V7_ACTOR_SPECS = {
+    'v7': (400, 300, None),
+    'v7.1': (500, 400, None),
+    'v7.2': (400, 300, 128),
+    'v7.3': (500, 400, 128),
+}
+
+
+def actor_spec(arch):
+    """返回 actor 规格 `(hidden1, hidden2, pre_hidden)`；不认识的 arch 返回 None。"""
+    return V7_ACTOR_SPECS.get(normalize_arch(arch))
+
+
 class Actor(nn.Module):
-    def __init__(self, nb_states, nb_actions, hidden1=400, hidden2=300, init_w=3e-3):
+    def __init__(self, nb_states, nb_actions, hidden1=400, hidden2=300, init_w=3e-3,
+                 pre_hidden=None):
         super(Actor, self).__init__()
-        self.fc1 = nn.Linear(nb_states, hidden1)
+        #: 可选的 state 编码层（v7.2/v7.3 的 128 维）。None ⇒ 历史形状不变。
+        self.pre_hidden = int(pre_hidden) if pre_hidden else None
+        if self.pre_hidden:
+            self.fc0 = nn.Linear(nb_states, self.pre_hidden)
+            _in = self.pre_hidden
+        else:
+            self.fc0 = None
+            _in = nb_states
+        self.fc1 = nn.Linear(_in, hidden1)
         self.fc2 = nn.Linear(hidden1, hidden2)
         # self.fc3 = nn.Linear(hidden2, nb_actions)
         self.fc3 = nn.Linear(hidden2, hidden1)
@@ -82,6 +141,8 @@ class Actor(nn.Module):
         # 注意: 各项目在 agent 构造后另有覆写(见 hsrl_agent_init.zero_actor_output /
         # td3per_main.init_wt_action_bias), 它们才是决定"初始策略"的项。
         # self.fc1.init.orthogonal_(gain=1)
+        if self.fc0 is not None:
+            self.fc0.weight.data = fanout_init(self.fc0.weight.data.size())
         self.fc1.weight.data = fanout_init(self.fc1.weight.data.size())
         self.fc2.weight.data = fanout_init(self.fc2.weight.data.size())
         # self.fc3.weight.data.uniform_(-init_w, init_w)
@@ -89,7 +150,10 @@ class Actor(nn.Module):
         self.fc4.weight.data.uniform_(-init_w, init_w)
     
     def forward(self, x):
-        out = self.fc1(x)
+        out = x
+        if self.fc0 is not None:
+            out = self.relu(self.fc0(out))
+        out = self.fc1(out)
         out = self.relu(out)
         out = self.fc2(out)
         out = self.relu(out)
@@ -127,7 +191,7 @@ class Critic(nn.Module):
                  feat_power=False, feat_power_k=1.357e-3, feat_u_index=1,
                  feat_u_scale=10.0, feat_nt=5):
         super(Critic, self).__init__()
-        # 七种结构（默认 v1 = 历史口径，逐位不变）：
+        # 十二种结构（默认 v1 = 历史口径，逐位不变）：
         #   v1    : fc1(x)→fc4→cat(a)→fc2→fc5→fc3
         #   v1af  : cat(x,a)→fc1(4·hidden1)→fc4→fc2→fc5→fc3        （动作首层进网）
         #   v2    : s: ns→hidden1→hidden2  ∥  a: na→32→64
@@ -136,6 +200,9 @@ class Critic(nn.Module):
         #           合并 [32+64]=96 →128→256→256→128→1   （**原始 a 不再重复拼入**）
         #   v7    : cat(x,a) → 400→300→400→1   （**动作与状态一开始就拼接**，
         #           与 v1af 同一动机但宽度是显式规格 V7_DIMS）
+        #   v7.1  : cat(x,a) → 500→400→500→1   （v7 的加宽版）
+        #   v7.2  : s: ns→128  ∥  a: na'→128 → cat(256) → 400→300→400→1
+        #   v7.3  : s: ns→128  ∥  a: na'→128 → cat(256) → 500→400→500→1
         #   v6old : 2026-10-24 的旧 v6（s 4→32 ∥ a→32，cat(32+32+na)→256→256→128→1；
         #           合并时把原始 a 再传一次）。**只保留给历史 checkpoint 复现**
         #           （output/V6/AIFFLOR-run1、documentation/critic_arch_v6_review.md），
@@ -144,7 +211,7 @@ class Critic(nn.Module):
         # （单机 Cp 在 1/3 取峰）、逐台不对称的。让动作先独立成型，再与状态融合。
         if arch is None:
             arch = 'v1af' if action_first else 'v1'
-        self.arch = str(arch)
+        self.arch = normalize_arch(arch)
         self.nb_actions = int(nb_actions)
         self.action_first = (self.arch == 'v1af')
         self.act_kind = str(act)
@@ -229,6 +296,27 @@ class Critic(nn.Module):
             self.h2 = nn.Linear(_h1, _h2)
             self.h3 = nn.Linear(_h2, _h3)
             self.out = nn.Linear(_h3, 1)
+        elif self.arch == 'v7.1':
+            # 2026-11-06：v7 的加宽版，动作仍在首层与状态拼接。
+            #   input (ns + na') → 500 → 400 → 500 → 1
+            _h1, _h2, _h3 = V71_DIMS
+            self.h1 = nn.Linear(nb_states + self.in_actions, _h1)
+            self.h2 = nn.Linear(_h1, _h2)
+            self.h3 = nn.Linear(_h2, _h3)
+            self.out = nn.Linear(_h3, 1)
+        elif self.arch in ('v7.2', 'v7.3'):
+            # 2026-11-06：状态与动作**各自先过一层 128 维编码器**，再拼接：
+            #   s: ns→128  ∥  a: na'→128 → cat(256) → merge 主干 → 1
+            # v7.2 主干 = 400→300→400；v7.3 主干 = 500→400→500。
+            _cfg = V72_DIMS if self.arch == 'v7.2' else V73_DIMS
+            _s, _a = _cfg['s'], _cfg['a']
+            _m1, _m2, _m3 = _cfg['merge']
+            self.s1 = nn.Linear(nb_states, _s)
+            self.a1 = nn.Linear(self.in_actions, _a)
+            self.m1 = nn.Linear(_s + _a, _m1)          # 128+128 = 256（拼接宽度）
+            self.m2 = nn.Linear(_m1, _m2)
+            self.m3 = nn.Linear(_m2, _m3)
+            self.out = nn.Linear(_m3, 1)
         elif self.arch == 'v1af':
             self.fc1 = nn.Linear(nb_states + self.in_actions, 4 * hidden1)
             self.fc4 = nn.Linear(4 * hidden1, hidden2)
@@ -275,6 +363,16 @@ class Critic(nn.Module):
                 self.out.weight.data.uniform_(-init_w, init_w)
         elif self.arch == 'v7':
             for m in (self.h1, self.h2, self.h3):
+                m.weight.data = fanout_init(m.weight.data.size())
+            if self.out_init != 'fanin':
+                self.out.weight.data.uniform_(-init_w, init_w)
+        elif self.arch == 'v7.1':
+            for m in (self.h1, self.h2, self.h3):
+                m.weight.data = fanout_init(m.weight.data.size())
+            if self.out_init != 'fanin':
+                self.out.weight.data.uniform_(-init_w, init_w)
+        elif self.arch in ('v7.2', 'v7.3'):
+            for m in (self.s1, self.a1, self.m1, self.m2, self.m3):
                 m.weight.data = fanout_init(m.weight.data.size())
             if self.out_init != 'fanin':
                 self.out.weight.data.uniform_(-init_w, init_w)
@@ -339,6 +437,20 @@ class Critic(nn.Module):
             z = self.relu(self.h2(z))
             z = self.relu(self.h3(z))
             return self.out(z)
+        if self.arch == 'v7.1':
+            z = torch.cat([x, a], 1)                  # 动作与状态首层拼接（500 宽）
+            z = self.relu(self.h1(z))
+            z = self.relu(self.h2(z))
+            z = self.relu(self.h3(z))
+            return self.out(z)
+        if self.arch in ('v7.2', 'v7.3'):
+            hs = self.relu(self.s1(x))                # ns → 128
+            ha = self.relu(self.a1(a))                # na' → 128
+            z = torch.cat([hs, ha], 1)                # 256 = 128 + 128
+            z = self.relu(self.m1(z))
+            z = self.relu(self.m2(z))
+            z = self.relu(self.m3(z))
+            return self.out(z)
         if self.action_first:
             out = self.relu(self.fc1(torch.cat([x, a], 1)))
             out = self.fc4(out)
@@ -400,15 +512,23 @@ class Critic_L(nn.Module):
         return out
 
 def infer_arch(sd, ns=4, na=6):
-    """按 state_dict 推断 critic 结构（v1 / v1af / v2 / v3 / v4 / v5 / v6 / v6old / v7）。
+    """按 state_dict 推断 critic 结构（含 v7.1 / v7.2 / v7.3）。
+
+    支持：v1 / v1af / v2 / v3 / v4 / v5 / v6 / v6old / v7 / v7.1 / v7.2 / v7.3。
 
     ⚠ 判据必须用 m1 的**完整形状**，不能只看 `shape[1]`：v4 的 m1 是方阵 (w,w)，
       v5 的是 (100,48)，v6 的是 (128,96)，旧 v6（v6old）的是 (256, 32+32+na')
       —— 只看输入维时 v4/v5 在 hidden1=16 会撞车（都是 48）。
-    v7 用 h1/h2/h3/out 命名且**没有** s1/fc1，判据唯一（`h1.weight` 只有 v7 有）。
+    v7 用 h1/h2/h3/out 命名且**没有** s1/fc1，判据唯一（`h1.weight` 只有 v7 有）；
+    v7.1 与 v7 同层名，用 h1/h2 的完整形状区分（500→400 vs 400→300）。
+    v7.2/v7.3 与 v6old 都叫 s1/a1/m1/...，用「s1/a1 都是 128 且 m1 输入 256」区分。
     """
-    # v7: cat(x,a) → 400→300→400→1（无 s1/a1/fc1，只有 h1/h2/h3/out）
+    # v7 / v7.1: cat(x,a) → (400→300→400 | 500→400→500) → 1（无 s1/a1/fc1）
     if 'h1.weight' in sd:
+        sh1 = tuple(sd['h1.weight'].shape)
+        if (sh1[0] == V71_DIMS[0] and 'h2.weight' in sd
+                and tuple(sd['h2.weight'].shape) == (V71_DIMS[1], V71_DIMS[0])):
+            return 'v7.1'
         return 'v7'
     if 's1.weight' in sd:
         if 'm4.weight' in sd:                         # v6 独有：96→128→256→256→128
@@ -417,6 +537,12 @@ def infer_arch(sd, ns=4, na=6):
             if 'm1.weight' not in sd:
                 return 'v4'
             sh = tuple(sd['m1.weight'].shape)          # (out, in)
+            # v7.2/v7.3: s1/a1 各 128，拼接 256，主干 400/500 起步
+            if (sh[1] == V72_DIMS['s'] + V72_DIMS['a']
+                    and tuple(sd['s1.weight'].shape)[0] == V72_DIMS['s']
+                    and tuple(sd['a1.weight'].shape)[0] == V72_DIMS['a']
+                    and sh[0] in (V72_DIMS['merge'][0], V73_DIMS['merge'][0])):
+                return 'v7.2' if sh[0] == V72_DIMS['merge'][0] else 'v7.3'
             if sh[0] == 256 and sh[1] in (70, 65):     # 旧 v6: H=70 / L=65
                 return 'v6old'
             if sh[0] == sh[1]:                         # v4: 方阵
