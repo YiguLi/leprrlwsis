@@ -118,6 +118,16 @@ try:
 except ImportError:                     # pragma: no cover - 正常情况下 ROOT 已在 path
     hc = hst = hwarm = None
 
+#: HSRL 分支（`--hsrl`）的 block 口径 —— 只有 `run_branch_block_hsrl` 用；
+#: 未开 `--hsrl` 时一行都不会被调用。延迟到模块级 try，避免 standalone 直接执行时炸。
+try:
+    from td3per import td3per_hsrl as hsrl_block
+except ImportError:                     # pragma: no cover
+    try:
+        import td3per_hsrl as hsrl_block    # type: ignore
+    except ImportError:
+        hsrl_block = None
+
 
 # =============================================================================
 # 1. 常量（口径单一真源）
@@ -201,6 +211,15 @@ def add_branch_args(parser):
                    help='branch 的第 6 维（SOC 目标信号）: soc(默认)=目标=本块块首 SOC '
                         '(冻结下层时 gap≡0 ⇒ c1 只由 5 维风机动作决定); '
                         'target=沿用 actor 本块的信号; zero=0; pm1=±0.5; random=U(-0.5,0.5)')
+    # ---- 下面两个只对 `--hsrl` 生效（旧 SOC 目标口径不读它们，默认值不改变历史行为）----
+    g.add_argument('--branch_freeze_lower', default=1, type=int,
+                   help='【仅 --hsrl】1（默认）= branch 内下层 BESS 冻结在 pb≡0 '
+                        '(HSRL 下 RBB 的 fluctuation_limit=inf ⇒ 严格冻结, P_G=Ptur、E 不变); '
+                        '0 = 用摊还执行器兑现该 branch 的 g')
+    g.add_argument('--branch_goal_pm1', default=0, type=int,
+                   help='【仅 --hsrl】1 = branch 的第 6 维 g 随机取 ±满可行量 '
+                        '(+D_max 放电 / −C_max 充电); 0（默认）= g≡0。仅在 '
+                        '--branch_freeze_lower 0 时有物理作用')
     g.add_argument('--branch_critic_frac', default=0.45, type=float,
                    help='critic 批里 branch 的占比（计划 §4.2 的 40–50%%；'
                         '默认 0.45；>0.5 会被夹到 0.5，避免 actor 被淹没）')
@@ -495,6 +514,90 @@ def run_branch_block(env, rbb_system, a5, a6, snap, block_done, make_state,
 
 
 # =============================================================================
+# 5b. HSRL 分支（`--hsrl`）的一个 branch 块：块总放电量 g 语义
+# =============================================================================
+def run_branch_block_hsrl(env, rbb_system, a5, g, snap, block_done, make_state,
+                          minute_end=0, freeze_lower=True,
+                          viol_derate_coef=VIOL_DERATE_COEF, block_len=BLOCK,
+                          return_details=False):
+    """`--hsrl` 下的 branch 块 —— 与 `run_branch_block` **并列**、语义换成"块总放电量"。
+
+    与旧版的唯一差别（见 `td3per_hsrl.py` 的模块 docstring）：
+      * 第 6 维 `g` [MW·min]（放电为正），块级固定；
+      * 块成本 = `td3per_hsrl.cal_rew_rb_hsrl`（无 bessdeg、无块末 gap 罚）；
+      * 下层：`freeze_lower=True` ⇒ `pb ≡ 0`（HSRL 主循环把 RBB 的 fluctuation_limit
+        设成 inf ⇒ 这就是严格的"冻结"，不再有窗口强制吞吐）；
+        `False` ⇒ 摊还执行器 `hsrl.amortized_rule_action`。
+    """
+    if hsrl_block is None:                              # pragma: no cover
+        raise RuntimeError('run_branch_block_hsrl: td3per_hsrl 不可用')
+    hsrl = hsrl_block
+
+    a5 = np.asarray(a5, dtype=float).reshape(-1)[:5]
+    if a5.size < 5:
+        raise ValueError('run_branch_block_hsrl: a5 需要 5 维, 得到 %d' % a5.size)
+    a5 = np.clip(a5, A_LO, A_HI)
+
+    obs = np.array([float(snap['pr']), float(snap['u']),
+                    float(snap['E']), float(snap['P_G_prev'])], dtype=float)
+    soc_start = float(obs[2])
+    derate = float(violation_derate(a5, viol_derate_coef))
+
+    sum_r1 = 0.0
+    sum_c1 = 0.0
+    sum_disch = 0.0
+    pbrule_sum = 0.0
+    pf_list = []
+    n_fold = 0
+    ok = False
+    try:
+        pw = float(env.PowerOutput(float(obs[1]), a5))
+        for t in range(int(block_len)):
+            E_cur = float(obs[2])
+            n_rem = int(block_len) - t
+            if freeze_lower:
+                pb_cmd = 0.0
+            else:
+                pb_cmd = float(hsrl.amortized_rule_action(g, sum_disch, n_rem, E_cur))
+            pbrule, rbb_info = rbb_system.compute_pbrule(
+                pb_original=pb_cmd, ptur=pw, pg_prev=float(obs[-1]), E=E_cur)
+            action_rbb = np.concatenate([a5, np.array([float(pbrule)])])
+            pw2, obs2, aL_env, _pen_L, _done, _done_L, _info = env.step(
+                a5, np.array([float(pbrule)]), pw)
+            r1, c1s, det = hsrl.cal_rew_rb_hsrl(
+                obs, obs2, action_rbb, rbb_info, penalty_NN=0.0, time=hsrl.DT,
+                ptur=pw, pb_cmd=pb_cmd, turbine_derate=derate)
+            sum_r1 += float(r1)
+            sum_c1 += float(c1s)
+            sum_disch += float(hsrl.discharge_of(
+                float(np.asarray(aL_env, dtype=float).reshape(-1)[0])))
+            pbrule_sum += float(pbrule)
+            _pf = float(det['P_F'])
+            pf_list.append(_pf)
+            if 2.0 <= _pf <= 4.0:
+                n_fold += 1
+            obs = np.asarray(obs2, dtype=float).reshape(-1)
+            pw = float(pw2)
+        s2 = np.asarray(make_state(obs, env, int(minute_end)), dtype=float)
+        ok = True
+    finally:
+        restore_env(env, snap)
+
+    out = {
+        'a5': a5, 'g': float(g), 'r1': float(sum_r1), 'c1': float(sum_c1),
+        's2': s2, 'done': bool(block_done),
+        'P_F': pf_list, 'P_F_max': (max(pf_list) if pf_list else 0.0),
+        'n_fold': int(n_fold), 'n_steps': int(block_len),
+        'soc_start': soc_start, 'soc_end': float(obs[2]),
+        'sum_disch': float(sum_disch), 'pbrule_sum': float(pbrule_sum),
+        'restored': bool(ok),
+    }
+    if return_details:
+        out['obs2'] = np.asarray(obs, dtype=float).copy()
+    return out
+
+
+# =============================================================================
 # 6. 控制器：何时 branch / 用哪些动作 / 汇总诊断
 # =============================================================================
 class BranchController(object):
@@ -517,6 +620,11 @@ class BranchController(object):
         if self.signal not in SIGNAL_MODES:
             raise ValueError('--branch_signal 必须是 %s，收到 %r'
                              % ('/'.join(SIGNAL_MODES), self.signal))
+        # ---- HSRL 分支（`--hsrl`）的两个口径：只被 `goal()` / run_branch_block_hsrl 读 ----
+        #   freeze_lower=1（默认）= 下层 pb≡0（HSRL 下 RBB 的窗口已被关掉 ⇒ 严格冻结）；
+        #   goal_pm1=1 = 第 6 维 g 取 ±满可行量（否则 g≡0，只在 freeze_lower=0 时有物理作用）。
+        self.freeze_lower = bool(int(getattr(args, 'branch_freeze_lower', 1) or 0))
+        self.goal_pm1 = bool(int(getattr(args, 'branch_goal_pm1', 0) or 0))
         self.nolow = bool(int(getattr(args, 'nolow', 0) or 0))
         crit_frac = float(getattr(args, 'branch_critic_frac', 0.45) or 0.0)
         self.critic_frac = float(np.clip(crit_frac, 0.0, 0.5))
@@ -579,6 +687,21 @@ class BranchController(object):
         return branch_action(mode, self.rng, nt=self.nt,
                              prior_jitter=self.prior_jitter,
                              low_band=self.low_band, high_band=self.high_band)
+
+    # ---------------- 第 6 维（HSRL 分支：块总放电量 g）----------------
+    def goal(self, feas_c_max, feas_d_max):
+        """`--hsrl` 下 branch 的第 6 维 `g` [MW·min]（与 aifflor 的 `goal()` 同口径）。
+
+        冻结下层（默认）⇒ 恒 0：`pb≡0` 时 g 没有物理作用，留着只会污染动作维。
+        否则按 `--branch_goal_pm1` 取 ±满可行量，或 0。
+        """
+        if self.freeze_lower:
+            return 0.0
+        if not self.goal_pm1:
+            return 0.0
+        if self.rng.uniform() < 0.5:
+            return float(feas_d_max)
+        return -float(feas_c_max)
 
     # ---------------- 诊断 ----------------
     def note(self, mode, res):

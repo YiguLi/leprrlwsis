@@ -58,6 +58,8 @@ class SP_TD3(object):
                  cost_critic_mode='max',
                  wt_noise=0.05, sig_noise_max=0.2, sig_noise_min=0.01,
                  wt_noise_floor=0.01,
+                 wt_noise_mode='legacy', wt_noise_min=None, wt_noise_max=None,
+                 cost_clip=0,
                  nstep=1, target_agg='min',
                  critic_arch=None, critic_act='relu', critic_out_init='3e3',
                  branch_mix=0.0, branch_sup_beta=0.0, actor_arch=None):
@@ -273,6 +275,23 @@ class SP_TD3(object):
         self.sig_noise_max = float(sig_noise_max)
         self.sig_noise_min = float(sig_noise_min)
         self.wt_noise_floor = float(wt_noise_floor)
+        # ---- 与 aifflor 对齐的两个可选能力（默认关闭 ⇒ 历史路径逐位不变）----
+        #   * `wt_noise_mode='wide'`：风机维逐维幅度 A_i~U[min,max]、噪声 U[−A_i,A_i]
+        #     并按 [0,0.5] **截断噪声**、**不随 ε 衰减**（aifflor 默认口径）；
+        #     'legacy' = 本文件原来的 `explore_amp·ε + explore_floor·(1−ε)`。
+        #   * `cost_clip=1`：cost 塔只看 clip 到 [0,0.5] 后的风机动作（c1 只是
+        #     clip(a) 的函数；越界梯度由 profit 塔的 pen5 提供）。aifflor 默认开。
+        self.na_box = int(getattr(args, 'na_box', 5) or 5)
+        self.cost_clip = bool(int(getattr(args, 'cost_clip', 0) or 0))
+        _mode = str(wt_noise_mode or 'legacy').strip().lower()
+        self.wt_noise_mode = 'wide' if _mode == 'wide' else 'legacy'
+        self.wt_noise_min = float(self.wt_noise if wt_noise_min is None
+                                  else wt_noise_min)
+        self.wt_noise_max = float(self.wt_noise if wt_noise_max is None
+                                  else wt_noise_max)
+        if self.wt_noise_min > self.wt_noise_max:
+            self.wt_noise_min, self.wt_noise_max = (self.wt_noise_max,
+                                                    self.wt_noise_min)
         # ---- 风机探索噪声: **恒定 `wt_noise`（默认 0.05），不随 ε 衰减** ----
         #   用户口径（2026-10）: 全部风机、全部 TD3 族方法, 风机行为噪声恒为 0.05。
         #   实现 = 让 WT 维的 amp 与 floor 相等 ⇒ 凸组合
@@ -305,6 +324,17 @@ class SP_TD3(object):
         if self.cost_critic_mode == 'max':
             return torch.max(q1, q2)
         return torch.min(q1, q2)
+
+    def _clip_box(self, a):
+        """把风机动作维（前 na_box 维）夹到 [0,0.5]；只对 H 层（动作维 = na_box+1）生效。
+
+        `cost_clip=False`（默认，历史口径）⇒ 原样返回，所有路径逐位不变。
+        """
+        if (not self.cost_clip) or a is None or a.shape[-1] != self.na_box + 1:
+            return a
+        out = a.clone()
+        out[..., :self.na_box] = torch.clamp(a[..., :self.na_box], 0.0, 0.5)
+        return out
 
     # ---- 采样：branch 未启用时与历史 `memory.sample(...)` 逐位相同 ------------
     def _sample_batch(self):
@@ -413,8 +443,9 @@ class SP_TD3(object):
         # ---- TD3: twin targets, take min of the pair (clipped double Q) ----
         q_p1_next = self.critic_target_p([next_state_batch, a_smoothed])
         q_p2_next = self.critic_target_p2([next_state_batch, a_smoothed])
-        q_c1_next = self.critic_target_c([next_state_batch, a_smoothed])
-        q_c2_next = self.critic_target_c2([next_state_batch, a_smoothed])
+        a_smoothed_c = self._clip_box(a_smoothed)   # cost 塔: clip 后动作（cost_clip=0 ⇒ 原样）
+        q_c1_next = self.critic_target_c([next_state_batch, a_smoothed_c])
+        q_c2_next = self.critic_target_c2([next_state_batch, a_smoothed_c])
 
         if self.target_agg == 'mean':
             # 去掉 twin-min 的悲观偏差: 冻结批实测 Qbar 6.997 -> 8.235 (真值 9.159)
@@ -449,8 +480,9 @@ class SP_TD3(object):
 
         q_batch_p = self.critic_p([state_batch, action_batch])
         q_batch_p2 = self.critic_p2([state_batch, action_batch])
-        q_batch_c = self.critic_c([state_batch, action_batch])
-        q_batch_c2 = self.critic_c2([state_batch, action_batch])
+        action_batch_c = self._clip_box(action_batch)  # cost 塔: clip 后动作（profit 塔仍用原始动作）
+        q_batch_c = self.critic_c([state_batch, action_batch_c])
+        q_batch_c2 = self.critic_c2([state_batch, action_batch_c])
 
         # Compute the value losses (twin profit + twin cost).
         # Twin critics share the same min-target graph, so a single combined
@@ -497,14 +529,18 @@ class SP_TD3(object):
             #   `state_batch` 本身 ⇒ 四个 `self.actor(...)` 调用与历史逐位相同。
             _sel = state_batch if actor_mask is None else state_batch[actor_mask]
             # Fresh forward through the (just updated) critics: min of twins.
+            #   先算一次 actor 动作，profit 塔用原始动作、cost 塔用 clip 后动作
+            #   （`cost_clip=0` 时 `_clip_box` 原样返回 ⇒ 与历史表达式逐位相同）。
+            _a_cur = self.actor(_sel)
             min_p_cur = self._pair_min(
-                self.critic_p([_sel, self.actor(_sel)]),
-                self.critic_p2([_sel, self.actor(_sel)]))
+                self.critic_p([_sel, _a_cur]),
+                self.critic_p2([_sel, _a_cur]))
             # clamp(min=0) on cost: prevents the actor from exploiting a
             # (pathological) negative cost Q inside the Lagrangian objective.
+            _a_cur_c = self._clip_box(_a_cur)
             min_c_cur = self._aggregate_pair(
-                self.critic_c([_sel, self.actor(_sel)]),
-                self.critic_c2([_sel, self.actor(_sel)])).clamp(min=0.0)
+                self.critic_c([_sel, _a_cur_c]),
+                self.critic_c2([_sel, _a_cur_c])).clamp(min=0.0)
 
             # cost 为 +
             policy_loss = -(min_p_cur - self.lam * min_c_cur)  # TODO
@@ -762,16 +798,40 @@ class SP_TD3(object):
     def select_action(self, s_t, decay_epsilon=True):
         action = to_numpy(self.actor(to_tensor(np.array([s_t])))).squeeze(0)
 
-        # 逐维探索噪声: 均匀 U(-amp, +amp), amp = max(amp_dim*eps, floor_dim)
-        # (信号维幅值 0.2*eps 且地板 0.05; WT 维 0.05*eps; 见 __init__)
+        # 逐维探索噪声（两种口径，默认 'legacy' ⇒ 与历史逐位相同）:
+        #   * wide（aifflor 默认）: 风机维 A_i~U[wt_noise_min, wt_noise_max]，
+        #       noise_i~U[-A_i,A_i]，并按 [0,0.5] **截断噪声**；不乘 ε ⇒ 不衰减。
+        #       第 6 维（若存在）仍走 ε 衰减的 explore_amp/floor。
+        #   * legacy: 均匀 U(-amp, +amp)，amp = explore_amp·ε + explore_floor·(1−ε)。
         if self.is_training:
-            eps = max(self.epsilon, 0.0)
-            # ε 收敛到**地板**而非 0: amp = amp_full·ε + floor·(1−ε)
-            #   ε=1 ⇒ amp = explore_amp（起始幅度不变）
-            #   ε=0 ⇒ amp = explore_floor（**永不完全停止探索**）
-            #   ε 线性降到 0 的用时 = args.epsilon 决策（H=4000⇒20k 环境步）
-            amp = self.explore_amp * eps + self.explore_floor * (1.0 - eps)
-            action = action + (np.random.random(self.nb_actions) - 0.5) * 2.0 * amp
+            _wide = (self.wt_noise_mode == 'wide'
+                     and self.nb_actions in (self.na_box, self.na_box + 1))
+            if _wide:
+                n = min(self.na_box, self.nb_actions)
+                a_raw = np.asarray(action[:n], dtype=float)
+                amp = np.random.uniform(self.wt_noise_min,
+                                        self.wt_noise_max, size=n)
+                noise = np.random.uniform(-amp, amp)
+                # 只截断**噪声**：actor 输出本身在 [0,0.5] 内时保证 a+noise 不越界；
+                # 若 actor 输出本来就越界，保留原动作（让 CheckAction 照常记越界罚）。
+                inside = (a_raw >= 0.0) & (a_raw <= 0.5)
+                noise = np.where(
+                    inside,
+                    np.clip(noise, 0.0 - a_raw, 0.5 - a_raw),
+                    noise)
+                action[:n] = a_raw + noise
+                if self.nb_actions > n:
+                    eps = max(self.epsilon, 0.0)
+                    sig_amp = (self.explore_amp[n] * eps
+                               + self.explore_floor[n] * (1.0 - eps))
+                    action[n] += (np.random.random() - 0.5) * 2.0 * sig_amp
+            else:
+                eps = max(self.epsilon, 0.0)
+                # ε 收敛到**地板**而非 0: amp = amp_full·ε + floor·(1−ε)
+                #   ε=1 ⇒ amp = explore_amp（起始幅度不变）
+                #   ε=0 ⇒ amp = explore_floor（**永不完全停止探索**）
+                amp = self.explore_amp * eps + self.explore_floor * (1.0 - eps)
+                action = action + (np.random.random(self.nb_actions) - 0.5) * 2.0 * amp
 
         if decay_epsilon and self.is_training:   # 评测(is_training=False) 不消耗 ε 预算
             self.epsilon -= self.depsilon

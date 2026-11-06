@@ -130,3 +130,78 @@
 （复现旧口径：`--bsize 256 --epsilon 4000 --critic_out_init 3e3 --critic_bias_init estimate --c1_smooth 0`）。
 
 契约：`agentutil/test_critic_arch_v7.py` 会断言这 5 个默认值与 `hc.set_smooth` 的调用。
+
+---
+
+## 5. 2026-11-06：td3per 全面对齐 aifflor（新增 `--hsrl` 分支）
+
+**验收口径**：`python td3per/td3per_main.py --hsrl ...` 与
+`python aifflor/aifflor_main.py --hsrl ...` 相比，**除了物理引擎（WFSim ↔ FLORIS）之外
+没有任何口径差异**；未加 `--hsrl` 时 td3per 的历史路径逐位不变。
+
+### 5.1 新增/修改的文件
+
+| 文件 | 内容 |
+|---|---|
+| `td3per/td3per_hsrl.py`（新） | `--hsrl` 的全部口径：与 `aifflor/aifflor_hsrl.py` **数值逐位一致**，只换了 `myfunc` 的包名与 docstring |
+| `td3per/td3per_main.py` | 新增 `train_hsrl()`（873 行，与旧 `train()` 并列）+ `--hsrl` / `--hsrl_*` / `--noise_zero_step` / `--wt_noise_mode|min|max` / `--cost_clip` / `--pen_h` / `--diag_*` 开关 + `__main__` 装配 |
+| `td3per/td3per_ddpg.py` | `SP_TD3` 新增 `wt_noise_mode/min/max`（wide 噪声）与 `cost_clip`（cost 塔输入裁剪）；**默认值保持历史行为** |
+| `td3per/td3per_branch.py` | 新增 `BranchController.goal()`、`--branch_freeze_lower/--branch_goal_pm1`、`run_branch_block_hsrl()`（g 语义的 branch 块） |
+| `env.py` | 评测开局 SOC 默认改为 `0.5·max_E`（旧值 5.0 见 §5.4） |
+
+### 5.2 逐项对齐（编号对应本文件 §2）
+
+| §2 的差异 | `--hsrl` 下的 td3per 实现 |
+|---|---|
+| 2.1 第 6 维语义 | **块总放电量 `g [MW·min]`**，可行域 `[−C_max,+D_max]`（`hsrl.feasible_total`） |
+| 2.2 r1 | `pr·P_G·dt − pen5 − pen6`（无 bessdeg、无块末 gap 罚；`pen5` 系数 = `--pen_h` = 100） |
+| 2.3 c1 | 同式同平滑；`d_block_H=15` 起、curriculum **可减半到 0** |
+| 2.4 λ1 | 分子 = cost critic 的 Q（`update_batch`）、物理价 **[2, 50]**、初值 2 |
+| 2.5 下层 | **绝对 `pb`**、6 维观测、`r2=−200·越界−20·放电`、`c_L=1−exp(−|need−a_L|)`、λ2∈[2,50] 初值 10、`d_block_L=0.1` |
+| 2.6 训练日程 | `wt_noise=wide U[0,0.05]`、`--noise_zero_step 115200` ⇒ ε=**21600** 次决策、`warmup_wt_sched=unified`、bias 用 prior 混合、`cost_clip=1` |
+| 2.7 测试协议 | **test20**（20 步、电价恒 300、固定风段 col=120/start=483、开局 SOC=0.25），写 `df_test20_hsrl.csv` |
+| 2.8 独有开关 | `--hsrl_*` 一整组（pen6/viol/deg/sig_noise/d_block_l/dual_*/lam1/d_block_h_min/test_wind*） |
+| §3.4 RBB 硬窗口 | `rbb_system.fluctuation_limit = inf`（与 aifflor 一致，波动只由 c1 软定价） |
+| branch | 第 6 维 = `g`（`goal()`，冻结下层时 ≡0）；块成本走 `cal_rew_rb_hsrl`；`pb≡0` 严格冻结 |
+
+### 5.3 仍然不同（**只有**这些）
+
+1. **物理引擎**：WFSim（MATLAB）↔ FLORIS（`power_scale=LEVEL_COEF`）。跨引擎的
+   功率电平/收益**不可直接横比**（`aifflor/__init__.py` 的声明：u=10、a=1/3 时
+   FLORIS 3.294 MW vs WFSim 3.446 MW）。
+2. 输出目录 / CSV 所在 run：`--env` 决定。
+3. aifflor 独有的**动作流形**分支（`--lin_wt/--scalar_wt/--farm_level`）与
+   `--critic_wind5/--critic_feat_power/--aux_model/--explore_mix_blocks/--diag_u/pr`：
+   这些不是"对齐项"，td3per 侧未移植（默认全关，不影响 HSRL 主路径）。
+
+> 说明：`--hsrl_test_wind_col/start` 的哨兵 `-1` 在 aifflor 侧会走到
+> `np.clip(-1, 0, n-1) = 0`（run25 的 `df_test20_hsrl.csv` 里 `wind_col/wind_start`
+> 实测就是 0/0），并不是 docstring 写的 120/483。td3per 侧**逐位沿用**同一行为
+> （对齐优先于"修正"）；要真正固定在 120/483 请显式传
+> `--hsrl_test_wind_col 120 --hsrl_test_wind_start 483`。
+
+### 5.4 顺带修复：评测开局 SOC = 5.0 的历史 bug
+
+`env.py` 的 `TestReset` / `ScenarioReset` 曾写死 `self.E = 5.`（`max_E=5 MWh` 时代），
+而现在 `max_E=0.5` ⇒ 5.0 是 **10 倍容量**：RBB 的充电上限变成负数、可行域退化，
+首步走不可行分支输出 `pbphysicsmax ≈ −275 MW` 的假放电（`P_F ≈ 275`、`c1 ≈ 5.7e3`）。
+9-case 的 **case 0（LOW/LOW）** 因此被彻底污染：`profit_econ ≈ −3588`，
+而其余 8 个 case 均值 `≈ +211`；`OVERALL`（9 case 均值）被拖到 `≈ −1901`。
+
+- 现在默认 = `0.5·max_E`（= 0.25），并有 `env.test_soc_start()` 统一入口；
+- 复现旧数据：`env.legacy_test_soc5 = True` 或 `env.test_soc0 = 5.0`；
+- ⚠ 历史 `df_test9.csv` / 用 `TestReset` 的评测（`test_five_days.py` 等）在 2026-11-06
+  之前都带这个首步偏差，跨日期比较时需注意。
+
+### 5.5 如何验收
+
+```bash
+# 口径逐位一致（常量 + 纯函数 + 对偶 + reward，3446 项）
+python agentutil/test_td3per_hsrl_parity.py
+# 静态装配自检（argparse/运行期覆盖/模块属性，不启 MATLAB、不跑仿真）
+python agentutil/check_td3per_hsrl_port.py
+```
+
+真正的"表现对齐"仍需跑训练：建议 `--hsrl` 与 aifflor 用**同一 `--max_steps`、同一 seed**
+配对比较，并且**同时看 profit 与 c1**（只报 c1 会奖励"停场"策略，只报 profit 会奖励
+"无视约束"）。
