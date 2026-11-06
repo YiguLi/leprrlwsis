@@ -196,5 +196,20 @@ for path in (MAIN, BRANCH,
     if undefined:
         fail += 1
 
+# ---- 控制台输出安全：--log_file 1 下 `os.dup2` 会关掉 fd 1，sys.__stdout__ 失效 ----
+import run_io as _rio
+main_src = open(MAIN, encoding='utf-8').read()
+bad_stdout = [l for l in main_src.splitlines()
+              if 'file=sys.__stdout__' in l and not l.strip().startswith('#')]
+print('\nrun_io.console_write 存在: %s' % ('✓' if hasattr(_rio, 'console_write') else '✗'))
+if not hasattr(_rio, 'console_write'):
+    fail += 1
+print('td3per_main 直接写 sys.__stdout__: %s'
+      % ('✓ 无' if not bad_stdout else '✗ %d 处' % len(bad_stdout)))
+if bad_stdout:
+    fail += 1
+    for l in bad_stdout[:5]:
+        print('   ', l.strip()[:100])
+
 print('\nRESULT', 'PASS' if fail == 0 else 'FAIL(%d)' % fail)
 sys.exit(0 if fail == 0 else 1)
