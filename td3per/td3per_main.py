@@ -2139,6 +2139,19 @@ if __name__ == "__main__":
                         type=int,
                         help='how many episode to perform during validate experiment')
     parser.add_argument('--max_episode_length', default=500, type=int, help='')
+    # ---- 训练用风速日重复次数（`env.DAY_REPEAT`）：**默认 3 = aifflor 口径** ----
+    #   `env.WindBattery.reset()` 每个 episode 抽一天：
+    #       idx = (episode_count // DAY_REPEAT) % len(FIXED_DAY_SEQUENCE)
+    #   ⇒ DAY_REPEAT=3 的图案是 D0 D0 D0 / D1 D1 D1 / …（同一天**连练 3 遍**），
+    #     不是 0→47→0→47 交错的"两遍覆盖"。
+    #   episode = 1440 步 = 1 天（见下方 args.max_episode_length = 1440）⇒
+    #     `--max_steps 200000`（≈139 episode）下：3 ⇒ 只经历 FIXED_DAY_SEQUENCE 的
+    #     前 47 天（每天 3 遍）；1 ⇒ 139 个互不相同的风速日（= 2026-11 及以前的历史口径）。
+    #   `env.py` 的类属性仍为 1 ⇒ 其它项目（yawflor / td3perrb / td3prle …）口径不受影响。
+    parser.add_argument('--day_repeat', default=3, type=int,
+                        help='每个固定风速日重复使用的 episode 数（**默认 3 = aifflor 口径**；'
+                             '1 = td3per 历史口径，可复现 2026-11 及以前的 run）。'
+                             '只影响训练抽天（env.reset）；评测（TestReset / hsrl test20）不读它')
     parser.add_argument('--validate_steps',
                         default=2000,
                         type=int,
@@ -2379,6 +2392,8 @@ if __name__ == "__main__":
     #   目标：加 --hsrl 时，**除物理引擎外**的一切口径与 `aifflor --hsrl` 一致
     #   （第 6 维 g / 无 bessdeg / 无 gap 罚 / 绝对 pb / 指数 c_L / λ 区间 /
     #     wide 噪声 / noise_zero_step / cost_clip / unified warmup / test20）。
+    #   `DAY_REPEAT=3`（aifflor 走环境子类的类属性）在这里由 `--day_repeat` 对齐，
+    #   默认 3；它**不是** --hsrl 专用（不加 --hsrl 也生效），故不在本块内设置。
     #   未加 --hsrl 时本段一行都不生效 ⇒ 历史路径逐位不变。
     # =================================================================
     if args.hsrl:
@@ -2502,6 +2517,18 @@ if __name__ == "__main__":
 
     env = WindBattery(max_E, args.nb_turbine, upload, engine)
     env_test = WindBattery(max_E, args.nb_turbine, upload, engine)
+    # ---- 训练抽天口径：`--day_repeat`（默认 3 = aifflor；1 = 历史口径）----
+    #   只覆盖**实例属性**（env.py 的类属性仍是 1）⇒ 其它项目不受影响。
+    #   只在 `reset()` 里被读；`TestReset` 固定读风速池第 1 列、HSRL test20 走
+    #   `hsrl.HSRL_TEST_WIND_*` 场景池 ⇒ **评测口径不受影响**。
+    _day_rep = max(1, int(getattr(args, 'day_repeat', 1) or 1))
+    env.DAY_REPEAT = _day_rep
+    env_test.DAY_REPEAT = _day_rep
+    _n_ep = max(1, -(-int(args.train_iter_H) // max(1, int(args.max_episode_length))))
+    prCyan('[env] 训练抽天: --day_repeat={} ⇒ 每个风速日**连用 {} 个 episode** | '
+           '{} 个 episode ≈ 只覆盖 FIXED_DAY_SEQUENCE 前 {} 天{}'.format(
+               _day_rep, _day_rep, _n_ep, -(-_n_ep // _day_rep),
+               '' if _day_rep > 1 else '（= 历史逐日口径）'))
 
     if args.seed > 0:
         np.random.seed(args.seed)
