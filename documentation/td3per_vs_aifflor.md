@@ -205,3 +205,23 @@ python agentutil/check_td3per_hsrl_port.py
 真正的"表现对齐"仍需跑训练：建议 `--hsrl` 与 aifflor 用**同一 `--max_steps`、同一 seed**
 配对比较，并且**同时看 profit 与 c1**（只报 c1 会奖励"停场"策略，只报 profit 会奖励
 "无视约束"）。
+
+### 5.6 2026-11-08 补充：v7.1/v7.2/v7.3 与 bias 初始化（提交 `8d342a5`）
+
+1. **td3per 现在也支持 `--critic_arch v7.1 / v7.2 / v7.3`**（`7.1/7.2/7.3` 为等价写法）：
+   CLI 选择列表、`type=normalize_arch`、`SP_TD3` 用 `model.actor_spec` 装配
+   actor（v7.1/v7.3 = 500-400-500；v7.2/v7.3 多一层 128 维 `fc0`）、
+   评测侧用 `args.actor_pre` 反推 `fc0`。此前 aifflor 跑 v7.1、td3per 只能跑 v7，
+   两边的**网络宽度不同**（actor 参数 1.63 MB vs 0.98 MB）——这是"曲线对不上"的直接原因之一。
+2. **修 `--hsrl` 下的 bias 初始化**：td3per 的 `init_wt_action_bias` 默认是 prior 混合，
+   而 aifflor 的同一函数用的是**纯均匀** `U[0.05,0.45]`（`model.wt_bias_values`）。
+   之前 `--hsrl` 下误开了 prior 混合 ⇒ 初始策略分布不同；现已改为与 aifflor 一致。
+
+### 5.7 对齐之后仍然"不可逐点相同"的部分（不是 bug）
+
+| 项 | 说明 |
+|---|---|
+| 物理引擎 | WFSim（MATLAB，动态尾流/变表）↔ FLORIS（稳态尾流模型 + `power_scale`）。同一个 `a` 在两个引擎下的功率/尾流响应不同；`a→0` 更明显：aifflor 物理层把 `a` 抬到 `A_PHYS_LO=0.025`（Cp≈0.095），WFSim 则 `a=0 ⇒ Cp=0`。⇒ 最优的"降载/停场"策略本来就不同 |
+| 训练速度 | WFSim 每步 ~5 次 MATLAB 前向（0.2–0.35 s/次）+ branch（每 5 块 +20 步）⇒ 同墙钟下 td3per 的步数约为 aifflor 的 1/5。**必须按 step 配对，不能按时间配对** |
+| 随机性 | 即便 `--seed` 相同，两边的网络初始化/随机流消耗点不同（引擎调用次序不同）⇒ 只能比分布，不能比逐点 |
+
