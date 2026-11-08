@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from torch.optim import Adam
 
-from model import (Actor, Critic, infer_arch, V7_ACTOR_DIMS)
+from model import (Actor, Critic, infer_arch, normalize_arch, actor_spec)
 from PER_buffer import PrioritizedReplayBuffer
 from random_process import OrnsteinUhlenbeckProcess
 from util import *
@@ -89,20 +89,29 @@ class SP_TD3(object):
         #     由 `td3per_main.py` 的 CLI（默认 v6）决定，而**直接构造 SP_TD3 的脚本**
         #     （agentutil 里大量探针/契约测试不传 critic_arch）必须继续拿到历史网络，
         #     否则那些"逐位不变"的断言会静默失效。
-        self.critic_arch = str(critic_arch or getattr(args, 'critic_arch', 'v1') or 'v1')
+        #   `normalize_arch` 让 `7.1/7.2/7.3` 与 `v7.1/...` 等价。
+        self.critic_arch = str(normalize_arch(
+            critic_arch or getattr(args, 'critic_arch', 'v1') or 'v1'))
         critic_cfg = dict(net_cfg)
         critic_cfg['arch'] = self.critic_arch
         critic_cfg['act'] = str(critic_act or 'relu')
         critic_cfg['out_init'] = str(critic_out_init or '3e3')
         #: 重建 critic 时复用（`load_weights` 遇到 checkpoint 的 arch 不同会重建）
         self._critic_cfg = dict(critic_cfg)
-        # ---- actor 宽度（2026-11-04，v7 口径：actor 与 critic 同宽 400-300-400）----
-        #   只有显式 `actor_arch='v7'` 才放大（main 只给 **H 层** 传；L 层 1 维动作
-        #   仍用 --hidden1/--hidden2）。`model.Actor` 形状 = ns→h1→h2→h1→na。
-        self.actor_arch = str(actor_arch or 'inherit')
+        # ---- actor 宽度（v7 = 400-300-400；v7.1/7.2/7.3 见 model.V7_ACTOR_SPECS）----
+        #   只有显式 `actor_arch` 才放大/加编码层（main 只给 **H 层** 传；L 层 1 维
+        #   动作仍用 --hidden1/--hidden2）。`model.Actor` 形状 = ns→[pre]→h1→h2→h1→na。
+        self.actor_arch = normalize_arch(actor_arch or 'inherit')
         actor_cfg = dict(net_cfg)
-        if self.actor_arch == 'v7':
-            actor_cfg['hidden1'], actor_cfg['hidden2'] = V7_ACTOR_DIMS
+        _aspec = actor_spec(self.actor_arch)
+        if _aspec is not None:
+            actor_cfg['hidden1'], actor_cfg['hidden2'] = _aspec[0], _aspec[1]
+            if _aspec[2]:
+                actor_cfg['pre_hidden'] = _aspec[2]
+        elif getattr(args, 'actor_pre', None) and self.nb_actions > 1:
+            # 评测侧（test_five_days）：从 actor_6.pkl 的 fc0 反推 v7.2/v7.3 的
+            # 128 编码器。只给 H（多动作）用，避免 L 的 1 维 BESS actor 被误加编码层。
+            actor_cfg['pre_hidden'] = int(args.actor_pre)
         self.actor = Actor(self.nb_states, self.nb_actions, **actor_cfg)
         self.actor_target = Actor(self.nb_states, self.nb_actions, **actor_cfg)
         self.actor_optim = Adam(self.actor.parameters(), lr=args.prate)

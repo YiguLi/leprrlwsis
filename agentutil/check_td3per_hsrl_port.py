@@ -57,7 +57,11 @@ else:
 # ---- hsrl 模块属性 ----
 hsrl = importlib.import_module('td3per.td3per_hsrl')
 src = open(MAIN, encoding='utf-8').read()
-attrs = sorted(set(re.findall(r'\bhsrl\.([A-Za-z_][A-Za-z0-9_]*)', src)))
+# 去注释后再扫（注释里的 `hsrl.HSRL_TEST_WIND_*` 会造出假属性名）
+_code_only = '\n'.join(l.split('#', 1)[0] for l in src.splitlines())
+attrs = sorted({a for a in re.findall(r'\bhsrl\.([A-Za-z_][A-Za-z0-9_]*)',
+                                      _code_only)
+                if not a.endswith('_')})
 bad = [a for a in attrs if not hasattr(hsrl, a)]
 print('\nhsrl.<name> 引用 %d 个' % len(attrs))
 if bad:
@@ -96,6 +100,7 @@ import argparse as _argparse
 import hsrl_cost as _hc
 import hsrl_soctarget as _hst
 import hsrl_warmup as _hw
+from model import normalize_arch as _norm_fn, actor_spec as _aspec_fn
 
 src_lines = open(MAIN, encoding='utf-8').read().splitlines(True)
 i0 = next(i for i, l in enumerate(src_lines)
@@ -106,6 +111,7 @@ snippet = 'if True:\n' + ''.join(src_lines[i0:i1])
 ns = dict(argparse=_argparse, np=__import__('numpy'), hc=_hc, hst=_hst,
           hwarm=_hw, hsrl=hsrl, tbr=__import__('td3per.td3per_branch',
                                               fromlist=['x']),
+          _normalize_arch=_norm_fn, _actor_spec=_aspec_fn,
           SOC_TOL=__import__('td3per.td3per_myfunc', fromlist=['x']).SOC_TOL,
           VIOL_DERATE_COEF=__import__('td3per.td3per_myfunc',
                                       fromlist=['x']).VIOL_DERATE_COEF)
@@ -210,6 +216,43 @@ if bad_stdout:
     fail += 1
     for l in bad_stdout[:5]:
         print('   ', l.strip()[:100])
+
+# ---- v7.1/v7.2/v7.3：CLI 归一化 + actor/critic 实际宽度（与 aifflor 同源）----
+print('\ncritic/actor 结构（v7.x，与 aifflor 同源）:')
+for raw, want_arch, want_shape in (('7.1', 'v7.1', 500), ('v7.1', 'v7.1', 500),
+                                   ('7.2', 'v7.2', 400), ('7.3', 'v7.3', 500),
+                                   ('v7', 'v7', 400)):
+    aa = p.parse_args(['--critic_arch', raw])
+    got = aa.critic_arch
+    ok = (got == want_arch)
+    print('  --critic_arch %-4s → %-5s %s' % (raw, got, '✓' if ok else '✗'))
+    if not ok:
+        fail += 1
+
+import types as _types
+from model import infer_arch as _infer_fn
+_ns = _types.SimpleNamespace(
+    cuda=False, seed=1, hidden1=16, hidden2=100, init_w=3e-3, prate=1e-4,
+    rate=1e-2, rmsize=256, PER_alpha=0.6, PER_beta=0.4, PER_epsilon=1e-2,
+    beta_increment_per_sampling=3e-5, nb_turbine=5, bsize=8, tau=1e-3,
+    discount=0.95, epsilon=1000, lam=1.0, lr_lam=0.1, cost_single_limit=0.5,
+    ou_theta=0.15, ou_mu=0.0, ou_sigma=0.2, na_box=5, cost_clip=0)
+for arch, want_h in (('v7', 400), ('v7.1', 500), ('v7.2', 400), ('v7.3', 500)):
+    ag = SP_TD3(nb_states=4, nb_actions=6, args=_ns, lam_max=1.0, lam_min=0.1,
+                critic_arch=arch, actor_arch=arch)
+    a_h = int(ag.actor.fc1.weight.shape[0])
+    c_inf = str(_infer_fn(ag.critic_p.state_dict(), 4, 6))
+    ok = (a_h == want_h and c_inf == arch)
+    print('  %-5s actor.fc1=%3d critic.infer=%-5s %s'
+          % (arch, a_h, c_inf, '✓' if ok else '✗'))
+    if not ok:
+        fail += 1
+    if arch in ('v7.2', 'v7.3'):
+        ok2 = (getattr(ag.actor, 'fc0', None) is not None
+               and int(ag.actor.fc0.weight.shape[0]) == 128)
+        print('        fc0(128 编码器) %s' % ('✓' if ok2 else '✗'))
+        if not ok2:
+            fail += 1
 
 print('\nRESULT', 'PASS' if fail == 0 else 'FAIL(%d)' % fail)
 sys.exit(0 if fail == 0 else 1)

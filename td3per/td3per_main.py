@@ -63,6 +63,8 @@ sys.path.insert(0, _TD3PER_DIR)
 sys.path.insert(0, _HSRL_DIR)
 
 from env import WindBattery
+from model import normalize_arch as _normalize_arch
+from model import actor_spec as _actor_spec
 from td3per.td3per_ddpg import SP_TD3
 from td3per import td3per_branch as tbr   # 同块首宽动作覆盖（branch）的全部口径
 from td3per import td3per_hsrl as hsrl    # --hsrl 分支的全部口径（与 aifflor 同口径）
@@ -2016,20 +2018,28 @@ if __name__ == "__main__":
     #   此前默认 v6（s: 4(+相位)→32→32 ∥ a: 6→64→64，cat=96→128→256→256→128→1）。
     #   `v1` = 改造前的历史结构（`--hidden1/--hidden2` 生效）⇒ 复现历史 run 请传
     #   `--critic_arch v1`。v6/v7 下 `--hidden1/--hidden2` **不生效**（宽度写死）。
-    parser.add_argument('--critic_arch', default='v7',
-                        choices=['v1', 'v1af', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7'],
+    parser.add_argument('--critic_arch', default='v7', type=_normalize_arch,
+                        choices=['v1', 'v1af', 'v2', 'v3', 'v4', 'v5', 'v6', 'v7',
+                                 'v7.1', 'v7.2', 'v7.3'],
                         help='critic/actor 结构（**默认 v7**，2026-11-04 起；此前 v6）: '
                              'v7=critic cat(s,a)→400→300→400→1 + actor s→400→300→400→a; '
+                             'v7.1=cat(s,a)→500→400→500→1 + actor s→500→400→500→a; '
+                             'v7.2=(s→128 ∥ a→128)→cat(256)→400→300→400→1 + '
+                             'actor s→128→400→300→400→a; '
+                             'v7.3=(s→128 ∥ a→128)→cat(256)→500→400→500→1 + '
+                             'actor s→128→500→400→500→a; '
                              'v6=双流(s→32→32 ∥ a→64→64)→128→256→256→128→1; '
                              'v1=历史结构（--hidden1/--hidden2 生效，复现旧 run 用）; '
-                             'v2=双流(s16-100 ∥ a32-64→square 残差); v1af=动作首层进网')
+                             'v2=双流(s16-100 ∥ a32-64→square 残差); v1af=动作首层进网; '
+                             '7.1/7.2/7.3 是 v7.1/v7.2/v7.3 的等价写法')
     parser.add_argument('--critic_act', default='relu', choices=['relu', 'leaky'],
                         help='critic 激活: relu=历史; leaky=LeakyReLU(0.01)（防死单元）')
     parser.add_argument('--critic_out_init', default='fanin', choices=['3e3', 'fanin'],
                         help='critic 输出层权重初始化: 3e3=历史(±3e-3); fanin=PyTorch 默认(±1/√fan_in)。'
                              '2026-11-05 起默认 **fanin**（与 aifflor 对齐；此前 3e3）')
-    parser.add_argument('--l_critic_arch', default='inherit',
-                        choices=['inherit', 'v1', 'v2', 'v6', 'v7'],
+    parser.add_argument('--l_critic_arch', default='inherit', type=_normalize_arch,
+                        choices=['inherit', 'v1', 'v2', 'v6', 'v7',
+                                 'v7.1', 'v7.2', 'v7.3'],
                         help='**下层 L** 的 critic 结构（默认 inherit = 与 H 相同）。'
                              'L 只有 1 维动作、每块 10 次更新 ⇒ v6/v7 在这里的算力占比比 H 高；'
                              '想省算力可传 --l_critic_arch v1（H 仍是 v7）')
@@ -2574,6 +2584,10 @@ if __name__ == "__main__":
                     if _branch_on else 0.0)
     _branch_beta = (float(getattr(args, 'branch_sup_beta', 0.0) or 0.0)
                     if _branch_on else 0.0)
+    # ---- critic/actor 结构：统一归一化（`7.1` → `v7.1`），actor 宽度由 model.actor_spec 查表 ----
+    #   v7.1/v7.2/v7.3 与 aifflor 同源（ed10532）；未列出的 arch ⇒ actor 用 --hidden1/--hidden2。
+    _arch_eff = str(_normalize_arch(str(getattr(args, 'critic_arch', 'v7') or 'v7')))
+    _aspec = _actor_spec(_arch_eff)
     agent_H = SP_TD3(nb_states=nb_states_H, nb_actions=nb_actions_H, args=args,
                      lam_max=(_HCFG['lam_max'] if _HCFG else 100.0), lam_min=(_HCFG['lam_min'] if _HCFG else 3.0),
                      ema_lam=True, ema_alpha=0.02, ema_lam_lr=0.01,
@@ -2591,19 +2605,22 @@ if __name__ == "__main__":
                      wt_noise_max=args.wt_noise_max,
                      cost_clip=args.cost_clip,
                      nstep=args.nstep, target_agg=args.target_agg,
-                     critic_arch=args.critic_arch,
+                     critic_arch=_arch_eff,
                      critic_act=args.critic_act,
                      critic_out_init=args.critic_out_init,
                      branch_mix=_branch_frac, branch_sup_beta=_branch_beta,
-                     actor_arch=('v7' if str(args.critic_arch) == 'v7' else None))
+                     actor_arch=(_arch_eff if _aspec is not None else None))
     _n_crit = sum(p.numel() for p in agent_H.critic_p.parameters())
+    if _aspec is not None:
+        _chain = ('{}→'.format(_aspec[2]) if _aspec[2] else '') + \
+                 '{}→{}→{}'.format(_aspec[0], _aspec[1], _aspec[0])
+    else:
+        _chain = '{}-{}-{}'.format(args.hidden1, args.hidden2, args.hidden1)
     prCyan('[critic] arch={} act={} out_init={} rate={} → 单个 critic 参数量 {:,} '
            '（对照: ns=4/na=6 时 v1=14,441, v6=150,081, v7=245,501）; '
            'actor={}'.format(
                agent_H.critic_arch, args.critic_act, args.critic_out_init, args.rate,
-               int(_n_crit),
-               ('400-300-400' if agent_H.actor_arch == 'v7'
-                else '{}-{}-{}'.format(args.hidden1, args.hidden2, args.hidden1))))
+               int(_n_crit), _chain))
     if _branch_on:
         prCyan('[branch] critic 批 branch 占比 = {:.2f} | 每 {} 块一次 | pilot 前 {} 块每块 | '
                'lower={} signal={} | sup_beta={} (衰减跨度 {} 块) | csv={}'.format(
@@ -2648,8 +2665,9 @@ if __name__ == "__main__":
             prior_frac=float(getattr(args, 'warmup_wt_prior_frac', hwarm.WT_PRIOR_FRAC)),
             prior_step=float(getattr(args, 'warmup_wt_prior_step', hwarm.WT_PRIOR_STEP)),
             wide_gain=float(getattr(args, 'warmup_wt_wide_gain', hwarm.WT_WIDE_GAIN)),
-            use_prior=(str(getattr(args, 'warmup_wt_sched', 'mix')) == 'mix'
-                       or bool(args.hsrl)))
+            # ⚠ aifflor 的 init_wt_action_bias 用的是**纯均匀** U[0.05,0.45]
+            #   （model.wt_bias_values），**不是** prior 混合 ⇒ `--hsrl` 下必须与它一致。
+            use_prior=(str(getattr(args, 'warmup_wt_sched', 'mix')) == 'mix'))
 
     # 下层 L: 保留 td3per 自己的 RL BESS 操作
     #   * 观测 5 维蒸馏 = [pg(t−1)/10, ptur/10, SOC/10, soc_target/10, n_rem/5]
@@ -2673,7 +2691,7 @@ if __name__ == "__main__":
                          policy_noise=args.l_policy_noise,
                          noise_clip=args.noise_clip,
                          cost_critic_mode=args.cost_critic_mode,
-                         critic_arch=(args.critic_arch
+                         critic_arch=(_arch_eff
                                       if str(args.l_critic_arch) == 'inherit'
                                       else args.l_critic_arch),
                          critic_act=args.critic_act,
@@ -2689,7 +2707,7 @@ if __name__ == "__main__":
                          noise_clip=args.noise_clip,
                          cost_critic_mode=args.cost_critic_mode,
                          # 下层 critic 结构: 默认与 H 相同（--l_critic_arch 可单独降级）
-                         critic_arch=(args.critic_arch
+                         critic_arch=(_arch_eff
                                       if str(args.l_critic_arch) == 'inherit'
                                       else args.l_critic_arch),
                          critic_act=args.critic_act,
